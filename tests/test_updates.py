@@ -285,6 +285,8 @@ class RealUpgradeTest(unittest.TestCase):
                 f"APP_VERSION = '{app.APP_VERSION}'", f"APP_VERSION = '{new_version}'", 1)
             # Seule la fonction réseau est simulée. Tout le reste est le vrai programme.
             fixture = '''
+import faulthandler
+faulthandler.dump_traceback_later(15, repeat=True)
 def github_bytes(url, limit, accept):
     if url == RELEASES_API: return (ROOT / 'release.json').read_bytes()
     return (ROOT / 'release-payload.bin').read_bytes()
@@ -317,12 +319,13 @@ def github_bytes(url, limit, accept):
                 headers = {'X-Dominis-Token': token} if token else {}
                 req = Request(url + path, headers=headers, data=json.dumps(payload).encode() if payload is not None else None)
                 with LOCAL_OPENER.open(req, timeout=2) as r: return r.read()
-            def wait(fn, timeout=30):
+            def wait(fn, timeout=30, label='condition'):
                 deadline = time.monotonic() + timeout
                 while time.monotonic() < deadline:
                     if processes and processes[-1].poll() is not None:
                         log.flush()
-                        raise AssertionError(f'Le processus Dominis s’est arrêté ({processes[-1].returncode}); log: '
+                        raise AssertionError(f'Le processus Dominis s’est arrêté pendant {label} '
+                                             f'({processes[-1].returncode}); log: '
                                              + (folder / 'test.log').read_text(encoding="utf-8"))
                     try:
                         result = fn()
@@ -330,19 +333,20 @@ def github_bytes(url, limit, accept):
                     except (OSError, ValueError): pass
                     time.sleep(.1)
                 log.flush()
-                raise AssertionError('Timeout; log: ' + (folder / 'test.log').read_text(encoding="utf-8"))
+                log_tail = ' | '.join((folder / 'test.log').read_text(encoding='utf-8').splitlines()[-8:])
+                raise AssertionError(f'Timeout pendant {label}; log: {log_tail}')
             def token():
                 return get('/').decode().split("const TOKEN='")[1].split("'", 1)[0]
             def available(tok):
                 data = json.loads(get('/api/update', tok)); return data if data['status']=='available' else None
             try:
-                p = start(); tok = wait(token)
-                self.assertFalse(wait(lambda: available(tok))['dismissed'])
+                p = start(); tok = wait(token, label='initial server token')
+                self.assertFalse(wait(lambda: available(tok), label='initial release status')['dismissed'])
                 get('/api/update/later', tok, {})
                 self.assertTrue(json.loads(get('/api/update', tok))['dismissed'])
                 get('/api/quit', tok, {}); self.assertEqual(p.wait(timeout=10), 0)
-                p = start(); tok = wait(token)
-                before = wait(lambda: available(tok)); self.assertFalse(before['dismissed'])
+                p = start(); tok = wait(token, label='server token after the first quit')
+                before = wait(lambda: available(tok), label='release status after the first quit'); self.assertFalse(before['dismissed'])
                 state_before = json.loads(get('/api/state', tok))
                 # Mise à jour effective et redémarrage réel avec le même port.
                 db_bytes_before = (folder / 'data.db').read_bytes()
@@ -350,8 +354,8 @@ def github_bytes(url, limit, accept):
                 def upgraded():
                     h = json.loads(get('/api/health'))
                     return h if h['version']==new_version and h['instance']!=before['instance'] else None
-                wait(upgraded)
-                tok = wait(token)
+                wait(upgraded, label='health check after installing the update')
+                tok = wait(token, label='session token after update')
                 after = json.loads(get('/api/state', tok))
                 self.assertEqual(after['scis'], state_before['scis'])
                 self.assertEqual(after['records'], state_before['records'])
@@ -365,16 +369,16 @@ def github_bytes(url, limit, accept):
                 self.assertIsNone(p.poll(), 'Le processus parent doit garder le lanceur ouvert.')
                 self.assertEqual(len(list(folder.glob('Dominis.py'))), 1)
                 self.assertTrue(list((folder / 'sauvegardes').glob('*.db')))
-                wait(lambda: not list(folder.glob('.dominis-update-*')))
+                wait(lambda: not list(folder.glob('.dominis-update-*')), label='update staging directory cleanup')
                 self.assertEqual((folder / 'Dominis.py').read_bytes(), raw)
                 # La version installée ne doit plus proposer la même Release.
                 def current(token):
                     state = json.loads(get('/api/update', token))
                     return state if state['status'] == 'current' else None
-                self.assertEqual(wait(lambda: current(tok))['current'], new_version)
+                self.assertEqual(wait(lambda: current(tok), label='new version status')['current'], new_version)
                 get('/api/quit', tok, {}); self.assertEqual(p.wait(timeout=10), 0)
-                p = start(); tok = wait(token)
-                self.assertEqual(wait(lambda: current(tok))['latest'], new_version)
+                p = start(); tok = wait(token, label='token after final restart')
+                self.assertEqual(wait(lambda: current(tok), label='latest version status after final restart')['latest'], new_version)
                 self.assertIsNone(json.loads(get('/api/update', tok))['restart_notice'])
                 get('/api/quit', tok, {}); self.assertEqual(p.wait(timeout=10), 0)
             finally:
