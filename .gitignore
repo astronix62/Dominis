@@ -1,0 +1,10 @@
+.venv/
+.cache/
+__pycache__/
+*.py[cod]
+.DS_Store
+Dominis/.venv/
+Dominis/sauvegardes/
+Dominis/data.db-*
+Dominis/.dominis-instance.lock
+Dominis/.dominis-update-*/
