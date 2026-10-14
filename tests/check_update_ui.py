@@ -27,7 +27,7 @@ async def main():
         await page.reload()
         await page.get_by_role('heading', name='Votre patrimoine, en perspective.').wait_for()
         assert await page.locator('#modal .modal').count() == 0
-        snapshot = {'status': 'current', 'current': 'v0.0.1', 'latest': 'v0.0.1', 'checked_at': '2026-10-14T12:00:00',
+        snapshot = {'status': 'current', 'current': 'v0.0.2', 'latest': 'v0.0.2', 'checked_at': '2026-10-14T12:00:00',
                     'message': 'Dominis est à jour.', 'dismissed': False, 'preview': False, 'instance': 'test-instance', 'restart_notice': None}
         async def mock_status(route):
             await route.fulfill(status=200, content_type='application/json', body=json.dumps(snapshot))
@@ -42,7 +42,7 @@ async def main():
         snapshot.update(status='unavailable', message='Vérification impossible : connexion indisponible.')
         await page.get_by_text('Vérification impossible', exact=True).wait_for()
         assert await page.locator('#modal .modal').count() == 0
-        snapshot.update(status='available', latest='v0.0.2', message='Une nouvelle version est disponible.')
+        snapshot.update(status='available', latest='v0.0.3', message='Une nouvelle version est disponible.')
         await page.get_by_role('dialog', name='Mise à jour disponible', exact=True).wait_for()
         await page.screenshot(path='.cache/update-offer.png', full_page=True)
         await page.get_by_role('button', name='Plus tard', exact=True).click()
@@ -71,7 +71,7 @@ async def main():
         snapshot.update(status='failed', message='Mise à jour annulée : disque plein.')
         await page.get_by_role('dialog', name='Mise à jour annulée', exact=True).wait_for()
         await page.get_by_role('button', name='Continuer avec cette version').click()
-        snapshot.update(status='current', latest='v0.0.1', message='Dominis est à jour.')
+        snapshot.update(status='current', latest='v0.0.2', message='Dominis est à jour.')
         await page.locator('#sidebar [data-nav="settings"]').click()
         await page.get_by_role('tab', name='Préférences & données').click()
         await page.locator('[data-theme="light"]').click()

@@ -32,11 +32,11 @@ class PrepareUpdateTestTests(unittest.TestCase):
         self.addCleanup(stdout_patch.stop)
 
     def test_source_version_for_requested_scenario(self):
-        self.assertEqual(self.version, 'v0.0.1')
+        self.assertEqual(self.version, 'v0.0.2')
 
     def assert_copy(self, target):
         self.assertEqual({p.name for p in target.iterdir()}, set(prepare.APP_FILES))
-        expected = self.raw.replace(b"APP_VERSION = 'v0.0.1'", b"APP_VERSION = 'v0.0.0'", 1)
+        expected = self.raw.replace(f"APP_VERSION = '{self.version}'".encode(), b"APP_VERSION = 'v0.0.0'", 1)
         self.assertEqual((target / 'Dominis.py').read_bytes(), expected)
         app.validate_update_source(expected, 'v0.0.0')
         for name in prepare.APP_FILES[1:]:
@@ -48,7 +48,7 @@ class PrepareUpdateTestTests(unittest.TestCase):
     def test_default_is_complete_dominis_folder_without_personal_data(self):
         with patch.object(prepare.Path, 'home', return_value=self.home):
             result = prepare.prepare()
-        self.assertEqual(result, self.home / 'Dominis-test' / 'Dominis')
+        self.assertEqual(result, (self.home / 'Dominis-test' / 'Dominis').resolve())
         self.assert_copy(result)
         self.assertIn('Release non vérifiée', self.stdout.getvalue())
 
@@ -89,9 +89,9 @@ class PrepareUpdateTestTests(unittest.TestCase):
         self.assertFalse(self.target.exists())
 
     def test_check_release_requires_same_tag(self):
-        data = release(self.raw, 'v0.0.2')
+        data = release(self.raw, 'v0.0.3')
         with patch.object(app, 'github_bytes', return_value=json.dumps(data).encode()), \
-             self.assertRaisesRegex(ValueError, 'dernière Release est v0.0.2'):
+             self.assertRaisesRegex(ValueError, 'dernière Release est v0.0.3'):
             prepare.verify_release(app, self.raw, self.version)
 
     def test_old_asset_and_wrong_digest_are_rejected_before_creation(self):
@@ -111,7 +111,7 @@ class PrepareUpdateTestTests(unittest.TestCase):
             prepare.prepare(self.target, check_release=True)
         self.assertEqual(network.call_count, 2)
         self.assert_copy(self.target)
-        self.assertIn('Release v0.0.1 vérifiée', self.stdout.getvalue())
+        self.assertIn(f'Release {self.version} vérifiée', self.stdout.getvalue())
 
     def test_no_github_digest_still_requires_byte_identical_download(self):
         data = release(self.raw, self.version)

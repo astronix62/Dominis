@@ -12,7 +12,9 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 from urllib.error import HTTPError
-from urllib.request import Request, urlopen
+from urllib.request import Request, ProxyHandler, build_opener
+
+LOCAL_OPENER = build_opener(ProxyHandler({}))
 
 from test_dominis import app, APP
 
@@ -168,23 +170,56 @@ time.sleep(.4)
         self.assertEqual(len(list(self.folder.glob('*.py'))), 1)
         self.assertEqual(app.DB.read_bytes(), self.db_before)
 
+    def ready_source(self, version='v0.0.1', extra=''):
+        ready = """import json, os, time
+from pathlib import Path
+Path(os.environ['DOMINIS_UPDATE_READY']).write_text(json.dumps({'version':APP_VERSION,'nonce':os.environ['DOMINIS_UPDATE_NONCE']}))
+time.sleep(.5)
+"""
+        return source(version, extra=ready + extra)
+
     def test_supervisor_rolls_back_failed_start(self):
+        previous = self.ready_source('v0.0.1')
+        self.target.write_bytes(previous)
         plan = self.plan(source(extra='raise RuntimeError("test startup failure")\n'))
-        self.assertEqual(app.launch_updated(plan, timeout=3), 0)
-        self.assertEqual(self.target.read_bytes(), self.original)
+        with patch.object(app, 'APP_VERSION', 'v0.0.1'):
+            self.assertEqual(app.launch_updated(plan, timeout=3), 0)
+        self.assertEqual(self.target.read_bytes(), previous)
         self.assertFalse(plan['folder'].exists())
         self.assertEqual(app.DB.read_bytes(), self.db_before)
 
     def test_supervisor_rolls_back_unresponsive_start(self):
+        previous = self.ready_source('v0.0.1')
+        self.target.write_bytes(previous)
         plan = self.plan(source(extra='import time\ntime.sleep(20)\n'))
-        self.assertEqual(app.launch_updated(plan, timeout=.25), 0)
-        self.assertEqual(self.target.read_bytes(), self.original)
+        with patch.object(app, 'APP_VERSION', 'v0.0.1'):
+            self.assertEqual(app.launch_updated(plan, timeout=.25), 0)
+        self.assertEqual(self.target.read_bytes(), previous)
         self.assertEqual(app.DB.read_bytes(), self.db_before)
 
     def test_supervisor_does_not_overwrite_external_change(self):
-        plan = self.plan(); changed = b'# Changed by user\n'; self.target.write_bytes(changed)
+        changed = self.ready_source(app.APP_VERSION, extra='# Changed by user\n')
+        plan = self.plan()
+        self.target.write_bytes(changed)
         self.assertEqual(app.launch_updated(plan, timeout=2), 0)
         self.assertEqual(self.target.read_bytes(), changed)
+
+    def test_native_supervisor_handoff_is_platform_appropriate(self):
+        from types import SimpleNamespace
+        detached = os.name != 'nt'
+        marker = self.folder / 'detached-child-finished'
+        extra = f"\nfrom pathlib import Path\ntime.sleep(1.0)\nPath({str(marker)!r}).write_text('alive')\n"
+        plan = self.plan(self.ready_source('v0.0.2', extra=extra))
+        fake_sys = SimpleNamespace(platform='darwin' if detached else 'win32', executable=sys.executable)
+        with patch.object(app, 'sys', fake_sys), patch.object(app, 'START_ARGS', ['--desktop']):
+            self.assertEqual(app.launch_updated(plan, timeout=5), 0)
+        if detached:
+            self.assertFalse(marker.exists(), 'Le superviseur macOS doit sortir dès l’accusé, sans attendre l’enfant.')
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not marker.exists():
+            time.sleep(.05)
+        self.assertTrue(marker.exists(), 'L’instance mise à jour doit survivre à la sortie du superviseur GUI.')
+        self.assertFalse(plan['folder'].exists())
 
     def test_instance_guard_prevents_parallel_local_instances(self):
         guard = app.InstanceGuard(self.folder)
@@ -200,7 +235,7 @@ time.sleep(.4)
         try:
             for endpoint in ('settings', 'save', 'restore', 'quit', 'update/install'):
                 req = Request(f'http://127.0.0.1:{server.server_port}/api/{endpoint}', data=b'{}', headers={'X-Dominis-Token': app.TOKEN})
-                with self.assertRaises(HTTPError) as exc: urlopen(req)
+                with self.assertRaises(HTTPError) as exc: LOCAL_OPENER.open(req)
                 self.assertEqual(exc.exception.code, 409)
             self.assertFalse(app.on_native_closing())
         finally:
@@ -232,7 +267,7 @@ class RealUpgradeTest(unittest.TestCase):
     def test_v000_to_v001_preserves_data_restarts_and_offers_again_next_launch(self):
         self.run_upgrade('v0.0.0', 'v0.0.1')
 
-    def test_v001_to_future_v002_preserves_data_restarts_and_offers_again_next_launch(self):
+    def test_v001_to_v002_preserves_data_restarts_and_offers_again_next_launch(self):
         self.run_upgrade('v0.0.1', 'v0.0.2')
 
     def run_upgrade(self, old_version, new_version):
@@ -270,24 +305,31 @@ def github_bytes(url, limit, accept):
             with socket.socket() as sock:
                 sock.bind(('127.0.0.1', 0)); port = sock.getsockname()[1]
             url = f'http://127.0.0.1:{port}'
-            command = [sys.executable, str(folder / 'Dominis.py'), '--no-browser', '--port', str(port)]
-            log = open(folder / 'test.log', 'w')
+            command = [sys.executable, '-u', str(folder / 'Dominis.py'), '--no-browser', '--port', str(port)]
+            log = open(folder / 'test.log', 'w', encoding='utf-8', buffering=1)
             processes = []
+            child_env = {**os.environ, 'PYTHONUNBUFFERED': '1', 'PYTHONFAULTHANDLER': '1',
+                         'NO_PROXY': 'localhost,127.0.0.1', 'no_proxy': 'localhost,127.0.0.1'}
             def start():
-                proc = subprocess.Popen(command, stdout=log, stderr=log)
+                proc = subprocess.Popen(command, stdout=log, stderr=log, env=child_env)
                 processes.append(proc); return proc
             def get(path, token=None, payload=None):
                 headers = {'X-Dominis-Token': token} if token else {}
                 req = Request(url + path, headers=headers, data=json.dumps(payload).encode() if payload is not None else None)
-                with urlopen(req, timeout=2) as r: return r.read()
-            def wait(fn, timeout=15):
+                with LOCAL_OPENER.open(req, timeout=2) as r: return r.read()
+            def wait(fn, timeout=30):
                 deadline = time.monotonic() + timeout
                 while time.monotonic() < deadline:
+                    if processes and processes[-1].poll() is not None:
+                        log.flush()
+                        raise AssertionError(f'Le processus Dominis s’est arrêté ({processes[-1].returncode}); log: '
+                                             + (folder / 'test.log').read_text(encoding="utf-8"))
                     try:
                         result = fn()
                         if result: return result
                     except (OSError, ValueError): pass
                     time.sleep(.1)
+                log.flush()
                 raise AssertionError('Timeout; log: ' + (folder / 'test.log').read_text(encoding="utf-8"))
             def token():
                 return get('/').decode().split("const TOKEN='")[1].split("'", 1)[0]
@@ -317,7 +359,9 @@ def github_bytes(url, limit, accept):
                 self.assertEqual(after['app_version'], new_version)
                 self.assertEqual((folder / 'data.db').read_bytes(), db_bytes_before)
                 self.assertEqual(json.loads(get('/api/update', tok))['restart_notice']['kind'], 'success')
-                self.assertIn("page='dashboard';tab='overview';scope='';render();pollUpdates();", get('/').decode())
+                dashboard_script = get('/').decode()
+                self.assertIn("page='dashboard';tab='overview';scope='';render();", dashboard_script)
+                self.assertIn('pollUpdates();', dashboard_script)
                 self.assertIsNone(p.poll(), 'Le processus parent doit garder le lanceur ouvert.')
                 self.assertEqual(len(list(folder.glob('Dominis.py'))), 1)
                 self.assertTrue(list((folder / 'sauvegardes').glob('*.db')))

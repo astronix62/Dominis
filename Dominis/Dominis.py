@@ -5,7 +5,7 @@ Seule dépendance facultative : pywebview (fenêtre native).
 """
 import ast, re, shutil, subprocess, gzip, ssl
 import argparse, base64, csv, datetime as dt, hashlib, html, io, json, mimetypes
-import os, secrets, sqlite3, sys, tempfile, threading, time, uuid, webbrowser
+import os, secrets, sqlite3, sys, tempfile, threading, time, uuid, webbrowser, warnings
 from pathlib import Path
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
@@ -4763,11 +4763,13 @@ WINDOW = None
 EXIT_READY = threading.Event()
 NATIVE_CLOSE_LOCK = threading.Lock()
 PREVIEW = False
+AUTO_SAVE_NOTICE = None
+PRIMARY_DB_MISSING = False
 KINDS = ['properties','leases','partners','loans','calls','entries','tasks','documents']
-DEFAULTS = {'theme':'dark','collapsed':False,'order':[], 'year':dt.date.today().year, 'last_page':'dashboard','last_tab':'overview','last_backup':'','owner':'Mon espace patrimonial','auto_backup':True}
+DEFAULTS = {'theme':'dark','collapsed':False,'order':[], 'year':dt.date.today().year, 'last_page':'dashboard','last_tab':'overview','last_backup':'','owner':'Mon espace patrimonial','auto_backup':True,'weekly_auto_save':True,'last_auto_save_week':''}
 
 # Les mises à jour ne remplacent que le script. Aucun téléchargement de data.db.
-APP_VERSION = 'v0.0.1'
+APP_VERSION = 'v0.0.2'
 UPDATE_PROTOCOL = 1
 DB_SCHEMA_VERSION = 1
 MIN_PYTHON = (3, 10)
@@ -4787,7 +4789,7 @@ RESTART_NOTICE = None
 
 def version_tuple(value):
     if not isinstance(value, str) or not re.fullmatch(r'v(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})', value):
-        raise ValueError('Numéro de version invalide : format attendu v0.0.1.')
+        raise ValueError('Numéro de version invalide : format attendu vMAJEUR.MINEUR.CORRECTIF.')
     return tuple(int(part) for part in value[1:].split('.'))
 
 
@@ -5045,8 +5047,25 @@ def signal_update_ready():
         os.replace(temp, ready)
 
 
+def wait_for_update_ready(child, ready, nonce, expected_version, timeout):
+    deadline = time.monotonic() + timeout
+    expected = {'version': expected_version, 'nonce': nonce}
+    while time.monotonic() < deadline:
+        if child.poll() is not None:
+            raise RuntimeError('La nouvelle instance s’est arrêtée avant de confirmer son démarrage.')
+        if ready.exists():
+            try:
+                receipt = json.loads(ready.read_text(encoding='utf-8'))
+            except (OSError, ValueError):
+                receipt = None
+            if receipt == expected:
+                return
+        time.sleep(.1)
+    raise TimeoutError('La nouvelle version n’a pas confirmé son démarrage.')
+
+
 def launch_updated(plan, timeout=60):
-    """Le processus actuel surveille le redémarrage et garde le lanceur Terminal vivant."""
+    """Supervise le démarrage ; sur macOS natif, l’ancien processus GUI sort après l’accusé."""
     global INSTANCE_GUARD
     folder, target = plan['folder'], plan['target']
     child = None
@@ -5059,47 +5078,79 @@ def launch_updated(plan, timeout=60):
     child_env = {**env, 'DOMINIS_UPDATE_READY': str(ready), 'DOMINIS_UPDATE_NONCE': nonce,
                  'DOMINIS_UPDATE_NOTICE': json.dumps({'kind': 'success', 'version': plan['version']})}
     command = [sys.executable, str(target), *START_ARGS]
-    # Le navigateur déjà ouvert attend le nouveau serveur ; ne pas créer un second onglet.
-    if '--desktop' not in START_ARGS and '--no-browser' not in command: command.append('--no-browser')
+    # En mode navigateur, le client déjà ouvert se reconnecte au même serveur.
+    if '--desktop' not in START_ARGS and '--no-browser' not in command:
+        command.append('--no-browser')
+
+    # Le superviseur doit garder la fenêtre Terminal actuelle tant que le démarrage
+    # n'est pas confirmé. Ensuite, sous macOS natif, détacher l'enfant permet au
+    # processus GUI précédent de quitter entièrement au lieu de rester dans le Dock.
+    macos_native_handoff = sys.platform == 'darwin' and '--desktop' in START_ARGS
+    child_options = ({'start_new_session': True, 'stdin': subprocess.DEVNULL,
+                      'stdout': subprocess.DEVNULL, 'stderr': subprocess.DEVNULL}
+                     if macos_native_handoff else {})
+
     try:
         if hashlib.sha256(target.read_bytes()).hexdigest() != plan['previous_hash']:
             raise ValueError('Dominis.py a changé pendant le téléchargement. Remplacement annulé.')
-        # Atomique : candidate.tmp et Dominis.py résident sur le même système de fichiers.
+        # Remplacement atomique : les fichiers temporaires et Dominis.py sont sur le même disque.
         os.replace(folder / 'candidate.tmp', target)
         replaced = True
         if INSTANCE_GUARD:
-            INSTANCE_GUARD.close(); INSTANCE_GUARD = None
-        child = subprocess.Popen(command, cwd=str(target.parent), env=child_env)
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if child.poll() is not None: raise RuntimeError('La nouvelle version s’est arrêtée au démarrage.')
-            if ready.exists():
-                receipt = json.loads(ready.read_text())
-                if receipt == {'version': plan['version'], 'nonce': nonce}: break
-            time.sleep(.1)
-        else: raise TimeoutError('La nouvelle version n’a pas confirmé son démarrage.')
+            INSTANCE_GUARD.close()
+            INSTANCE_GUARD = None
+        child = subprocess.Popen(command, cwd=str(target.parent), env=child_env, **child_options)
+        wait_for_update_ready(child, ready, nonce, plan['version'], timeout)
     except Exception as e:
         print('Mise à jour non finalisée : ' + str(e), flush=True)
         if child and child.poll() is None:
             child.terminate()
-            try: child.wait(timeout=10)
-            except subprocess.TimeoutExpired: child.kill(); child.wait()
+            try:
+                child.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait()
         try:
-            if replaced: os.replace(folder / 'previous.tmp', target)
+            if replaced:
+                os.replace(folder / 'previous.tmp', target)
             if INSTANCE_GUARD:
-                INSTANCE_GUARD.close(); INSTANCE_GUARD = None
-            recovery_env = {**env, 'DOMINIS_UPDATE_NOTICE': json.dumps({
-                'kind': 'rollback', 'message': 'La mise à jour a échoué. La version précédente a été conservée. ' + str(e)})}
-            child = subprocess.Popen(command, cwd=str(target.parent), env=recovery_env)
+                INSTANCE_GUARD.close()
+                INSTANCE_GUARD = None
+            recovery_ready = folder / 'recovery-ready.json'
+            recovery_nonce = secrets.token_hex(24)
+            recovery_env = {**env, 'DOMINIS_UPDATE_READY': str(recovery_ready),
+                            'DOMINIS_UPDATE_NONCE': recovery_nonce,
+                            'DOMINIS_UPDATE_NOTICE': json.dumps({
+                                'kind': 'rollback',
+                                'message': 'La mise à jour a échoué. La version précédente a été conservée. ' + str(e)})}
+            child = subprocess.Popen(command, cwd=str(target.parent), env=recovery_env, **child_options)
+            wait_for_update_ready(child, recovery_ready, recovery_nonce, APP_VERSION, timeout)
         except Exception as recovery_error:
-            # Conserver previous.tmp si le disque refuse la restauration ; ne jamais toucher à la base.
+            if child and child.poll() is None:
+                child.terminate()
+                try:
+                    child.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait()
+            # Conserver previous.tmp si la restauration ou le redémarrage échoue.
             print('Redémarrage impossible : ' + str(recovery_error) + '\nFichiers de récupération : ' + str(folder), flush=True)
             return 1
+
     shutil.rmtree(folder, ignore_errors=True)
-    # Le shell du lanceur ne se termine qu’à la fermeture de la nouvelle application.
-    try: return child.wait()
+    # Le processus GUI précédent ne reste pas en arrière-plan dans le Dock macOS.
+    # Le nouvel enfant est détaché de Terminal et a déjà confirmé son démarrage.
+    if macos_native_handoff:
+        # La durée de vie de l'enfant est désormais indépendante ; éviter le
+        # ResourceWarning normal de Popen quand son parent volontairement sort.
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', ResourceWarning)
+            del child
+        return 0
+    # Sur les autres plateformes, conserver le comportement du lanceur existant.
+    try:
+        return child.wait()
     except KeyboardInterrupt:
-        # Ctrl+C est également reçu par l’enfant qui assure sa propre fermeture.
         return child.wait()
 
 
@@ -5171,7 +5222,7 @@ def state(c):
     records=[]
     for r in c.execute('SELECT * FROM records ORDER BY rowid'):
         d=unpack(r); d.pop('blob',None); records.append(d)
-    return {'scis':[unpack(r) for r in c.execute('SELECT * FROM scis ORDER BY rowid')], 'records':records, 'settings':settings(c),'audit':[dict(r) for r in c.execute('SELECT * FROM audit ORDER BY id DESC LIMIT 80')], 'preview':PREVIEW,'native':WINDOW is not None,'db_size':DB.stat().st_size,'saved_at':now(),'app_version':APP_VERSION}
+    return {'scis':[unpack(r) for r in c.execute('SELECT * FROM scis ORDER BY rowid')], 'records':records, 'settings':settings(c),'audit':[dict(r) for r in c.execute('SELECT * FROM audit ORDER BY id DESC LIMIT 80')], 'preview':PREVIEW,'native':WINDOW is not None,'db_size':DB.stat().st_size,'saved_at':now(),'app_version':APP_VERSION,'primary_db_missing':PRIMARY_DB_MISSING,'auto_save_notice':AUTO_SAVE_NOTICE}
 
 def clean(kind,data):
     if not isinstance(data,dict): raise ValueError('Données invalides.')
@@ -5262,6 +5313,122 @@ def make_safety_backup():
     with connect() as c: raw=backup_bytes(c)
     durable_write(folder/('dominis-'+dt.datetime.now().strftime('%Y%m%d-%H%M%S-%f')+'.db'), raw)
 
+
+AUTO_SAVE_FILENAME = re.compile(r'^(\d{4}-\d{2}-\d{2})-save\.db$')
+
+
+def auto_save_week(day):
+    iso = day.isocalendar()
+    return f'{iso.year:04d}-W{iso.week:02d}'
+
+
+def auto_save_files(folder=None):
+    """Retourne uniquement les copies Dominis datées, dans l'ordre ancien → récent."""
+    folder = Path(folder) if folder is not None else DB.parent / 'auto-save'
+    if not folder.is_dir():
+        return []
+    found = []
+    for path in folder.iterdir():
+        match = AUTO_SAVE_FILENAME.fullmatch(path.name)
+        if not match or path.is_symlink() or not path.is_file():
+            continue
+        try:
+            saved_on = dt.date.fromisoformat(match.group(1))
+        except ValueError:
+            continue
+        found.append((saved_on, path))
+    return [path for _, path in sorted(found, key=lambda item: (item[0], item[1].name))]
+
+
+def primary_db_has_recovery_copies():
+    """Signale une base principale manquante sans jamais sélectionner une copie comme DB."""
+    return not DB.is_file() and bool(auto_save_files(DB.parent / 'auto-save'))
+
+
+def prune_auto_save_files(folder=None, keep=2):
+    """Après une sauvegarde réussie, ne conserver que les deux copies les plus récentes."""
+    files = auto_save_files(folder)
+    for path in files[:-keep] if keep else files:
+        path.unlink()
+    return auto_save_files(folder)
+
+
+def write_database_snapshot(source, destination):
+    """Écrit un instantané SQLite cohérent, validé et publié atomiquement."""
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.resolve() == DB.resolve():
+        raise ValueError('Une sauvegarde ne peut pas remplacer data.db.')
+    fd, temporary = tempfile.mkstemp(prefix='.auto-save-', suffix='.tmp', dir=str(destination.parent))
+    os.close(fd)
+    try:
+        snapshot = sqlite3.connect(temporary, timeout=20)
+        try:
+            source.backup(snapshot)
+        finally:
+            snapshot.close()
+        verification = sqlite3.connect(temporary, timeout=20)
+        try:
+            if verification.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
+                raise ValueError('La copie SQLite créée est invalide.')
+        finally:
+            verification.close()
+        with open(temporary, 'rb+') as output:
+            output.flush()
+            os.fsync(output.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, destination)
+        if os.name != 'nt':
+            try:
+                directory_fd = os.open(destination.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            except OSError:
+                pass
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def maybe_create_weekly_auto_save(today=None):
+    """Crée au plus une copie par semaine ISO, sans jamais ouvrir la copie comme base."""
+    if PREVIEW:
+        return None
+    today = today or dt.date.today()
+    week = auto_save_week(today)
+    folder = DB.parent / 'auto-save'
+    filename = today.isoformat() + '-save.db'
+    with LOCK:
+        with connect() as c:
+            st = settings(c)
+            if not st.get('weekly_auto_save', True):
+                prune_auto_save_files(folder, keep=2)
+                return None
+            folder.mkdir(parents=True, exist_ok=True)
+            # La recherche dans le dossier couvre aussi une restauration d'une copie
+            # qui ne contenait pas encore le marqueur de la semaine courante.
+            existing_this_week = [
+                path for path in auto_save_files(folder)
+                if auto_save_week(dt.date.fromisoformat(AUTO_SAVE_FILENAME.fullmatch(path.name).group(1))) == week
+            ]
+            if st.get('last_auto_save_week') == week or existing_this_week:
+                if st.get('last_auto_save_week') != week:
+                    st['last_auto_save_week'] = week
+                    c.execute("UPDATE meta SET value=? WHERE key='settings'", (json.dumps(st),))
+                prune_auto_save_files(folder, keep=2)
+                return None
+            if c.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
+                raise ValueError('L’intégrité de data.db doit être rétablie avant la sauvegarde hebdomadaire.')
+            destination = folder / filename
+            write_database_snapshot(c, destination)
+            st['last_auto_save_week'] = week
+            c.execute("UPDATE meta SET value=? WHERE key='settings'", (json.dumps(st),))
+            c.commit()
+        # La copie est validée et le marqueur enregistré : on peut maintenant supprimer l’ancienne.
+        prune_auto_save_files(folder, keep=2)
+        return destination
+
 def export_bundle(c,p):
     ids=p.get('scis',[]); kinds=p.get('kinds',[])
     if not ids or not kinds: raise ValueError('Sélectionnez au moins une SCI et un type de données.')
@@ -5345,6 +5512,7 @@ def import_bundle(c,p):
     return len(rows)
 
 def restore(raw):
+    global PRIMARY_DB_MISSING, AUTO_SAVE_NOTICE
     if len(raw)>100*1024*1024 or not raw.startswith(b'SQLite format 3\x00'): raise ValueError('Sauvegarde SQLite non valide (100 Mo maximum).')
     fd,p=tempfile.mkstemp(suffix='.db'); os.close(fd)
     try:
@@ -5369,6 +5537,8 @@ def restore(raw):
             audit(c,'Restauration','Sauvegarde complète restaurée ; copie préalable dans sauvegardes/.')
     except sqlite3.Error: raise ValueError('Ce fichier n’est pas une sauvegarde Dominis valide.')
     finally: Path(p).unlink(missing_ok=True)
+    PRIMARY_DB_MISSING = False
+    AUTO_SAVE_NOTICE = None
 
 def sync_exit():
     with LOCK:
@@ -5714,10 +5884,10 @@ if(kind==='loans')intro='<div class="notice">Capital restant dû et mensualités
 if(kind==='partners')intro='<div class="notice">La participation est calculée sur les parts renseignées. Les comptes courants sont des soldes déclarés, à rapprocher de la comptabilité ; ils ne génèrent pas d’opérations de trésorerie.</div>';
 return `${!id?head(title,'Une vision centralisée, avec une affectation explicite à chaque SCI.',buttons):`<div class="section-title"><h2>${title}</h2><div class="toolbar">${buttons}</div></div>`}${intro}${tableFilters(kind,id)}<div id="listing">${listing(kind,id)}</div>${kind==='calls'?'<p class="compact-note">Un paiement peut être partiel. La quittance est disponible uniquement après règlement intégral du loyer et des charges. Les appels générés sont mensuels, à ajuster en cas de prorata.</p>':''}`;}
 function identity(s){return `<div class="settings-grid"><div class="panel"><div class="panel-head"><h2>Identité de la société</h2><button data-action="edit-sci">${icon('edit')} Modifier</button></div><div class="panel-body info-grid">${[['Dénomination',s.name],['SIREN',s.siren||'Non renseigné'],['Gérant',s.manager||'Non renseigné'],['Siège social',s.address||'Non renseigné'],['Capital social',money(s.capital,2)],['Régime fiscal',s.regime||'IR'],['Clôture de l’exercice',s.closing||'31/12'],['Solde d’ouverture',money(s.opening,2)+' au '+date(s.opening_date)]].map(([k,v])=>`<div class="info-item"><label>${k}</label><span>${esc(v)}</span></div>`).join('')}<div class="info-item" style="grid-column:1/-1"><label>Notes de gestion</label><span style="white-space:pre-wrap">${esc(s.notes||'Aucune note.')}</span></div></div></div><div class="stack"><div class="panel"><div class="panel-head"><h2>Repères de gestion · ${esc(s.regime||'IR')}</h2></div><div class="panel-body stack"><p class="sub">${s.regime==='IS'?'Préparer la déclaration 2065 et ses annexes avec une comptabilité d’engagement, les immobilisations et les amortissements. Dominis ne produit pas de liasse fiscale ni de FEC.':'Préparer les informations de la déclaration 2072 selon votre situation. Les recettes et dépenses enregistrées ne déterminent pas automatiquement le résultat foncier imposable.'}</p><p class="sub">Le gérant doit rendre compte annuellement de sa gestion aux associés (article 1856 du Code civil). Les modalités de décision dépendent notamment des statuts.</p><button data-add="tasks">${icon('calendar')} Ajouter une échéance de suivi</button><button data-action="annual-report">${icon('file')} Préparer une synthèse annuelle</button><p class="sub">Les dates fiscales sont à vérifier chaque année. Aucun calendrier légal automatique n’est imposé par l’application.</p></div></div><div class="panel"><div class="panel-body"><h3 class="red">Suppression de la SCI</h3><p class="sub" style="margin:8px 0 15px">Cette action supprime la société et toutes ses données liées. Exportez une sauvegarde complète auparavant.</p><button class="danger" data-action="delete-sci">${icon('trash')} Supprimer cette SCI</button></div></div></div></div>`;}
-function settingsGeneral(){return `<div class="settings-grid"><div class="stack"><section class="panel"><div class="panel-head"><h2>Apparence & préférences</h2>${icon('sun')}</div><div class="panel-body"><div class="setting-row"><div><h3>Thème de l’interface</h3><p>Le même soin, de jour comme de nuit.</p></div><div class="theme-choice"><button data-theme="dark" class="${S.settings.theme==='dark'?'active':''}">${icon('moon')} Sombre</button><button data-theme="light" class="${S.settings.theme==='light'?'active':''}">${icon('sun')} Clair</button></div></div><div class="setting-row"><div><h3>Navigation compacte</h3><p>Une barre latérale discrète, plus d’espace.</p></div><button class="toggle ${S.settings.collapsed?'on':''}" data-action="collapse" aria-label="Navigation compacte" aria-pressed="${!!S.settings.collapsed}"></button></div><div class="setting-row"><div><h3>Nom de votre espace</h3><p>Affiché dans la barre latérale.</p></div><button data-action="rename-space">${icon('edit')} Modifier</button></div><div class="setting-row"><div><h3>Sauvegarde à la fermeture</h3><p>Copie complète dans le dossier sauvegardes/.</p></div><button class="toggle ${S.settings.auto_backup?'on':''}" data-action="auto-backup" aria-label="Sauvegarde automatique" aria-pressed="${!!S.settings.auto_backup}"></button></div></div></section><section class="panel"><div class="panel-head"><h2>Ordre de navigation</h2>${icon('panel')}</div><div class="panel-body"><p class="sub">Déplacez les pages avec les flèches. Vos nouvelles SCI apparaissent automatiquement.</p><div class="order-item locked">${icon('grid')} Tableau de bord <span style="margin-left:auto">${icon('lock')}</span></div>${navOrder().map((id,i,a)=>`<div class="order-item">${navIcon(id)}${esc(navName(id))}<div class="actions"><button data-move="${id}" data-dir="-1" ${!i?'disabled':''} title="Monter">${icon('up')}</button><button data-move="${id}" data-dir="1" ${i===a.length-1?'disabled':''} title="Descendre">${icon('down')}</button></div></div>`).join('')}<div class="order-item locked">${icon('settings')} Paramètres <span style="margin-left:auto">${icon('lock')}</span></div><p class="compact-note">Tableau de bord reste en premier, Paramètres en dernier. Quitter est une action distincte.</p></div></section></div><div class="stack"><section class="panel"><div class="panel-head"><h2>Vos données vous appartiennent</h2>${icon('database')}</div><div class="panel-body"><div class="setting-row"><div><h3>Importer des données</h3><p>JSON Dominis ou CSV de mouvements multi-SCI.<br>Aperçu et destinations avant validation.</p></div><button data-action="import">${icon('upload')} Importer</button></div><div class="setting-row"><div><h3>Exporter une sélection</h3><p>Choisissez les SCI, les données et le format.</p></div><button data-action="export">${icon('download')} Exporter</button></div><div class="setting-row"><div><h3>Sauvegarde complète</h3><p>Toutes les SCI, pièces jointes et préférences.<br>${S.settings.last_backup?'Dernière : '+new Date(S.settings.last_backup).toLocaleString('fr-FR'):'Aucune sauvegarde manuelle enregistrée.'}</p></div><button class="primary" data-action="backup">${icon('database')} Sauvegarder</button></div><div class="setting-row"><div><h3>Restaurer une sauvegarde</h3><p>Remplace l’ensemble de l’espace. Une copie<br>de sécurité est créée avant restauration.</p></div><button data-action="restore">${icon('clock')} Restaurer</button></div></div></section><section class="panel"><div class="panel-head"><h2>Stockage & confidentialité</h2>${icon('lock')}</div><div class="panel-body stack"><div class="row between"><span class="sub">Base locale</span><span class="pill green"><span class="status-dot"></span>data.db · ${num(S.db_size/1024/1024)} Mo</span></div><p class="sub">Aucune télémétrie. La gestion de vos données fonctionne hors ligne. Seule la vérification des versions contacte GitHub, sans transmettre vos données patrimoniales. Documents, réglages et historique sont stockés dans SQLite. La base n’est pas chiffrée : protégez votre session et vos sauvegardes.</p><p class="sub">Usage local, mono-utilisateur. Ne placez pas une base ouverte sur un partage réseau ou dans une synchronisation cloud.</p>${S.preview?'<div class="notice" style="margin:0">Aperçu hébergé : utilisez des données fictives uniquement. Le téléchargement et les lanceurs sont destinés à l’usage local.</div>':''}</div></section>${S.settings.demo?`<section class="panel"><div class="panel-body"><h3>Données de démonstration</h3><p class="sub" style="margin:8px 0 14px">Efface toutes les données de cet espace démo, y compris vos ajouts. Sauvegardez-les avant de repartir d’un espace vierge.</p><button class="danger" data-action="reset-demo">${icon('trash')} Vider l’espace de démonstration</button></div></section>`:''}</div><section class="panel" style="grid-column:1/-1"><div class="panel-head"><h2>Journal d’activité</h2><span class="sub">80 dernières actions</span></div><div class="panel-body audit-list">${S.audit.map(r=>`<div class="audit-line"><time>${esc(new Date(r.at).toLocaleString('fr-FR'))}</time><strong style="min-width:90px">${esc(r.action)}</strong><span class="muted">${esc(r.detail)}</span></div>`).join('')||'<p class="sub">Aucune action enregistrée.</p>'}</div></section></div>`;}
+function settingsGeneral(){return `<div class="settings-grid"><div class="stack"><section class="panel"><div class="panel-head"><h2>Apparence & préférences</h2>${icon('sun')}</div><div class="panel-body"><div class="setting-row"><div><h3>Thème de l’interface</h3><p>Le même soin, de jour comme de nuit.</p></div><div class="theme-choice"><button data-theme="dark" class="${S.settings.theme==='dark'?'active':''}">${icon('moon')} Sombre</button><button data-theme="light" class="${S.settings.theme==='light'?'active':''}">${icon('sun')} Clair</button></div></div><div class="setting-row"><div><h3>Navigation compacte</h3><p>Une barre latérale discrète, plus d’espace.</p></div><button class="toggle ${S.settings.collapsed?'on':''}" data-action="collapse" aria-label="Navigation compacte" aria-pressed="${!!S.settings.collapsed}"></button></div><div class="setting-row"><div><h3>Nom de votre espace</h3><p>Affiché dans la barre latérale.</p></div><button data-action="rename-space">${icon('edit')} Modifier</button></div><div class="setting-row"><div><h3>Sauvegarde à la fermeture</h3><p>Copie complète dans le dossier sauvegardes/.</p></div><button class="toggle ${S.settings.auto_backup?'on':''}" data-action="auto-backup" aria-label="Sauvegarde à la fermeture" aria-pressed="${!!S.settings.auto_backup}"></button></div><div class="setting-row"><div><h3>Sauvegarde hebdomadaire</h3><p>Copie de data.db au premier lancement de la semaine ; deux fichiers maximum dans auto-save/.</p></div><button class="toggle ${S.settings.weekly_auto_save?'on':''}" data-action="weekly-auto-save" aria-label="Sauvegarde hebdomadaire" aria-pressed="${!!S.settings.weekly_auto_save}"></button></div></div></section><section class="panel"><div class="panel-head"><h2>Ordre de navigation</h2>${icon('panel')}</div><div class="panel-body"><p class="sub">Déplacez les pages avec les flèches. Vos nouvelles SCI apparaissent automatiquement.</p><div class="order-item locked">${icon('grid')} Tableau de bord <span style="margin-left:auto">${icon('lock')}</span></div>${navOrder().map((id,i,a)=>`<div class="order-item">${navIcon(id)}${esc(navName(id))}<div class="actions"><button data-move="${id}" data-dir="-1" ${!i?'disabled':''} title="Monter">${icon('up')}</button><button data-move="${id}" data-dir="1" ${i===a.length-1?'disabled':''} title="Descendre">${icon('down')}</button></div></div>`).join('')}<div class="order-item locked">${icon('settings')} Paramètres <span style="margin-left:auto">${icon('lock')}</span></div><p class="compact-note">Tableau de bord reste en premier, Paramètres en dernier. Quitter est une action distincte.</p></div></section></div><div class="stack"><section class="panel"><div class="panel-head"><h2>Vos données vous appartiennent</h2>${icon('database')}</div><div class="panel-body"><div class="setting-row"><div><h3>Importer des données</h3><p>JSON Dominis ou CSV de mouvements multi-SCI.<br>Aperçu et destinations avant validation.</p></div><button data-action="import">${icon('upload')} Importer</button></div><div class="setting-row"><div><h3>Exporter une sélection</h3><p>Choisissez les SCI, les données et le format.</p></div><button data-action="export">${icon('download')} Exporter</button></div><div class="setting-row"><div><h3>Sauvegarde complète</h3><p>Toutes les SCI, pièces jointes et préférences.<br>${S.settings.last_backup?'Dernière : '+new Date(S.settings.last_backup).toLocaleString('fr-FR'):'Aucune sauvegarde manuelle enregistrée.'}</p></div><button class="primary" data-action="backup">${icon('database')} Sauvegarder</button></div><div class="setting-row"><div><h3>Restaurer une sauvegarde</h3><p>Remplace l’ensemble de l’espace. Une copie<br>de sécurité est créée avant restauration.</p></div><button data-action="restore">${icon('clock')} Restaurer</button></div></div></section><section class="panel"><div class="panel-head"><h2>Stockage & confidentialité</h2>${icon('lock')}</div><div class="panel-body stack"><div class="row between"><span class="sub">Base locale</span><span class="pill green"><span class="status-dot"></span>data.db · ${num(S.db_size/1024/1024)} Mo</span></div><p class="sub">Aucune télémétrie. La gestion de vos données fonctionne hors ligne. Seule la vérification des versions contacte GitHub, sans transmettre vos données patrimoniales. Documents, réglages et historique sont stockés dans SQLite. La base n’est pas chiffrée : protégez votre session et vos sauvegardes.</p><p class="sub">Usage local, mono-utilisateur. Ne placez pas une base ouverte sur un partage réseau ou dans une synchronisation cloud.</p>${S.preview?'<div class="notice" style="margin:0">Aperçu hébergé : utilisez des données fictives uniquement. Le téléchargement et les lanceurs sont destinés à l’usage local.</div>':''}</div></section>${S.settings.demo?`<section class="panel"><div class="panel-body"><h3>Données de démonstration</h3><p class="sub" style="margin:8px 0 14px">Efface toutes les données de cet espace démo, y compris vos ajouts. Sauvegardez-les avant de repartir d’un espace vierge.</p><button class="danger" data-action="reset-demo">${icon('trash')} Vider l’espace de démonstration</button></div></section>`:''}</div><section class="panel" style="grid-column:1/-1"><div class="panel-head"><h2>Journal d’activité</h2><span class="sub">80 dernières actions</span></div><div class="panel-body audit-list">${S.audit.map(r=>`<div class="audit-line"><time>${esc(new Date(r.at).toLocaleString('fr-FR'))}</time><strong style="min-width:90px">${esc(r.action)}</strong><span class="muted">${esc(r.detail)}</span></div>`).join('')||'<p class="sub">Aucune action enregistrée.</p>'}</div></section></div>`;}
 function render(){if(!['dashboard','settings',...Object.keys(navs),...S.scis.map(s=>s.id)].includes(page))page='dashboard';renderShell();let content='';if(page==='dashboard'){content=head('Votre patrimoine, en perspective.','L’essentiel de vos sociétés, réuni au même endroit.',yearSelect()+exportBtn()+`<button class="primary" data-action="new-sci">${icon('plus')} Nouvelle SCI</button>`,'Tableau de bord général')+(S.scis.length?dashboard():empty('Bienvenue dans votre espace patrimonial','Créez votre première SCI. Son espace de gestion apparaîtra automatiquement dans la navigation.',`<button class="primary" data-action="new-sci">${icon('plus')} Créer ma première SCI</button>`));}
 else if(page==='settings')content=settingsPage();else if(navs[page])content=listPage({treasury:'entries',agenda:'tasks',documents:'documents'}[page]);else{let s=currentSCI();content=head(s.name,(s.city||s.address||'Société civile immobilière')+' · Régime '+(s.regime||'IR'),yearSelect()+`<button data-action="edit-sci">${icon('edit')} Société</button>`+`<button class="primary" data-action="quick">${icon('plus')} Ajouter</button>`,'Espace société')+`<nav class="tabs" aria-label="Gestion de la SCI">${tabs.map(([t,n])=>`<button class="tab ${tab===t?'active':''}" data-tab="${t}">${n}</button>`).join('')}</nav>`+(tab==='overview'?dashboard(s.id):tab==='identity'?identity(s):listPage(tab,s.id));}
-$('#main').innerHTML=content+`<div class="footer"><span>DOMINIS <span style="opacity:.5;margin:0 7px">/</span> Votre patrimoine, en toute clarté.</span><span class="row gap8">${icon('lock')} Enregistrement local · Outil de gestion, hors comptabilité certifiée</span></div>`;updateCount();}
+const recoveryNotice=S.primary_db_missing?`<div class="notice" role="alert" style="border-left-color:var(--red)"><strong>La base principale data.db était absente.</strong> Dominis a créé une base vide ; les fichiers de auto-save/ ne sont pas utilisés comme base. Avant toute nouvelle saisie, restaurez une copie dans data.db.<div style="margin-top:10px"><button class="danger" data-action="restore">${icon('clock')} Restaurer une sauvegarde</button></div></div>`:'';$('#main').innerHTML=recoveryNotice+content+`<div class="footer"><span>DOMINIS <span style="opacity:.5;margin:0 7px">/</span> Votre patrimoine, en toute clarté.</span><span class="row gap8">${icon('lock')} Enregistrement local · Outil de gestion, hors comptabilité certifiée</span></div>`;updateCount();}
 function updateCount(){let el=$('#list-count');if(el){let k=navs[page]?{treasury:'entries',agenda:'tasks',documents:'documents'}[page]:tab;el.textContent=filtered(k,currentSCI()?.id).length+' éléments';}}
 function renderListing(){let k=navs[page]?{treasury:'entries',agenda:'tasks',documents:'documents'}[page]:tab;if($('#listing')){$('#listing').innerHTML=listing(k,currentSCI()?.id);updateCount();}}
 function openModal(title,body,footer='',wide=false){previousFocus=document.activeElement;modalDirty=false;$('#modal').innerHTML=`<div class="modal-backdrop"><div class="modal ${wide?'wide':''}" role="dialog" aria-modal="true" aria-label="${esc(title)}"><div class="modal-head"><h2>${esc(title)}</h2><button class="ghost icon-only" data-action="close-modal" aria-label="Fermer">${icon('close')}</button></div><div class="modal-content">${body}<div id="modal-error"></div></div>${footer?`<div class="modal-footer">${footer}</div>`:''}</div></div>`;setTimeout(()=>$('#modal input:not([type=hidden]),#modal select,#modal button')?.focus(),30);}
@@ -5765,7 +5935,7 @@ function receipt(id){let c=rec(id),l=rec(c.lease_id),s=sci(c.sci),p=rec(l?.prope
 function searchModal(){openModal('Retrouver l’essentiel',`<input id="global-search" type="search" placeholder="Une SCI, un locataire, un bien, un document…" aria-label="Recherche globale"><div id="search-results" class="search-results" style="margin-top:15px"></div>`);let search=()=>{let q=$('#global-search').value.toLowerCase().trim();let list=[...S.scis.map(s=>({...s,kind:'sci'})),...S.records].filter(r=>q&&Object.values(r).some(v=>typeof v==='string'&&v.toLowerCase().includes(q))).slice(0,30);$('#search-results').innerHTML=list.map(r=>`<button class="search-result" data-search-go="${r.id}" data-search-kind="${r.kind}">${icon(r.kind==='sci'?'building':'file')}<span>${esc(label(r))}<small>${r.kind==='sci'?'Société':esc(sciname(r.sci))+' · '+kindNames[r.kind]}</small></span></button>`).join('')||`<p class="sub">${q?'Aucun résultat.':'La recherche porte sur toutes les SCI et les métadonnées des documents.'}</p>`;};$('#global-search').oninput=search;search();}
 async function quit(){if(closing||updateInstalling)return;if($('#modal').innerHTML&&modalDirty&&!confirm('Des modifications de formulaire ne sont pas enregistrées. Les abandonner et quitter ?'))return;openModal('Quitter en toute sérénité',`<p>Les écritures enregistrées et les réglages seront synchronisés, puis l’intégrité de la base sera vérifiée.</p><p class="sub" style="margin-top:12px">${S.settings.auto_backup?'Une sauvegarde complète sera créée dans sauvegardes/. ':''}${S.preview?'Mode aperçu : le service de démonstration restera disponible.':S.native?'La fenêtre et le processus local seront fermés.':'En mode navigateur, la fermeture automatique de l’onglet peut être bloquée ; le serveur sera bien arrêté.'}</p>`,`<button data-action="close-modal">Rester dans Dominis</button><button class="primary" id="confirm-quit">${icon('exit')} Enregistrer et quitter</button>`);$('#confirm-quit').onclick=async()=>{closing=true;$('#confirm-quit').disabled=true;try{await settingsQueue;await api('quit',{});closeModal(true);if(S.preview){notify('Intégrité vérifiée, données sauvegardées. Le service reste actif dans cet aperçu.');await refresh();}else{$('#main').innerHTML=empty('Votre espace est fermé.','Toutes les données enregistrées ont été sauvegardées. Vous pouvez fermer cet onglet.');setTimeout(()=>window.close(),400);}}catch(e){modalError(e);$('#confirm-quit')&&($('#confirm-quit').disabled=false);}finally{closing=false;}};}
 function quickModal(){openModal('Une action, sans détour',`<div class="checks">${Object.entries(kindNames).map(([k,n])=>`<button data-add="${k}" style="justify-content:flex-start">${icon('plus')}${n}</button>`).join('')}</div>`);}
-async function handleAction(a){switch(a){case'collapse':await setPref({collapsed:!S.settings.collapsed});document.body.classList.toggle('collapsed',!!S.settings.collapsed);if(page==='settings')render();break;case'new-sci':editForm('sci');break;case'edit-sci':editForm('sci',currentSCI());break;case'delete-sci':deletion('sci',page);break;case'close-modal':closeModal();break;case'export':exportModal();break;case'import':importModal();break;case'backup':await settingsQueue;await download(await api('backup',{}),'dominis-sauvegarde-'+today()+'.db');await refresh();notify('Sauvegarde complète téléchargée. Conservez-la sur un support sûr.');break;case'restore':restoreModal();break;case'generate-calls':callsModal();break;case'search':searchModal();break;case'quick':quickModal();break;case'annual-report':annualReport();break;case'quit':await quit();break;case'auto-backup':await setPref({auto_backup:!S.settings.auto_backup});render();break;case'rename-space':openModal('Nom de votre espace',field('owner','Nom affiché','text',S.settings.owner),`<button data-action="close-modal">Annuler</button><button class="primary" id="save-owner">Enregistrer</button>`);$('#save-owner').onclick=async()=>{try{let v=$('#f-owner').value.trim();if(!v||v.length>45)throw new Error('Choisissez un nom de 1 à 45 caractères.');await setPref({owner:v});closeModal(true);render();}catch(e){modalError(e)}};break;case'reset-demo':openModal('Repartir d’un espace vierge',`<p class="sub">Toutes les SCI et données de cette démonstration seront supprimées, y compris vos ajouts. Vos préférences d’apparence sont conservées. Créez une sauvegarde avant de continuer.</p><div style="margin-top:15px">${field('confirm-demo','Saisissez EFFACER pour confirmer')}</div>`,`<button data-action="close-modal">Annuler</button><button class="danger" id="reset-confirm">Vider la démonstration</button>`);$('#reset-confirm').onclick=async()=>{try{await api('reset-demo',{confirmation:$('#f-confirm-demo').value});closeModal(true);page='dashboard';await refresh();notify('Votre espace est maintenant vierge.');}catch(e){modalError(e)}};break;}}
+async function handleAction(a){switch(a){case'collapse':await setPref({collapsed:!S.settings.collapsed});document.body.classList.toggle('collapsed',!!S.settings.collapsed);if(page==='settings')render();break;case'new-sci':editForm('sci');break;case'edit-sci':editForm('sci',currentSCI());break;case'delete-sci':deletion('sci',page);break;case'close-modal':closeModal();break;case'export':exportModal();break;case'import':importModal();break;case'backup':await settingsQueue;await download(await api('backup',{}),'dominis-sauvegarde-'+today()+'.db');await refresh();notify('Sauvegarde complète téléchargée. Conservez-la sur un support sûr.');break;case'restore':restoreModal();break;case'generate-calls':callsModal();break;case'search':searchModal();break;case'quick':quickModal();break;case'annual-report':annualReport();break;case'quit':await quit();break;case'auto-backup':await setPref({auto_backup:!S.settings.auto_backup});render();break;case'weekly-auto-save':await setPref({weekly_auto_save:!S.settings.weekly_auto_save});render();break;case'rename-space':openModal('Nom de votre espace',field('owner','Nom affiché','text',S.settings.owner),`<button data-action="close-modal">Annuler</button><button class="primary" id="save-owner">Enregistrer</button>`);$('#save-owner').onclick=async()=>{try{let v=$('#f-owner').value.trim();if(!v||v.length>45)throw new Error('Choisissez un nom de 1 à 45 caractères.');await setPref({owner:v});closeModal(true);render();}catch(e){modalError(e)}};break;case'reset-demo':openModal('Repartir d’un espace vierge',`<p class="sub">Toutes les SCI et données de cette démonstration seront supprimées, y compris vos ajouts. Vos préférences d’apparence sont conservées. Créez une sauvegarde avant de continuer.</p><div style="margin-top:15px">${field('confirm-demo','Saisissez EFFACER pour confirmer')}</div>`,`<button data-action="close-modal">Annuler</button><button class="danger" id="reset-confirm">Vider la démonstration</button>`);$('#reset-confirm').onclick=async()=>{try{await api('reset-demo',{confirmation:$('#f-confirm-demo').value});closeModal(true);page='dashboard';await refresh();notify('Votre espace est maintenant vierge.');}catch(e){modalError(e)}};break;}}
 document.addEventListener('click',async ev=>{let el=ev.target.closest('button,[data-nav]');if(!el)return;try{if(updateInstalling)return;if(el.dataset.settingsSection){settingsSection=el.dataset.settingsSection;render();return;}if(el.dataset.updateAction){let a=el.dataset.updateAction;if(a==='check'){updateInfo=await (await api('update/check',{})).json();render();}else if(a==='offer')showUpdateOffer();else if(a==='install')await beginUpdate();return;}if(el.dataset.nav){navigate(el.dataset.nav,el.dataset.tab||'overview');return;}if(el.dataset.tab){tab=el.dataset.tab;query='';filter='';setPref({last_tab:tab});render();return;}if(el.dataset.action){await handleAction(el.dataset.action);return;}if(el.dataset.add){editForm(el.dataset.add);return;}if(el.dataset.edit){let r=rec(el.dataset.edit);editForm(r.kind,r);return;}if(el.dataset.delete){let r=rec(el.dataset.delete);deletion(r.kind,r.id);return;}if(el.dataset.pay){let c=rec(el.dataset.pay);editForm('entries',null,{sci:c.sci,label:'Loyer '+label(rec(c.lease_id))+' · '+c.period,call_id:c.id,amount:due(c),direction:'Recette',category:'Loyers'});$('#f-sci').value=c.sci;$('#f-sci').disabled=true;return;}if(el.dataset.receipt){receipt(el.dataset.receipt);return;}if(el.dataset.document){let r=rec(el.dataset.document);await download(await api('document?id='+r.id),r.filename||'document');return;}if(el.dataset.complete){let r=rec(el.dataset.complete);await api('save',{kind:r.kind,id:r.id,sci:r.sci,data:{...r,status:'Terminé'}});await refresh();notify('Échéance terminée.');return;}if(el.dataset.theme){await setPref({theme:el.dataset.theme});render();return;}if(el.dataset.move){let o=navOrder(),i=o.indexOf(el.dataset.move),j=i+Number(el.dataset.dir);if(j>=0&&j<o.length){[o[i],o[j]]=[o[j],o[i]];await setPref({order:o});render();}return;}if(el.dataset.searchGo){let id=el.dataset.searchGo,kind=el.dataset.searchKind;closeModal(true);if(kind==='sci')navigate(id);else{let r=rec(id);navigate(r.sci,kind);editForm(kind,r);}return;}}catch(e){notify(e.message,true);}});
 document.addEventListener('change',async ev=>{let el=ev.target;try{if(el.id==='year'){await setPref({year:Number(el.value)});render();}if(el.id==='scope'){scope=el.value;render();}if(el.id==='status-filter'){filter=el.value;renderListing();}}catch(e){notify(e.message,true)}});
 document.addEventListener('input',ev=>{if(ev.target.id==='filter-search'){query=ev.target.value;renderListing();}if(ev.target.closest('#modal')&&!['global-search'].includes(ev.target.id))modalDirty=true;});
@@ -5773,7 +5943,7 @@ document.addEventListener('submit',ev=>{if(ev.target.id==='edit-form'){ev.preven
 document.addEventListener('keydown',ev=>{if((ev.ctrlKey||ev.metaKey)&&ev.key.toLowerCase()==='k'){ev.preventDefault();if(!modalDirty)searchModal();}if(ev.key==='Escape'&&$('#modal').innerHTML)closeModal();if(ev.key==='Enter'&&ev.target.matches('article[data-nav]'))navigate(ev.target.dataset.nav);if(ev.key==='Tab'&&$('#modal').innerHTML){let items=$$('#modal button:not(:disabled),#modal input:not(:disabled),#modal select:not(:disabled),#modal textarea');let first=items[0],last=items[items.length-1];if(ev.shiftKey&&document.activeElement===first){ev.preventDefault();last?.focus();}else if(!ev.shiftKey&&document.activeElement===last){ev.preventDefault();first?.focus();}}});
 window.addEventListener('beforeunload',e=>{if(modalDirty||updateInstalling){e.preventDefault();e.returnValue='';}});
 window.dominisCanClose=async()=>{if(updateInstalling)return false;if(modalDirty&&!confirm('Abandonner les modifications de formulaire non enregistrées et fermer Dominis ?'))return false;try{await settingsQueue;return true;}catch(e){notify('Fermeture annulée : un réglage n’a pas pu être enregistré.',true);return false;}};
-(async()=>{try{await load();page='dashboard';tab='overview';scope='';render();pollUpdates();}catch(e){$('#main').innerHTML=empty('Impossible d’ouvrir votre espace',esc(e.message),'<button onclick="location.reload()">Réessayer</button>');}})();
+(async()=>{try{await load();page='dashboard';tab='overview';scope='';render();if(S.auto_save_notice?.message&&!S.primary_db_missing)notify(S.auto_save_notice.message,!!S.auto_save_notice.error);pollUpdates();}catch(e){$('#main').innerHTML=empty('Impossible d’ouvrir votre espace',esc(e.message),'<button onclick="location.reload()">Réessayer</button>');}})();
 </script></body></html>'''
 
 def on_native_closing():
@@ -5826,14 +5996,29 @@ def set_macos_identity():
 
 def main():
     global DB,SERVER,WINDOW,PREVIEW,START_HOST,START_PORT,START_DESKTOP,START_NO_BROWSER
+    global AUTO_SAVE_NOTICE, PRIMARY_DB_MISSING
     parser=argparse.ArgumentParser(description='Dominis — gestion locale multi-SCI')
     parser.add_argument('--db',default=str(ROOT/'data.db'));parser.add_argument('--port',type=int,default=8765)
     parser.add_argument('--host',default='127.0.0.1');parser.add_argument('--preview',action='store_true');parser.add_argument('--demo',action='store_true');parser.add_argument('--desktop',action='store_true');parser.add_argument('--no-browser',action='store_true')
     a=parser.parse_args();DB=Path(a.db).resolve();PREVIEW=a.preview
     START_HOST,START_PORT,START_DESKTOP,START_NO_BROWSER=a.host,a.port,a.desktop,a.no_browser
     EXIT_READY.clear()
+    AUTO_SAVE_NOTICE = None
+    PRIMARY_DB_MISSING = not PREVIEW and primary_db_has_recovery_copies()
     init_db()
     if a.demo: demo()
+    if PRIMARY_DB_MISSING:
+        AUTO_SAVE_NOTICE = {'error': True, 'message':
+            'Le fichier principal data.db était absent. Dominis a créé une base vide et n’a pas ouvert les copies auto-save. '
+            'Avant toute nouvelle saisie, utilisez Paramètres → Restaurer une sauvegarde.'}
+    elif not PREVIEW:
+        try:
+            saved = maybe_create_weekly_auto_save()
+            if saved:
+                AUTO_SAVE_NOTICE = {'error': False, 'message': 'Sauvegarde hebdomadaire créée : ' + saved.name}
+        except Exception as e:
+            AUTO_SAVE_NOTICE = {'error': True, 'message': 'Sauvegarde hebdomadaire impossible : ' + str(e)}
+            print(AUTO_SAVE_NOTICE['message'], flush=True)
     try: SERVER=ThreadingHTTPServer((a.host,a.port),Handler)
     except OSError:
         print('Port déjà utilisé. Fermez l’instance existante ou choisissez --port 8766.');return 1

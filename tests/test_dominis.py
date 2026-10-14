@@ -10,8 +10,10 @@ import tempfile
 import threading
 import unittest
 from unittest.mock import Mock, patch
-from urllib.request import Request, urlopen
+from urllib.request import Request, ProxyHandler, build_opener
 from urllib.error import HTTPError
+
+LOCAL_OPENER = build_opener(ProxyHandler({}))
 
 APP = Path(__file__).resolve().parents[1] / 'Dominis' / 'Dominis.py'
 spec = importlib.util.spec_from_file_location('dominis', APP)
@@ -71,17 +73,17 @@ class DominisTests(unittest.TestCase):
         try:
             url = 'http://127.0.0.1:' + str(server.server_port)
             for path in ('/logo.png', '/favicon.ico'):
-                with urlopen(url + path) as r:
+                with LOCAL_OPENER.open(url + path) as r:
                     self.assertEqual(r.headers['Content-Type'], 'image/png')
                     self.assertTrue(r.read().startswith(b'\x89PNG\r\n\x1a\n'))
-            with urlopen(url) as r:
+            with LOCAL_OPENER.open(url) as r:
                 html = r.read().decode()
                 self.assertIn('Dominis — Gestion patrimoniale', html)
                 self.assertNotIn('AURÉA', html)
             with self.assertRaises(HTTPError) as e:
-                urlopen(url + '/api/state')
+                LOCAL_OPENER.open(url + '/api/state')
             self.assertEqual(e.exception.code, 403)
-            with urlopen(Request(url + '/api/state', headers={'X-Dominis-Token': app.TOKEN})) as r:
+            with LOCAL_OPENER.open(Request(url + '/api/state', headers={'X-Dominis-Token': app.TOKEN})) as r:
                 self.assertEqual(json.load(r)['scis'], [])
         finally:
             server.shutdown()
@@ -139,7 +141,7 @@ class DominisTests(unittest.TestCase):
             with patch.object(app, 'SERVER', server), patch.object(app, 'WINDOW', None), patch.object(app, 'PREVIEW', False):
                 req = Request('http://127.0.0.1:' + str(server.server_port) + '/api/quit',
                               data=b'{}', headers={'X-Dominis-Token': app.TOKEN})
-                with urlopen(req) as r:
+                with LOCAL_OPENER.open(req) as r:
                     self.assertTrue(json.load(r)['ok'])
                 thread.join(timeout=5)
                 self.assertFalse(thread.is_alive())
