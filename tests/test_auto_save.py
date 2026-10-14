@@ -61,7 +61,8 @@ class WeeklyAutoSaveTests(unittest.TestCase):
         self.assertEqual(len(app.auto_save_files()), 1)
         self.assertEqual(saved.read_bytes()[:16], b'SQLite format 3\x00')
 
-        with sqlite3.connect(saved) as backup:
+        backup = sqlite3.connect(saved)
+        try:
             self.assertEqual(backup.execute('PRAGMA integrity_check').fetchone()[0], 'ok')
             self.assertEqual(backup.execute('SELECT id FROM scis').fetchone()[0], sci_id)
             document = json.loads(backup.execute(
@@ -69,6 +70,8 @@ class WeeklyAutoSaveTests(unittest.TestCase):
             ).fetchone()[0])
             self.assertEqual(document['blob'], 'cGRmLWRlLXRlc3Q=')
             self.assertEqual(document['filename'], 'statuts.pdf')
+        finally:
+            backup.close()
 
         with app.connect() as primary:
             self.assertEqual(primary.execute('SELECT id FROM scis').fetchone()[0], sci_id)

@@ -63,8 +63,11 @@ class DominisTests(unittest.TestCase):
             self.assertEqual(c.execute('PRAGMA integrity_check').fetchone()[0], 'ok')
         backups = list(Path(self.temp.name).rglob('dominis-*.db'))
         self.assertEqual(len(backups), 1)
-        with sqlite3.connect(backups[0]) as c:
-            self.assertEqual(c.execute('SELECT id FROM scis').fetchone()[0], sid)
+        backup = sqlite3.connect(backups[0])
+        try:
+            self.assertEqual(backup.execute('SELECT id FROM scis').fetchone()[0], sid)
+        finally:
+            backup.close()
 
     def test_http_logo_and_authentication(self):
         server = app.ThreadingHTTPServer(('127.0.0.1', 0), app.Handler)
