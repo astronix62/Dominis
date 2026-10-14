@@ -1,9 +1,9 @@
 @echo off
 setlocal
-title Aurea - Gestion patrimoniale
+title Dominis - Gestion patrimoniale
 cd /d "%~dp0"
 echo.
-echo   AUREA - Votre patrimoine, en toute clarte.
+echo   DOMINIS - Votre patrimoine, en toute clarte.
 echo.
 set "PY=py -3"
 %PY% -c "import sys; assert sys.version_info >= (3,10)" >nul 2>&1
@@ -33,13 +33,13 @@ if errorlevel 1 (
     ".venv\Scripts\python.exe" -m pip install "pywebview>=5.4,<7"
     if errorlevel 1 (
         echo La fenetre native n'a pas pu etre installee.
-        echo Aurea fonctionnera dans votre navigateur, sans cette dependance.
+        echo Dominis fonctionnera dans votre navigateur, sans cette dependance.
     )
 )
-".venv\Scripts\python.exe" aurea.py --desktop
+".venv\Scripts\python.exe" Dominis.py --desktop
 if errorlevel 1 (
     echo.
-    echo Aurea s'est arretee avec une erreur. Consultez le message ci-dessus.
+    echo Dominis s'est arrete avec une erreur. Consultez le message ci-dessus.
     pause
     exit /b 1
 )
