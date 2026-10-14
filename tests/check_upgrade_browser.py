@@ -3,6 +3,7 @@ Seules les réponses GitHub sont simulées. Copie du programme et base temporair
 Nécessite Playwright ; CHROMIUM_PATH permet de choisir le navigateur.
 """
 import asyncio
+import re
 import hashlib
 import json
 import os
@@ -24,10 +25,12 @@ def github_bytes(url, limit, accept):
     if url == RELEASES_API: return (ROOT / 'release.json').read_bytes()
     return (ROOT / 'release-payload.bin').read_bytes()
 '''
-        source = APP.read_text().replace("if __name__=='__main__':", fixture + "\nif __name__=='__main__':")
+        source = APP.read_text(encoding="utf-8").replace("if __name__=='__main__':", fixture + "\nif __name__=='__main__':")
+        # Keep this historical scenario even as the development version advances.
+        source = re.sub(r"^APP_VERSION = 'v\d+\.\d+\.\d+'$", "APP_VERSION = 'v0.0.1'", source, count=1, flags=re.MULTILINE)
         raw = source.encode()
         (folder / 'release-payload.bin').write_bytes(raw)
-        (folder / 'Dominis.py').write_text(source.replace("APP_VERSION = 'v0.0.1'", "APP_VERSION = 'v0.0.0'", 1))
+        (folder / 'Dominis.py').write_text(source.replace("APP_VERSION = 'v0.0.1'", "APP_VERSION = 'v0.0.0'", 1), encoding="utf-8", newline="\n")
         (folder / 'release.json').write_text(json.dumps({'tag_name': 'v0.0.1', 'draft': False, 'prerelease': False,
             'assets': [{'name': 'Dominis.py', 'state': 'uploaded', 'size': len(raw),
                         'browser_download_url': 'https://github.com/astronix62/Dominis/releases/download/v0.0.1/Dominis.py',
