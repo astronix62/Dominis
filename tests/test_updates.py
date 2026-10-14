@@ -229,7 +229,7 @@ time.sleep(.5)
         app.InstanceGuard(self.folder).close()
 
     def test_writes_and_quit_are_blocked_during_installation(self):
-        server = app.ThreadingHTTPServer(('127.0.0.1', 0), app.Handler)
+        server = app.DominisHTTPServer(('127.0.0.1', 0), app.Handler)
         t = threading.Thread(target=server.serve_forever, daemon=True); t.start()
         app.UPDATE_BUSY.set()
         try:

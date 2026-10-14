@@ -8,9 +8,19 @@ import argparse, base64, csv, datetime as dt, hashlib, html, io, json, mimetypes
 import os, secrets, sqlite3, sys, tempfile, threading, time, uuid, webbrowser, warnings
 from pathlib import Path
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+import socketserver
 from urllib.parse import urlparse, parse_qs
 from urllib.request import Request, build_opener, HTTPRedirectHandler, HTTPSHandler
 from urllib.error import HTTPError, URLError
+
+
+class DominisHTTPServer(ThreadingHTTPServer):
+    """Serveur local sans recherche DNS inverse au démarrage."""
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name = self.server_address[0]
+        self.server_port = self.server_address[1]
+
 
 # Logo recadré depuis Dominis.jpg ; intégré pour garder l’application autonome.
 # Régénération : python tools/embed_logo.py (Pillow requis uniquement pour cet outil).
@@ -6019,7 +6029,7 @@ def main():
         except Exception as e:
             AUTO_SAVE_NOTICE = {'error': True, 'message': 'Sauvegarde hebdomadaire impossible : ' + str(e)}
             print(AUTO_SAVE_NOTICE['message'], flush=True)
-    try: SERVER=ThreadingHTTPServer((a.host,a.port),Handler)
+    try: SERVER=DominisHTTPServer((a.host,a.port),Handler)
     except OSError:
         print('Port déjà utilisé. Fermez l’instance existante ou choisissez --port 8766.');return 1
     SERVER.daemon_threads=True

@@ -6,6 +6,7 @@ import sqlite3
 import shutil
 import subprocess
 import os
+import socket
 import tempfile
 import threading
 import unittest
@@ -69,8 +70,17 @@ class DominisTests(unittest.TestCase):
         finally:
             backup.close()
 
+    def test_local_server_bind_does_not_require_reverse_dns(self):
+        with patch.object(socket, 'getfqdn', side_effect=AssertionError('Unexpected reverse DNS lookup')):
+            server = app.DominisHTTPServer(('127.0.0.1', 0), app.Handler)
+        try:
+            self.assertEqual(server.server_name, '127.0.0.1')
+            self.assertGreater(server.server_port, 0)
+        finally:
+            server.server_close()
+
     def test_http_logo_and_authentication(self):
-        server = app.ThreadingHTTPServer(('127.0.0.1', 0), app.Handler)
+        server = app.DominisHTTPServer(('127.0.0.1', 0), app.Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
@@ -137,7 +147,7 @@ class DominisTests(unittest.TestCase):
             app.NATIVE_CLOSE_LOCK.release()
 
     def test_browser_quit_stops_server_after_backup(self):
-        server = app.ThreadingHTTPServer(('127.0.0.1', 0), app.Handler)
+        server = app.DominisHTTPServer(('127.0.0.1', 0), app.Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
