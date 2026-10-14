@@ -1,0 +1,4 @@
+# Outils de génération et tests uniquement ; aucune dépendance d'exécution ajoutée.
+certifi==2026.7.22
+Pillow>=10,<13
+trustme>=1.2,<2

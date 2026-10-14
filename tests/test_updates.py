@@ -92,7 +92,7 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(self.target.read_bytes(), self.original)
         self.assertEqual((plan['folder'] / 'previous.tmp').read_bytes(), self.original)
         self.assertEqual(app.DB.read_bytes(), self.db_before)
-        self.assertEqual((plan['folder'] / 'candidate.tmp').stat().st_mode & 0o777, 0o755)
+        self.assertEqual((plan['folder'] / 'candidate.tmp').stat().st_mode & 0o777, self.target.stat().st_mode & 0o777)
 
     def test_bad_digest_or_truncated_download_keeps_original(self):
         raw = source(); info = app.release_info(release(raw))
@@ -104,7 +104,7 @@ class UpdateTests(unittest.TestCase):
         self.assertFalse(list(self.folder.glob('.dominis-update-*')))
 
     def test_available_current_older_and_later_semantics(self):
-        for version, status in [('v0.0.2', 'available'), ('v0.0.1', 'current'), ('v0.0.0', 'current')]:
+        for version, status in [('v99.0.0', 'available'), (app.APP_VERSION, 'current'), ('v0.0.0', 'current')]:
             data = release(source(version), version)
             with patch.object(app, 'github_bytes', return_value=json.dumps(data).encode()): app.check_updates()
             self.assertEqual(app.update_snapshot()['status'], status)
@@ -215,9 +215,9 @@ class PrepareTestCopyTests(unittest.TestCase):
             tool = APP.parents[1] / 'tools' / 'prepare_update_test.py'
             result = subprocess.run([sys.executable, str(tool), str(target)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("APP_VERSION = 'v0.0.0'", (target / 'Dominis.py').read_text())
-            self.assertEqual({f.name for f in target.iterdir()}, {'Dominis.py', 'Lancer_Dominis.command', 'Lancer_Dominis.bat'})
-            self.assertIn("APP_VERSION = 'v0.0.1'", APP.read_text())
+            self.assertIn("APP_VERSION = 'v0.0.0'", (target / 'Dominis.py').read_text(encoding="utf-8"))
+            self.assertEqual({f.name for f in target.iterdir()}, {'Dominis.py', 'Lancer_Dominis.command', 'Lancer_Dominis.bat', 'Dominis.jpg'})
+            self.assertIn(f"APP_VERSION = '{app.APP_VERSION}'", APP.read_text(encoding="utf-8"))
 
     def test_refuses_to_overwrite_nonempty_test_folder(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -230,9 +230,24 @@ class PrepareTestCopyTests(unittest.TestCase):
 
 class RealUpgradeTest(unittest.TestCase):
     def test_v000_to_v001_preserves_data_restarts_and_offers_again_next_launch(self):
+        self.run_upgrade('v0.0.0', 'v0.0.1')
+
+    def test_v001_to_future_v002_preserves_data_restarts_and_offers_again_next_launch(self):
+        self.run_upgrade('v0.0.1', 'v0.0.2')
+
+    def run_upgrade(self, old_version, new_version):
         with tempfile.TemporaryDirectory(prefix='Dominis test ') as temp:
             folder = Path(temp)
-            original_source = APP.read_text()
+            if old_version == 'v0.0.0':
+                # Utiliser réellement l'outil demandé, puis vérifier son résultat avant
+                # d'injecter le seul faux transport réseau nécessaire au test hors ligne.
+                tool = APP.parents[1] / 'tools' / 'prepare_update_test.py'
+                subprocess.run([sys.executable, str(tool), str(folder)], check=True, capture_output=True)
+                expected = APP.read_bytes().replace(
+                    f"APP_VERSION = '{app.APP_VERSION}'".encode(), b"APP_VERSION = 'v0.0.0'", 1)
+                self.assertEqual((folder / 'Dominis.py').read_bytes(), expected)
+            original_source = APP.read_text(encoding='utf-8').replace(
+                f"APP_VERSION = '{app.APP_VERSION}'", f"APP_VERSION = '{new_version}'", 1)
             # Seule la fonction réseau est simulée. Tout le reste est le vrai programme.
             fixture = '''
 def github_bytes(url, limit, accept):
@@ -240,11 +255,11 @@ def github_bytes(url, limit, accept):
     return (ROOT / 'release-payload.bin').read_bytes()
 '''
             source_new = original_source.replace("if __name__=='__main__':", fixture + "\nif __name__=='__main__':")
-            source_old = source_new.replace("APP_VERSION = 'v0.0.1'", "APP_VERSION = 'v0.0.0'", 1)
-            (folder / 'Dominis.py').write_text(source_old)
+            source_old = source_new.replace(f"APP_VERSION = '{new_version}'", f"APP_VERSION = '{old_version}'", 1)
+            (folder / 'Dominis.py').write_text(source_old, encoding="utf-8", newline="\n")
             raw = source_new.encode()
             (folder / 'release-payload.bin').write_bytes(raw)
-            (folder / 'release.json').write_text(json.dumps(release(raw, 'v0.0.1')))
+            (folder / 'release.json').write_text(json.dumps(release(raw, new_version)))
             with patch.object(app, 'DB', folder / 'data.db'):
                 app.init_db()
                 with app.connect() as c:
@@ -273,7 +288,7 @@ def github_bytes(url, limit, accept):
                         if result: return result
                     except (OSError, ValueError): pass
                     time.sleep(.1)
-                raise AssertionError('Timeout; log: ' + (folder / 'test.log').read_text())
+                raise AssertionError('Timeout; log: ' + (folder / 'test.log').read_text(encoding="utf-8"))
             def token():
                 return get('/').decode().split("const TOKEN='")[1].split("'", 1)[0]
             def available(tok):
@@ -292,14 +307,14 @@ def github_bytes(url, limit, accept):
                 get('/api/update/install', tok, {})
                 def upgraded():
                     h = json.loads(get('/api/health'))
-                    return h if h['version']=='v0.0.1' and h['instance']!=before['instance'] else None
+                    return h if h['version']==new_version and h['instance']!=before['instance'] else None
                 wait(upgraded)
                 tok = wait(token)
                 after = json.loads(get('/api/state', tok))
                 self.assertEqual(after['scis'], state_before['scis'])
                 self.assertEqual(after['records'], state_before['records'])
                 self.assertEqual(after['settings'], state_before['settings'])
-                self.assertEqual(after['app_version'], 'v0.0.1')
+                self.assertEqual(after['app_version'], new_version)
                 self.assertEqual((folder / 'data.db').read_bytes(), db_bytes_before)
                 self.assertEqual(json.loads(get('/api/update', tok))['restart_notice']['kind'], 'success')
                 self.assertIn("page='dashboard';tab='overview';scope='';render();pollUpdates();", get('/').decode())
@@ -308,6 +323,15 @@ def github_bytes(url, limit, accept):
                 self.assertTrue(list((folder / 'sauvegardes').glob('*.db')))
                 wait(lambda: not list(folder.glob('.dominis-update-*')))
                 self.assertEqual((folder / 'Dominis.py').read_bytes(), raw)
+                # La version installée ne doit plus proposer la même Release.
+                def current(token):
+                    state = json.loads(get('/api/update', token))
+                    return state if state['status'] == 'current' else None
+                self.assertEqual(wait(lambda: current(tok))['current'], new_version)
+                get('/api/quit', tok, {}); self.assertEqual(p.wait(timeout=10), 0)
+                p = start(); tok = wait(token)
+                self.assertEqual(wait(lambda: current(tok))['latest'], new_version)
+                self.assertIsNone(json.loads(get('/api/update', tok))['restart_notice'])
                 get('/api/quit', tok, {}); self.assertEqual(p.wait(timeout=10), 0)
             finally:
                 # En cas d'échec, demander l'arrêt à l'instance enfant avant le superviseur.

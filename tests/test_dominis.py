@@ -160,22 +160,25 @@ class DominisTests(unittest.TestCase):
         outcome = subprocess.run(['bash', str(launcher)], input='\n', text=True,
                                  capture_output=True, cwd=self.temp.name,
                                  env={**os.environ, 'TERM_PROGRAM': 'test'}, timeout=10)
-        self.assertEqual((folder / 'arguments.txt').read_text().splitlines(), ['Dominis.py', '--desktop'])
+        self.assertEqual((folder / 'arguments.txt').read_text(encoding="utf-8").splitlines(), ['Dominis.py', '--desktop'])
         return outcome
 
+    @unittest.skipIf(os.name == "nt", "Lanceur bash macOS")
     def test_launcher_normal_exit(self):
         self.assertEqual(self.run_launcher(0).returncode, 0)
 
+    @unittest.skipIf(os.name == "nt", "Lanceur bash macOS")
     def test_launcher_preserves_failure_exit_code(self):
         self.assertEqual(self.run_launcher(7).returncode, 7)
 
     def test_launcher_uses_renamed_file_and_is_executable(self):
         folder = APP.parent
         for name in ('Lancer_Dominis.command', 'Lancer_Dominis.bat'):
-            text = (folder / name).read_text()
+            text = (folder / name).read_text(encoding="utf-8")
             self.assertIn('Dominis.py --desktop', text)
             self.assertNotIn('aurea.py', text)
-        self.assertTrue((folder / 'Lancer_Dominis.command').stat().st_mode & 0o111)
+        if os.name != 'nt':
+            self.assertTrue((folder / 'Lancer_Dominis.command').stat().st_mode & 0o111)
 
 
 if __name__ == '__main__':
