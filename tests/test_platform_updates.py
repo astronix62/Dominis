@@ -7,7 +7,7 @@ import ssl
 import sys
 import threading
 import unittest
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from urllib.error import URLError
@@ -95,7 +95,7 @@ class TLSUpdateTests(unittest.TestCase):
 
             def log_message(self, *args): pass
 
-        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        server = app.DominisHTTPServer(('127.0.0.1', 0), Handler)
         server.socket = server_context.wrap_socket(server.socket, server_side=True)
         worker = threading.Thread(target=server.serve_forever, daemon=True)
         worker.start()

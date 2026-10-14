@@ -5,6 +5,7 @@ __pycache__/
 .DS_Store
 Dominis/.venv/
 Dominis/sauvegardes/
+Dominis/auto-save/
 Dominis/data.db-*
 Dominis/.dominis-instance.lock
 Dominis/.dominis-update-*/

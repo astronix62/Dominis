@@ -6,12 +6,15 @@ import sqlite3
 import shutil
 import subprocess
 import os
+import socket
 import tempfile
 import threading
 import unittest
 from unittest.mock import Mock, patch
-from urllib.request import Request, urlopen
+from urllib.request import Request, ProxyHandler, build_opener
 from urllib.error import HTTPError
+
+LOCAL_OPENER = build_opener(ProxyHandler({}))
 
 APP = Path(__file__).resolve().parents[1] / 'Dominis' / 'Dominis.py'
 spec = importlib.util.spec_from_file_location('dominis', APP)
@@ -61,27 +64,39 @@ class DominisTests(unittest.TestCase):
             self.assertEqual(c.execute('PRAGMA integrity_check').fetchone()[0], 'ok')
         backups = list(Path(self.temp.name).rglob('dominis-*.db'))
         self.assertEqual(len(backups), 1)
-        with sqlite3.connect(backups[0]) as c:
-            self.assertEqual(c.execute('SELECT id FROM scis').fetchone()[0], sid)
+        backup = sqlite3.connect(backups[0])
+        try:
+            self.assertEqual(backup.execute('SELECT id FROM scis').fetchone()[0], sid)
+        finally:
+            backup.close()
+
+    def test_local_server_bind_does_not_require_reverse_dns(self):
+        with patch.object(socket, 'getfqdn', side_effect=AssertionError('Unexpected reverse DNS lookup')):
+            server = app.DominisHTTPServer(('127.0.0.1', 0), app.Handler)
+        try:
+            self.assertEqual(server.server_name, '127.0.0.1')
+            self.assertGreater(server.server_port, 0)
+        finally:
+            server.server_close()
 
     def test_http_logo_and_authentication(self):
-        server = app.ThreadingHTTPServer(('127.0.0.1', 0), app.Handler)
+        server = app.DominisHTTPServer(('127.0.0.1', 0), app.Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
             url = 'http://127.0.0.1:' + str(server.server_port)
             for path in ('/logo.png', '/favicon.ico'):
-                with urlopen(url + path) as r:
+                with LOCAL_OPENER.open(url + path) as r:
                     self.assertEqual(r.headers['Content-Type'], 'image/png')
                     self.assertTrue(r.read().startswith(b'\x89PNG\r\n\x1a\n'))
-            with urlopen(url) as r:
+            with LOCAL_OPENER.open(url) as r:
                 html = r.read().decode()
                 self.assertIn('Dominis — Gestion patrimoniale', html)
                 self.assertNotIn('AURÉA', html)
             with self.assertRaises(HTTPError) as e:
-                urlopen(url + '/api/state')
+                LOCAL_OPENER.open(url + '/api/state')
             self.assertEqual(e.exception.code, 403)
-            with urlopen(Request(url + '/api/state', headers={'X-Dominis-Token': app.TOKEN})) as r:
+            with LOCAL_OPENER.open(Request(url + '/api/state', headers={'X-Dominis-Token': app.TOKEN})) as r:
                 self.assertEqual(json.load(r)['scis'], [])
         finally:
             server.shutdown()
@@ -132,14 +147,14 @@ class DominisTests(unittest.TestCase):
             app.NATIVE_CLOSE_LOCK.release()
 
     def test_browser_quit_stops_server_after_backup(self):
-        server = app.ThreadingHTTPServer(('127.0.0.1', 0), app.Handler)
+        server = app.DominisHTTPServer(('127.0.0.1', 0), app.Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
             with patch.object(app, 'SERVER', server), patch.object(app, 'WINDOW', None), patch.object(app, 'PREVIEW', False):
                 req = Request('http://127.0.0.1:' + str(server.server_port) + '/api/quit',
                               data=b'{}', headers={'X-Dominis-Token': app.TOKEN})
-                with urlopen(req) as r:
+                with LOCAL_OPENER.open(req) as r:
                     self.assertTrue(json.load(r)['ok'])
                 thread.join(timeout=5)
                 self.assertFalse(thread.is_alive())

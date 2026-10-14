@@ -1,4 +1,4 @@
-"""Test navigateur facultatif : vraie installation v0.0.0 → v0.0.1 et reconnexion.
+"""Test navigateur facultatif : vraie installation v0.0.0 → v0.0.2 et reconnexion.
 Seules les réponses GitHub sont simulées. Copie du programme et base temporaires.
 Nécessite Playwright ; CHROMIUM_PATH permet de choisir le navigateur.
 """
@@ -26,14 +26,14 @@ def github_bytes(url, limit, accept):
     return (ROOT / 'release-payload.bin').read_bytes()
 '''
         source = APP.read_text(encoding="utf-8").replace("if __name__=='__main__':", fixture + "\nif __name__=='__main__':")
-        # Keep this historical scenario even as the development version advances.
-        source = re.sub(r"^APP_VERSION = 'v\d+\.\d+\.\d+'$", "APP_VERSION = 'v0.0.1'", source, count=1, flags=re.MULTILINE)
+        # Aligner le test navigateur sur la version préparée dans ce dépôt.
+        source = re.sub(r"^APP_VERSION = 'v\d+\.\d+\.\d+'$", "APP_VERSION = 'v0.0.2'", source, count=1, flags=re.MULTILINE)
         raw = source.encode()
         (folder / 'release-payload.bin').write_bytes(raw)
-        (folder / 'Dominis.py').write_text(source.replace("APP_VERSION = 'v0.0.1'", "APP_VERSION = 'v0.0.0'", 1), encoding="utf-8", newline="\n")
-        (folder / 'release.json').write_text(json.dumps({'tag_name': 'v0.0.1', 'draft': False, 'prerelease': False,
+        (folder / 'Dominis.py').write_text(source.replace("APP_VERSION = 'v0.0.2'", "APP_VERSION = 'v0.0.0'", 1), encoding="utf-8", newline="\n")
+        (folder / 'release.json').write_text(json.dumps({'tag_name': 'v0.0.2', 'draft': False, 'prerelease': False,
             'assets': [{'name': 'Dominis.py', 'state': 'uploaded', 'size': len(raw),
-                        'browser_download_url': 'https://github.com/astronix62/Dominis/releases/download/v0.0.1/Dominis.py',
+                        'browser_download_url': 'https://github.com/astronix62/Dominis/releases/download/v0.0.2/Dominis.py',
                         'digest': 'sha256:' + hashlib.sha256(raw).hexdigest()}]}))
         with socket.socket() as sock:
             sock.bind(('127.0.0.1', 0)); port = sock.getsockname()[1]
@@ -57,13 +57,13 @@ def github_bytes(url, limit, accept):
                     # État qui devra être préservé à l’identique, avant de demander l’installation.
                     before = await page.evaluate('({scis:S.scis,records:S.records,settings:S.settings})')
                     Path('.cache').mkdir(exist_ok=True)
-                    await page.screenshot(path='.cache/real-update-v000-to-v001.png', full_page=True)
+                    await page.screenshot(path='.cache/real-update-v000-to-v002.png', full_page=True)
                     await page.get_by_role('button', name='Mettre à jour', exact=True).click()
                     await page.locator('#update-progress').wait_for()
                     # La page doit se recharger toute seule, avec le nouveau jeton de session.
-                    await page.get_by_text('Mise à jour réussie. Dominis v0.0.1 a redémarré automatiquement.', exact=True).wait_for(timeout=30000)
+                    await page.get_by_text('Mise à jour réussie. Dominis v0.0.2 a redémarré automatiquement.', exact=True).wait_for(timeout=30000)
                     await page.get_by_role('heading', name='Votre patrimoine, en perspective.').wait_for()
-                    assert await page.evaluate('S.app_version') == 'v0.0.1'
+                    assert await page.evaluate('S.app_version') == 'v0.0.2'
                     after = await page.evaluate('({scis:S.scis,records:S.records,settings:S.settings})')
                     assert after == before
                     assert (folder / 'Dominis.py').read_bytes() == raw
@@ -78,7 +78,7 @@ def github_bytes(url, limit, accept):
                 if proc.poll() is None:
                     # Groupe de test limité : signaler le superviseur en cas d'échec seulement.
                     proc.terminate(); proc.wait(timeout=5)
-        print('Navigateur E2E OK : proposition v0.0.1, installation réelle, redémarrage et rechargement automatiques, données conservées.')
+        print('Navigateur E2E OK : proposition v0.0.2, installation réelle, redémarrage et rechargement automatiques, données conservées.')
 
 
 if __name__ == '__main__': asyncio.run(main())

@@ -20,13 +20,41 @@ jobs:
     env:
       PYTHONUTF8: '1'
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
       - run: python -m pip install -r requirements-dev.txt
       - run: python -m py_compile Dominis/Dominis.py
-      - run: python -m unittest discover -s tests -v
+      - name: Tests unitaires
+        shell: bash
+        run: |
+          set +e
+          python -m unittest discover -s tests -v 2>&1 | tee test-output.log
+          test_status=${PIPESTATUS[0]}
+          if [ "$test_status" -ne 0 ]; then
+            python - <<'PY'
+          import re
+          from pathlib import Path
+          output = Path('test-output.log').read_text(encoding='utf-8', errors='replace')
+          for failure in re.finditer(r'(?m)^(FAIL|ERROR): .+$', output):
+              following = output[failure.end():]
+              next_failure = re.search(r'(?m)^(?:FAIL|ERROR): ', following)
+              if next_failure:
+                  following = following[:next_failure.start()]
+              test_summary = re.search(r'(?m)^Ran \d+ tests? ', following)
+              if test_summary:
+                  following = following[:test_summary.start()]
+              exceptions = re.findall(r'(?m)^([A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception):.*|KeyboardInterrupt|SystemExit)$', following)
+              details = [line.strip() for line in following.splitlines()
+                         if line.strip() and not line.lstrip().startswith(('File ', 'raise '))]
+              summary = exceptions[-1] if exceptions else (' | '.join(details[-3:]) if details else failure.group(0))
+              message = (failure.group(0) + ' | ' + summary)[:1500]
+              message = message.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+              print(f'::error title=Unittest failure::{message}')
+          PY
+          fi
+          exit "$test_status"
       - name: Syntaxe du lanceur macOS
         if: runner.os != 'Windows'
         run: bash -n Dominis/Lancer_Dominis.command

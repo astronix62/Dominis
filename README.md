@@ -41,6 +41,26 @@ serveur : utiliser le bouton « Quitter l’application ».
 La fermeture réelle de Terminal, les autorisations et l’icône du Dock sont à
 valider sur macOS ; les tests Linux ne peuvent pas les reproduire.
 
+### Copie hebdomadaire dans `auto-save/`
+
+En plus de la base principale `data.db` et de la sauvegarde existante à la
+fermeture dans `sauvegardes/`, Dominis peut créer une copie complète au premier
+lancement de chaque semaine ISO (lundi–dimanche). Si l’application n’a pas été
+lancée le lundi, la copie est créée lors du prochain lancement de cette semaine.
+Le réglage **Sauvegarde hebdomadaire** est distinct de **Sauvegarde à la fermeture**.
+
+Les fichiers sont placés dans `auto-save/`, à côté de `data.db`, sous la forme
+`AAAA-MM-JJ-save.db` (par exemple `2026-10-14-save.db`). Au troisième fichier,
+Dominis supprime la copie datée la plus ancienne et conserve les deux plus
+récentes. Les copies sont des instantanés SQLite complets et vérifiés, y compris
+les réglages et pièces jointes. Elles sont créées séparément et **ne sont jamais
+sélectionnées comme base active** : Dominis continue à ouvrir `data.db`.
+
+Si `data.db` manque alors que des copies sont présentes, Dominis affiche un
+avertissement et ne crée pas de copie hebdomadaire de la nouvelle base vide.
+Les fichiers `auto-save/` restent des sauvegardes ; une restauration explicite
+copie leur contenu dans le fichier principal `data.db`.
+
 ## Identité visuelle et compatibilité
 
 Le logo doré est **recadré depuis l’affiche originale `Dominis/Dominis.jpg`**, sans
@@ -79,9 +99,9 @@ Le mode aperçu accepte les hôtes du proxy et doit rester limité aux environne
 de démonstration avec des données fictives. En usage personnel, conserver l’écoute
 locale par défaut.
 
-## Mises à jour intégrées — v0.0.1
+## Mises à jour intégrées — v0.0.2
 
-La version est déclarée dans `Dominis.py` par `APP_VERSION = 'v0.0.1'` et affichée
+La version est déclarée dans `Dominis.py` par `APP_VERSION = 'v0.0.2'` et affichée
 sous **Paramètres → Version**, avec les mêmes panneaux et thèmes que le reste de
 l’application. Chaque ouverture affiche le **tableau de bord général de toutes
 les SCI**, indépendamment de la dernière page consultée.
@@ -118,8 +138,12 @@ les SCI**, indépendamment de la dernière page consultée.
    `Dominis.py` avec le fichier temporaire situé sur le même disque. **Ne jamais
    télécharger, remplacer, effacer ou recréer `data.db` dans l’installateur.**
 5. Relancer avec le même Python, la même base (chemin absolu), le même port et le
-   même mode de fenêtre. Le processus précédent surveille le redémarrage et
-   garde le lanceur Terminal actif jusqu’à la fermeture de la nouvelle instance.
+   même mode de fenêtre. Le superviseur garde le contrôle jusqu’à l’accusé de
+   démarrage et peut restaurer le script précédent en cas d’échec. Sur macOS en
+   fenêtre native, l’enfant est détaché du Terminal et le processus graphique
+   précédent se termine après confirmation, afin de ne pas laisser une ancienne
+   instance dans le Dock. Sur les autres modes, le comportement du lanceur est
+   conservé.
 6. Attendre l’accusé de démarrage de la nouvelle version (60 secondes maximum).
    En cas d’échec, rétablir le script précédent et le relancer. En cas de succès,
    supprimer les fichiers temporaires : il ne reste qu’un seul `Dominis.py`.
@@ -146,7 +170,7 @@ nécessitant un changement de schéma SQLite, de dépendances ou de lanceurs dev
 prévoir une procédure adaptée. Les marqueurs à conserver dans le script sont :
 
 ```python
-APP_VERSION = 'v0.0.1'  # À incrémenter pour chaque nouvelle Release.
+APP_VERSION = 'v0.0.2'  # À incrémenter pour chaque nouvelle Release.
 UPDATE_PROTOCOL = 1
 DB_SCHEMA_VERSION = 1
 MIN_PYTHON = (3, 10)
@@ -157,36 +181,30 @@ L’empreinte GitHub n’est pas une signature indépendante de l’éditeur. Pr
 l’accès au compte et au dépôt qui publient le code. Les Releases doivent être
 publiquement accessibles ; aucun secret GitHub n’est embarqué.
 
-### Préparer le scénario demandé : v0.0.0 → v0.0.1
+### Préparer un scénario de mise à jour vers v0.0.2
 
-Le fichier principal `Dominis/Dominis.py` est **v0.0.1**, avec les correctifs TLS
-et l'icône du Dock arrondie. L'outil de test copie exactement ce code en changeant
-**uniquement la déclaration `APP_VERSION` en `v0.0.0`**. Le fichier principal reste
-inchangé ; les certificats et l'icône sont donc déjà corrigés dans la copie de test.
+Le fichier principal `Dominis/Dominis.py` est déclaré en **v0.0.2**. L’outil de
+test copie le code actuel en ne changeant que `APP_VERSION`, pour obtenir une
+copie isolée en v0.0.0. Le fichier principal, `data.db` et les sauvegardes restent
+inchangés ; aucune donnée personnelle n’est copiée.
 
-#### 1. Actualiser la pièce jointe de la Release avant le test réel
+#### 1. Publier et vérifier la Release v0.0.2 avant un test réel
 
-**Une pull request, même fusionnée, ne modifie pas les fichiers joints d'une
-Release déjà publiée.** La Release v0.0.1 initiale contient encore l'ancien code.
-Si sa pièce jointe n'est pas remplacée, la copie v0.0.0 téléchargera ce vieux code
-et perdra les correctifs après redémarrage.
+Une pull request fusionnée ne met pas à jour les pièces jointes d’une Release.
+Avant un test réel, la dernière Release stable doit donc être **v0.0.2** et
+contenir exactement le fichier corrigé `Dominis.py` correspondant au tag.
 
-Lorsque le code aura été validé et intégré :
+1. Publier la Release stable **v0.0.2** sur le dépôt officiel, sans brouillon ni
+   préversion, et la définir comme « latest ».
+2. Joindre `Dominis/Dominis.py` avec le nom exact `Dominis.py`. Ne pas joindre la
+   copie de test v0.0.0, `data.db`, les dossiers `auto-save/` ou `sauvegardes/`,
+   ni un ZIP à la place de cet asset.
+3. Exécuter le contrôle `--check-release` ci-dessous. Il vérifie que les octets
+   réellement publiés correspondent au script local et à la version v0.0.2.
 
-1. Dans `https://github.com/astronix62/Dominis/releases`, éditer la Release stable
-   **v0.0.1**, publiée, non brouillon, non préversion et définie comme « latest ».
-2. Remplacer sa pièce jointe `Dominis.py` par **`Dominis/Dominis.py` du dépôt
-   corrigé**, déclaré en v0.0.1. Ne pas joindre la copie v0.0.0, `data.db`, ni un ZIP.
-3. Garder exactement le nom `Dominis.py`. Le numéro dans le code et le tag doivent
-   être identiques. Une archive de sources automatique ne remplace pas cet asset.
-4. Exécuter le contrôle ci-dessous pour vérifier le fichier réellement distribué.
-
-Aucune publication, modification de Release ou pull request n'est effectuée par
-l'outil. Le remplacement de l'asset v0.0.1 est ici spécifique à ce scénario initial.
-Pour les vraies mises à jour suivantes, **incrémenter la version** (v0.0.2, etc.)
-et publier une nouvelle Release : deux fichiers différents étiquetés v0.0.1 ne
-sont pas distingués par la comparaison de versions des clients déjà en v0.0.1.
-
+L’outil de préparation ne publie rien et ne modifie pas les Releases. Pour toute
+version ultérieure, incrémenter `APP_VERSION`, créer une Release portant le même
+tag et joindre le script correspondant.
 #### 2. Créer le dossier Dominis de test
 
 Depuis le dossier du dépôt, sur macOS :
@@ -231,7 +249,7 @@ Le dossier contient :
 - `Lancer_Dominis.command` et `Lancer_Dominis.bat` : lanceurs actuels inchangés ;
 - `Dominis.jpg` : affiche originale inchangée (les icônes sont déjà dans le script).
 
-**Ni `data.db`, ni sauvegardes, ni `.venv` personnels ne sont copiés.** Au premier
+**Ni `data.db`, ni les dossiers `sauvegardes/` ou `auto-save/`, ni `.venv` personnels ne sont copiés.** Au premier
 lancement, une base vide sera créée dans le dossier de test. Le lanceur prépare
 son environnement natif habituel (Python 3.10+ installé, accès Internet pour
 installer pywebview). Aucun paquet supplémentaire n'est nécessaire au correctif TLS.
@@ -240,12 +258,12 @@ installer pywebview). Aucun paquet supplémentaire n'est nécessaire au correcti
 
 1. Fermer toute autre instance Dominis pour libérer le port 8765.
 2. Ouvrir le lanceur du **dossier de test** : `.command` sur Mac, `.bat` sur Windows.
-3. Vérifier que la version installée est v0.0.0 et que **v0.0.1 est proposée**.
+3. Vérifier que la version installée est v0.0.0 et que **v0.0.2 est proposée**.
 4. Choisir « Plus tard », créer quelques sociétés/documents fictifs, puis quitter.
 5. Rouvrir : la proposition doit revenir. Choisir « Mettre à jour ».
 6. Attendre le redémarrage automatique et le message de réussite. Vérifier la
-   version v0.0.1, les données, les préférences, la sauvegarde et l'icône du Dock.
-7. Quitter et rouvrir : aucune nouvelle proposition si v0.0.1 reste la dernière
+   version v0.0.2, les données, les préférences, les sauvegardes et l'icône du Dock.
+7. Quitter et rouvrir : aucune nouvelle proposition si v0.0.2 reste la dernière
    Release ; « Vérifier maintenant » doit afficher « À jour » sans erreur SSL.
 
 Ne pas utiliser la seule copie de ses données réelles pour un test de mise à jour.
@@ -298,12 +316,12 @@ python tests/check_upgrade_browser.py
 `DOMINIS_TEST_URL` peut préciser l’URL du serveur d’aperçu pour le premier test.
 Les captures de contrôle sont enregistrées dans `.cache/`, ignoré par Git.
 La matrice `.github/workflows/tests.yml` exécute les tests sous **Windows, macOS
-et Linux**, avec Python **3.10 et 3.13**, lors des push et pull requests. Elle
-installe les dépendances de test, vérifie TLS et exécute le remplacement réel du
-script avec redémarrage et restauration. Elle ne remplace pas le contrôle visuel
-du Dock ni les parcours de fenêtre native sur les machines cibles. Lors du
-développement de ce correctif, les tests ont été exécutés localement sous Linux ;
-les résultats de la matrice native restent à obtenir après envoi sur GitHub.
+et Linux**, avec Python **3.10 et 3.13**, à chaque push et pull request. Elle
+compile le script et teste notamment les sauvegardes, TLS, remplacements,
+redémarrages et restaurations. Avant de publier v0.0.2, les six jobs de la matrice
+doivent être verts. Ils ne remplacent pas la validation visuelle de la fenêtre et
+du Dock sur macOS ; le scénario de mise à jour native doit aussi être vérifié sur
+une machine Mac cible.
 
 Pour exécuter aussi les tests TLS locaux et les contrôles des pixels de l'icône :
 
