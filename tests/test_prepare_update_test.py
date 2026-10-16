@@ -32,7 +32,7 @@ class PrepareUpdateTestTests(unittest.TestCase):
         self.addCleanup(stdout_patch.stop)
 
     def test_source_version_for_requested_scenario(self):
-        self.assertEqual(self.version, 'v0.0.2')
+        self.assertEqual(self.version, 'v0.0.3')
 
     def assert_copy(self, target):
         self.assertEqual({p.name for p in target.iterdir()}, set(prepare.APP_FILES))
@@ -89,9 +89,9 @@ class PrepareUpdateTestTests(unittest.TestCase):
         self.assertFalse(self.target.exists())
 
     def test_check_release_requires_same_tag(self):
-        data = release(self.raw, 'v0.0.3')
+        data = release(self.raw, 'v0.0.4')
         with patch.object(app, 'github_bytes', return_value=json.dumps(data).encode()), \
-             self.assertRaisesRegex(ValueError, 'dernière Release est v0.0.3'):
+             self.assertRaisesRegex(ValueError, 'dernière Release est v0.0.4'):
             prepare.verify_release(app, self.raw, self.version)
 
     def test_old_asset_and_wrong_digest_are_rejected_before_creation(self):

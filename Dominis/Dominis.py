@@ -3,7 +3,8 @@
 Usage: python Dominis.py [--desktop] [--demo] [--preview] [--port 8765] [--db data.db]
 Seule dépendance facultative : pywebview (fenêtre native).
 """
-import ast, re, shutil, subprocess, gzip, ssl
+import ast, re, shutil, subprocess, gzip, ssl, zipfile
+import xml.etree.ElementTree as ET
 import argparse, base64, csv, datetime as dt, hashlib, html, io, json, mimetypes
 import os, secrets, sqlite3, sys, tempfile, threading, time, uuid, webbrowser, warnings
 from pathlib import Path
@@ -4779,7 +4780,7 @@ KINDS = ['properties','leases','partners','loans','calls','entries','tasks','doc
 DEFAULTS = {'theme':'dark','collapsed':False,'order':[], 'year':dt.date.today().year, 'last_page':'dashboard','last_tab':'overview','last_backup':'','owner':'Mon espace patrimonial','auto_backup':True,'weekly_auto_save':True,'last_auto_save_week':''}
 
 # Les mises à jour ne remplacent que le script. Aucun téléchargement de data.db.
-APP_VERSION = 'v0.0.2'
+APP_VERSION = 'v0.0.3'
 UPDATE_PROTOCOL = 1
 DB_SCHEMA_VERSION = 1
 MIN_PYTHON = (3, 10)
@@ -5454,6 +5455,502 @@ def export_bundle(c,p):
                 if r.get(f) in lookup and r[f] not in chosen: chosen[r[f]]=lookup[r[f]]; changed=True
     return {'application':'Dominis','version':1,'exported_at':now(),'scis':[unpack(r) for r in c.execute('SELECT * FROM scis') if r['id'] in ids], 'records':list(chosen.values())}
 
+# --- Import Excel (.xlsx) : lecture native du format (zipfile + XML), sans dépendance.
+# Un classeur peut contenir plusieurs tableaux, sur une ou plusieurs feuilles, au format :
+#   Date | Libellé | Débit | Crédit | Solde
+# Les lignes portant un libellé sont des mouvements (Débit → Dépense, Crédit → Recette).
+# Les lignes sans libellé (soldes d'ouverture, clôtures, totaux) sont des contrôles :
+# elles ne sont pas importées mais servent à valider la réconciliation des soldes.
+XLSX_MAX_RECORDS = 40000
+_XL_DATE_NUMFMT = {14,15,16,17,18,19,20,21,22,27,28,29,30,31,32,33,34,35,36,45,46,47,50,51,52,53,54,55,56,57,58}
+_XL_ACCENTS = str.maketrans({'à':'a','â':'a','ä':'a','ç':'c','é':'e','è':'e','ê':'e','ë':'e','î':'i','ï':'i','ô':'o','ö':'o','ù':'u','û':'u','ü':'u','œ':'oe','ÿ':'y'})
+_XL_SPACES = '\u00a0\u202f\u2009\u200b\u3000 \t\r\n\'’'
+_XL_GENERIC_SHEET = re.compile(r'^(?:feuilles?|feuils?|sheets?|classeurs?)\s*\d*$', re.I)
+
+
+def _x_local(el):
+    return el.tag.split('}', 1)[-1]
+
+
+def _x_present(value):
+    return value is not None and (not isinstance(value, str) or value.strip() != '')
+
+
+def _x_eur(value):
+    intp, dec = f'{abs(value):.2f}'.split('.')
+    intp = re.sub(r'(\d)(?=(\d{3})+(?!\d))', r'\1 ', intp)
+    return ('-' if value < 0 else '') + intp + ',' + dec + ' €'
+
+
+def _x_header_kinds(cells):
+    """Reconnaît l'en-tête d'un tableau (toutes colonnes identifiées par leur nom)."""
+    kinds = {}
+    for col in sorted(cells):
+        value = cells[col]
+        if not isinstance(value, str): continue
+        s = ' '.join(value.lower().translate(_XL_ACCENTS).split())
+        if not s: continue
+        kind = None
+        if 'date' in s: kind = 'date'
+        elif any(t in s for t in ('libell', 'label', 'description', 'operation')): kind = 'label'
+        elif 'debit' in s: kind = 'debit'
+        elif 'credit' in s: kind = 'credit'
+        elif 'solde' in s or 'balance' in s: kind = 'solde'
+        elif 'categorie' in s or 'category' in s: kind = 'category'
+        if kind and kind not in kinds: kinds[kind] = col
+    return kinds if all(k in kinds for k in ('date', 'label', 'debit', 'credit')) else None
+
+
+def _x_amount(value):
+    """Convertit un montant Excel (numérique ou texte français « 32 155,66 € ») en float."""
+    if value is None or isinstance(value, bool): return None
+    if isinstance(value, (dt.datetime, dt.date)): return None
+    if isinstance(value, (int, float)):
+        v = float(value)
+    else:
+        s = str(value).strip()
+        if not s: return None
+        paren = s.startswith('(') and s.endswith(')')
+        if paren: s = s[1:-1]
+        s = s.replace('−', '-').replace('€', '')
+        s = re.sub(r'(?i)\beur\b', '', s)
+        for ch in _XL_SPACES: s = s.replace(ch, '')
+        if not s: raise ValueError('montant illisible.')
+        sign = -1 if (paren or s.startswith('-')) else 1
+        s = s.lstrip('+-')
+        if not s: raise ValueError('montant illisible.')
+        if ',' in s and '.' in s:
+            if s.rfind(',') > s.rfind('.'): s = s.replace('.', '').replace(',', '.')
+            else: s = s.replace(',', '')
+        elif ',' in s:
+            s = s.replace(',', '.')
+        if not re.fullmatch(r'\d+(?:\.\d+)?', s):
+            raise ValueError('montant illisible : « ' + str(value).strip()[:60] + ' »')
+        try: v = sign * float(s)
+        except ValueError: raise ValueError('montant illisible : « ' + str(value).strip()[:60] + ' »')
+    if not (-1e12 < v < 1e12): raise ValueError('montant hors limites.')
+    return v
+
+
+def _x_date(value, epoch):
+    """Date Excel : sérial numérique, cellule date, ISO, ou JJ/MM/AA(A) français."""
+    if isinstance(value, dt.datetime): return value.date()
+    if isinstance(value, dt.date): return value
+    if value is None or isinstance(value, bool): return None
+    if isinstance(value, (int, float)):
+        v = float(value)
+        if v != v or v < 0 or v > 3000000: return None
+        try: return epoch + dt.timedelta(days=int(v))
+        except (OverflowError, ValueError): return None
+    s = str(value).strip()
+    if not s: return None
+    candidates = [s]
+    for sep in ('T', ' '):
+        if sep in s: candidates.append(s.split(sep, 1)[0])
+    for cand in dict.fromkeys(candidates):
+        cand = cand.strip().rstrip('.').strip()
+        m = re.fullmatch(r'(\d{4})-(\d{1,2})-(\d{1,2})', cand)
+        if m:
+            try: return dt.date(int(m[1]), int(m[2]), int(m[3]))
+            except ValueError: continue
+        m = re.fullmatch(r'(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})', cand)
+        if m:
+            day, mon, yr = int(m[1]), int(m[2]), int(m[3])
+            if yr < 100: yr += 2000 if yr <= 68 else 1900
+            try: return dt.date(yr, mon, day)
+            except ValueError: continue
+    if re.fullmatch(r'\d{4,5}(?:\.0+)?', s):
+        n = int(float(s))
+        if 10000 <= n <= 80000:
+            try: return epoch + dt.timedelta(days=n)
+            except (OverflowError, ValueError): return None
+    return None
+
+
+def _x_col_ref(ref):
+    if not ref: return None
+    m = re.match(r'([A-Za-z]+)', str(ref))
+    if not m: return None
+    n = 0
+    for ch in m.group(1).upper(): n = n * 26 + (ord(ch) - 64)
+    return n - 1
+
+
+def _x_is_date_numfmt(numfmt_id, custom):
+    try: fid = int(numfmt_id)
+    except (TypeError, ValueError): return False
+    if fid in _XL_DATE_NUMFMT: return True
+    code = custom.get(str(fid), '')
+    if not code: return False
+    code = re.sub(r'"(?:[^"]|"")*"', '', code)
+    code = re.sub(r'\\.', '', code)
+    code = re.sub(r'\[[^\]]*\]', '', code)
+    return bool(re.search(r'[dmyhs]', code, re.I))
+
+
+def _x_shared_strings(zf):
+    try: data = zf.read('xl/sharedStrings.xml')
+    except KeyError: return []
+    out = []
+    for event, el in ET.iterparse(io.BytesIO(data), events=('end',)):
+        if _x_local(el) == 'si':
+            out.append(''.join(t.text or '' for t in el.iter() if _x_local(t) == 't'))
+            el.clear()
+    return out
+
+
+def _x_styles(zf):
+    """Index de styles dont le format rend une date (conversion des séries Excel)."""
+    try: data = zf.read('xl/styles.xml')
+    except KeyError: return set()
+    try: root = ET.fromstring(data)
+    except ET.ParseError: return set()
+    custom = {}
+    for el in root.iter():
+        if _x_local(el) == 'numFmt' and el.get('numFmtId'):
+            custom[el.get('numFmtId')] = el.get('formatCode') or ''
+    flags = []
+    for el in root.iter():
+        if _x_local(el) == 'cellXfs':
+            for xf in el:
+                if _x_local(xf) == 'xf':
+                    flags.append(_x_is_date_numfmt(xf.get('numFmtId', '0'), custom))
+            break
+    return {i for i, flagged in enumerate(flags) if flagged}
+
+
+def _x_sheets(zf):
+    """Feuilles dans l'ordre du classeur + époque de sérial Excel."""
+    names = set(zf.namelist())
+    try: wb = ET.fromstring(zf.read('xl/workbook.xml'))
+    except KeyError: raise ValueError('classeur illisible : workbook.xml introuvable.')
+    epoch = dt.date(1899, 12, 30)
+    for el in wb.iter():
+        if _x_local(el) == 'workbookPr' and (el.get('date1904') or '').lower() in ('1', 'true'):
+            epoch = dt.date(1904, 1, 1)
+    rels = {}
+    try:
+        rr = ET.fromstring(zf.read('xl/_rels/workbook.xml.rels'))
+        for rel in rr.iter():
+            if _x_local(rel) == 'Relationship' and rel.get('Id') and rel.get('Target'):
+                rels[rel.get('Id')] = rel.get('Target')
+    except KeyError:
+        rels = {}
+    sheets = []
+    for el in wb.iter():
+        if _x_local(el) != 'sheet' or not el.get('name'): continue
+        rid = None
+        for key, val in el.attrib.items():
+            if key == 'id' or key.endswith('}id'): rid = val; break
+        target = rels.get(rid) or ('worksheets/sheet' + str(len(sheets) + 1) + '.xml')
+        target = str(target).replace('\\', '/').lstrip('/')
+        path = target if target.startswith('xl/') else 'xl/' + target
+        if path not in names:
+            raise ValueError('classeur incomplet : feuille « ' + str(el.get('name')) + ' » introuvable.')
+        sheets.append((str(el.get('name')), path))
+    if not sheets:
+        def natkey(p):
+            m = re.search(r'(\d+)', p)
+            return (int(m.group(1)) if m else 0, p)
+        found = sorted((n for n in names if re.fullmatch(r'xl/worksheets/sheet\d+\.xml', n)), key=natkey)
+        sheets = [('Feuille ' + str(i + 1), p) for i, p in enumerate(found)]
+    if not sheets: raise ValueError('classeur sans feuille de calcul.')
+    return sheets, epoch
+
+
+def _x_cell_value(el, shared, date_styles, epoch):
+    kind = el.get('t', 'n')
+    v_el = None
+    is_el = None
+    for child in el:
+        local = _x_local(child)
+        if local == 'v': v_el = child
+        elif local == 'is': is_el = child
+    text = v_el.text if v_el is not None and v_el.text is not None else None
+    if kind == 's':
+        try: return shared[int(text)]
+        except (TypeError, ValueError, IndexError): return None
+    if kind == 'inlineStr' or is_el is not None:
+        if is_el is None: return None
+        return ''.join(x.text or '' for x in is_el.iter() if _x_local(x) == 't')
+    if text is None: return None
+    if kind in ('str', 'e'): return text
+    if kind == 'b': return text.strip().lower() in ('1', 'true')
+    if kind == 'd':
+        try: return dt.datetime.fromisoformat(text.replace('Z', '+00:00')).date()
+        except ValueError:
+            try: return dt.date.fromisoformat(text[:10])
+            except ValueError: return None
+    try: num = float(text)
+    except ValueError: return text
+    style = el.get('s')
+    if style is not None and style.isdigit() and int(style) in date_styles:
+        if 0 <= num <= 3000000:
+            try: return epoch + dt.timedelta(days=int(num))
+            except (OverflowError, ValueError): return None
+        return None
+    return num
+
+
+def _x_sheet_rows(zf, path, shared, date_styles, epoch):
+    """Parcourt une feuille : yield (numéro de ligne, {colonne: valeur}). Un trou de numérotation est une ligne vide."""
+    prev = 0
+    cells = {}
+    with zf.open(path) as stream:
+        for event, el in ET.iterparse(stream, events=('start', 'end')):
+            if event == 'start': continue
+            local = _x_local(el)
+            if local == 'c':
+                col = _x_col_ref(el.get('r'))
+                if col is None: col = (max(cells) + 1) if cells else 0
+                value = _x_cell_value(el, shared, date_styles, epoch)
+                if value is not None: cells[col] = value
+                el.clear()
+            elif local == 'row':
+                try: num = int(el.get('r'))
+                except (TypeError, ValueError): num = prev + 1
+                el.clear()
+                if prev and num > prev + 1: yield (prev + 1, {})
+                prev = num
+                yield (num, cells)
+                cells = {}
+
+
+def _x_orphan(cells, epoch):
+    """Une ligne qui ressemble à des données mais sans en-tête de tableau (jamais de perte silencieuse)."""
+    date_cell = cells.get(0)
+    if not _x_present(date_cell) or _x_date(date_cell, epoch) is None: return False
+    for col in (2, 3):
+        value = cells.get(col)
+        if _x_present(value):
+            try:
+                if _x_amount(value) is not None: return True
+            except ValueError:
+                pass
+    return False
+
+
+def _x_scan_sheet(sheet_name, rows, sources, records, warn, epoch, state):
+    """Détecte les tableaux d'une feuille et en extrait mouvements et contrôles."""
+    mode = 'search'
+    titles = []
+    columns = None
+    group = None
+    table_no = 0
+    anchor = None            # dernier solde de contrôle connu
+    seg_debit = seg_credit = 0.0     # sommes depuis le dernier contrôle (tout type)
+    run_debit = run_credit = 0.0     # sommes depuis le dernier solde
+    pending = None
+
+    def loc(rn, msg): return 'ligne ' + str(rn) + ' : ' + msg
+
+    def wloc(rn): return 'Feuille « ' + sheet_name + ' », ligne ' + str(rn) + ' : '
+
+    def cell(cells, kind):
+        col = columns.get(kind) if columns else None
+        return cells.get(col) if col is not None else None
+
+    def as_text(value):
+        if value is None: return ''
+        if isinstance(value, float) and value == int(value) and abs(value) < 1e15: return str(int(value))
+        return str(value).strip()
+
+    def source_key(title):
+        name = ' '.join(str(title).split())[:300]
+        key = 'xlsx_' + hashlib.sha256(name.lower().translate(_XL_ACCENTS).encode()).hexdigest()[:16]
+        if key not in sources: sources[key] = {'id': key, 'name': name}
+        return key
+
+    while True:
+        if pending is not None:
+            rn, cells = pending
+            pending = None
+        else:
+            try: rn, cells = next(rows)
+            except StopIteration: break
+        if cells is None: cells = {}
+        try:
+            if mode == 'search':
+                if not any(_x_present(v) for v in cells.values()): continue
+                kinds = _x_header_kinds(cells)
+                if kinds:
+                    columns = kinds
+                    table_no += 1
+                    state['tables'] += 1
+                    if titles:
+                        group = source_key(titles[0])
+                    elif group is None:
+                        base = sheet_name.strip() if sheet_name and not _XL_GENERIC_SHEET.match(sheet_name.strip()) else ''
+                        group = source_key(base or 'Tableau ' + str(table_no) + ' · ' + (sheet_name or 'sans nom'))
+                    titles = []
+                    mode = 'data'
+                    anchor = None
+                    seg_debit = seg_credit = 0.0
+                    run_debit = run_credit = 0.0
+                    continue
+                if _x_orphan(cells, epoch):
+                    raise ValueError(loc(rn, 'données sans ligne d’en-tête Date / Libellé / Débit / Crédit.'))
+                parts = [as_text(cells[c]) for c in sorted(cells)]
+                text = ' · '.join(p for p in parts if p)
+                if text: titles.append(text)
+                continue
+            # --- mode données ---
+            if not any(_x_present(v) for v in cells.values()):
+                mode = 'search'
+                pending = (rn, cells)
+                continue
+            if _x_header_kinds(cells): continue  # en-tête répété (saut de page)
+            raw_date = cell(cells, 'date')
+            if not _x_present(raw_date):
+                if any(_x_present(cell(cells, k)) for k in ('debit', 'credit', 'solde')):
+                    raise ValueError(loc(rn, 'date manquante sur une ligne de données.'))
+                mode = 'search'
+                pending = (rn, cells)
+                continue
+            date_val = _x_date(raw_date, epoch)
+            if date_val is None:
+                if any(_x_present(cell(cells, k)) for k in ('debit', 'credit', 'solde')):
+                    raise ValueError(loc(rn, 'date illisible : « ' + as_text(raw_date)[:60] + ' »'))
+                mode = 'search'
+                pending = (rn, cells)
+                continue
+
+            def amount(kind, required):
+                value = cell(cells, kind)
+                if not _x_present(value): return None
+                try:
+                    return _x_amount(value)
+                except ValueError as e:
+                    if required: raise ValueError(loc(rn, str(e)))
+                    warn(wloc(rn) + str(e) + ' — valeur de ' + kind + ' ignorée.')
+                    return None
+
+            debit = amount('debit', True)
+            credit = amount('credit', True)
+            solde = amount('solde', False)
+            label = as_text(cell(cells, 'label'))
+            has_amount = debit is not None or credit is not None
+
+            if label and has_amount:
+                if debit is not None and credit is not None:
+                    raise ValueError(loc(rn, 'montant à la fois en débit et en crédit.'))
+                raw = debit if debit is not None else credit
+                direction = 'Dépense' if debit is not None else 'Recette'
+                if raw < 0:
+                    direction = 'Recette' if direction == 'Dépense' else 'Dépense'
+                    warn(wloc(rn) + 'montant négatif (' + _x_eur(raw) + ') : sens inversé en ' + direction + '.')
+                d = {'date': date_val.isoformat(), 'label': label, 'direction': direction, 'amount': abs(raw)}
+                category = as_text(cell(cells, 'category'))
+                if category: d['category'] = category
+                records.append({**clean('entries', d), 'id': uid(), 'sci': group, 'kind': 'entries'})
+                state['movements'].add(group)
+                if len(records) > XLSX_MAX_RECORDS:
+                    raise ValueError(loc(rn, 'import limité à %s opérations.' % f'{XLSX_MAX_RECORDS:,}'.replace(',', ' ')))
+                if debit is not None: seg_debit = round(seg_debit + raw, 2)
+                else: seg_credit = round(seg_credit + raw, 2)
+                run_debit = round(run_debit + (raw if debit is not None else 0.0), 2)
+                run_credit = round(run_credit + (raw if credit is not None else 0.0), 2)
+                if solde is None: continue
+                # mouvement portant un solde de contrôle
+                if anchor is not None:
+                    expected = round(anchor + run_credit - run_debit, 2)
+                    if expected != round(solde, 2):
+                        warn(wloc(rn) + 'solde au ' + date_val.strftime('%d/%m/%Y') + ' : ' + _x_eur(expected)
+                             + ' attendu, ' + _x_eur(solde) + ' trouvé (écart ' + _x_eur(round(solde - expected, 2)) + ').')
+                anchor = solde
+                seg_debit = seg_credit = 0.0
+                run_debit = run_credit = 0.0
+                continue
+
+            if label and solde is None:
+                warn(wloc(rn) + 'ligne ignorée : libellé sans montant.')
+                continue
+            if not label and not has_amount and solde is None:
+                warn(wloc(rn) + 'ligne ignorée : date seule.')
+                continue
+
+            # --- ligne de contrôle (sans libellé, ou libellé portant un solde sans montant) ---
+            if not label and has_amount and solde is None:
+                warn(wloc(rn) + 'ligne de contrôle sans solde : totaux vérifiés, solde non actualisé.')
+            if not label and debit is not None and round(seg_debit, 2) != round(debit, 2):
+                warn(wloc(rn) + 'total débit : ' + _x_eur(debit) + ' annoncé, ' + _x_eur(seg_debit)
+                     + ' calculé depuis le contrôle précédent.')
+            if not label and credit is not None and round(seg_credit, 2) != round(credit, 2):
+                warn(wloc(rn) + 'total crédit : ' + _x_eur(credit) + ' annoncé, ' + _x_eur(seg_credit)
+                     + ' calculé depuis le contrôle précédent.')
+            if solde is not None:
+                if anchor is not None:
+                    expected = round(anchor + run_credit - run_debit, 2)
+                    if expected != round(solde, 2):
+                        warn(wloc(rn) + 'solde au ' + date_val.strftime('%d/%m/%Y') + ' : ' + _x_eur(expected)
+                             + ' attendu, ' + _x_eur(solde) + ' trouvé (écart ' + _x_eur(round(solde - expected, 2)) + ').')
+                if group not in state['opening'] and group not in state['movements']:
+                    src = sources.get(group)
+                    if src is not None and 'opening' not in src:
+                        src['opening'] = round(solde, 2)
+                        src['opening_date'] = date_val.isoformat()
+                        state['opening'].add(group)
+                anchor = solde
+                run_debit = run_credit = 0.0
+            # Toute ligne de contrôle clôt le segment des totaux de période.
+            seg_debit = seg_credit = 0.0
+        except ValueError as e:
+            raise ValueError(str(e) if str(e).startswith('ligne ') else loc(rn, str(e)))
+
+
+def parse_xlsx(text):
+    """Analyse un classeur .xlsx (base64) : plusieurs tableaux, plusieurs feuilles, contrôles de soldes."""
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError('Fichier Excel absent.')
+    try:
+        raw = base64.b64decode(text, validate=True)
+    except Exception:
+        raise ValueError('Fichier Excel illisible (encodage invalide).')
+    if not raw: raise ValueError('Fichier Excel vide.')
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(raw))
+        zf.namelist()
+    except Exception:
+        raise ValueError('Fichier Excel illisible : un classeur .xlsx valide est attendu.')
+    with zf:
+        if sum(i.file_size for i in zf.infolist()) > 800 * 1024 * 1024:
+            raise ValueError('Fichier Excel trop volumineux après décompression (800 Mo maximum).')
+        try:
+            shared = _x_shared_strings(zf)
+            date_styles = _x_styles(zf)
+            sheets, epoch = _x_sheets(zf)
+        except zipfile.BadZipFile:
+            raise ValueError('Fichier Excel illisible : archive endommagée.')
+        except ET.ParseError:
+            raise ValueError('Fichier Excel illisible (XML invalide).')
+        sources = {}
+        records = []
+        warn_msgs = []
+        warn_total = [0]
+
+        def warn(msg):
+            warn_total[0] += 1
+            if len(warn_msgs) < 30: warn_msgs.append(msg)
+
+        state = {'movements': set(), 'opening': set(), 'tables': 0}
+        for sheet_name, sheet_path in sheets:
+            try:
+                _x_scan_sheet(sheet_name, _x_sheet_rows(zf, sheet_path, shared, date_styles, epoch),
+                              sources, records, warn, epoch, state)
+            except ValueError as e:
+                raise ValueError('Feuille « ' + sheet_name + ' » : ' + str(e))
+            except (zipfile.BadZipFile, ET.ParseError):
+                raise ValueError('Fichier Excel illisible pendant la lecture de la feuille « ' + sheet_name + ' ».')
+        if warn_total[0] > len(warn_msgs):
+            warn_msgs.append('… et %d autre(s) avertissement(s).' % (warn_total[0] - len(warn_msgs)))
+        if not state['tables']:
+            raise ValueError('Aucun tableau de trésorerie reconnu : les en-têtes « Date », « Libellé », « Débit » et « Crédit » sont introuvables.')
+        if not records: raise ValueError('Les tableaux reconnus ne contiennent aucune opération.')
+        if len(records) > XLSX_MAX_RECORDS:
+            raise ValueError('Import limité à %s opérations.' % f'{XLSX_MAX_RECORDS:,}'.replace(',', ' '))
+        return {'application': 'Dominis', 'version': 1, 'scis': list(sources.values()), 'records': records, 'warnings': warn_msgs}
+
+
 def parse_import(p):
     fmt=p.get('format','json')
     if fmt=='json':
@@ -5471,6 +5968,7 @@ def parse_import(p):
             if r.get('kind') not in KINDS or r.get('sci') not in ids or not r.get('id') or r['id'] in seen: raise ValueError('Références invalides dans cet export.')
             seen.add(r['id']); clean(r['kind'],r)
         return b
+    if fmt=='xlsx': return parse_xlsx(p.get('text',''))
     if fmt!='csv': raise ValueError('Format non pris en charge.')
     text=p.get('text','').lstrip('\ufeff')
     try: dialect=csv.Sniffer().sniff(text[:4000],delimiters=';,\t')
@@ -5501,7 +5999,7 @@ def import_bundle(c,p):
     for s in selected:
         dest=mapping[s['id']]
         if dest=='new':
-            d=clean('sci',s); d['name']=d['name']+' (import)'; new=uid()
+            d=clean('sci',s); d['name']=d['name']+(('' if p.get('format')=='xlsx' else ' (import)')); new=uid()
             c.execute('INSERT INTO scis VALUES(?,?)',(new,json.dumps(d))); sci_map[s['id']]=new
         else:
             if not c.execute('SELECT 1 FROM scis WHERE id=?',(dest,)).fetchone(): raise ValueError('SCI de destination introuvable.')
@@ -5700,7 +6198,7 @@ class Handler(BaseHTTPRequestHandler):
                             if r['kind']=='entries': w.writerow([safe(names[r['sci']]),r.get('date',''),safe(r.get('label','')),r.get('direction',''),safe(r.get('category','')),str(r.get('amount',0)).replace('.',',')])
                         return self.reply(('\ufeff'+stream.getvalue()).encode(),mime='text/csv; charset=utf-8',filename='dominis-mouvements.csv')
                     if path=='/api/import-preview':
-                        b=parse_import(p); return self.reply({'scis':b['scis'],'counts':{s['id']:{k:sum(r['sci']==s['id'] and r['kind']==k for r in b['records']) for k in KINDS} for s in b['scis']},'rows':b['records'][:5] if p.get('format')=='csv' else []})
+                        b=parse_import(p); return self.reply({'scis':b['scis'],'counts':{s['id']:{k:sum(r['sci']==s['id'] and r['kind']==k for r in b['records']) for k in KINDS} for s in b['scis']},'rows':b['records'][:5] if p.get('format') in ('csv','xlsx') else [],'warnings':b.get('warnings',[])})
                     if path=='/api/import':
                         count=import_bundle(c,p); c.commit(); return self.reply({'ok':True,'count':count})
                     if path=='/api/generate-calls':
@@ -5894,7 +6392,7 @@ if(kind==='loans')intro='<div class="notice">Capital restant dû et mensualités
 if(kind==='partners')intro='<div class="notice">La participation est calculée sur les parts renseignées. Les comptes courants sont des soldes déclarés, à rapprocher de la comptabilité ; ils ne génèrent pas d’opérations de trésorerie.</div>';
 return `${!id?head(title,'Une vision centralisée, avec une affectation explicite à chaque SCI.',buttons):`<div class="section-title"><h2>${title}</h2><div class="toolbar">${buttons}</div></div>`}${intro}${tableFilters(kind,id)}<div id="listing">${listing(kind,id)}</div>${kind==='calls'?'<p class="compact-note">Un paiement peut être partiel. La quittance est disponible uniquement après règlement intégral du loyer et des charges. Les appels générés sont mensuels, à ajuster en cas de prorata.</p>':''}`;}
 function identity(s){return `<div class="settings-grid"><div class="panel"><div class="panel-head"><h2>Identité de la société</h2><button data-action="edit-sci">${icon('edit')} Modifier</button></div><div class="panel-body info-grid">${[['Dénomination',s.name],['SIREN',s.siren||'Non renseigné'],['Gérant',s.manager||'Non renseigné'],['Siège social',s.address||'Non renseigné'],['Capital social',money(s.capital,2)],['Régime fiscal',s.regime||'IR'],['Clôture de l’exercice',s.closing||'31/12'],['Solde d’ouverture',money(s.opening,2)+' au '+date(s.opening_date)]].map(([k,v])=>`<div class="info-item"><label>${k}</label><span>${esc(v)}</span></div>`).join('')}<div class="info-item" style="grid-column:1/-1"><label>Notes de gestion</label><span style="white-space:pre-wrap">${esc(s.notes||'Aucune note.')}</span></div></div></div><div class="stack"><div class="panel"><div class="panel-head"><h2>Repères de gestion · ${esc(s.regime||'IR')}</h2></div><div class="panel-body stack"><p class="sub">${s.regime==='IS'?'Préparer la déclaration 2065 et ses annexes avec une comptabilité d’engagement, les immobilisations et les amortissements. Dominis ne produit pas de liasse fiscale ni de FEC.':'Préparer les informations de la déclaration 2072 selon votre situation. Les recettes et dépenses enregistrées ne déterminent pas automatiquement le résultat foncier imposable.'}</p><p class="sub">Le gérant doit rendre compte annuellement de sa gestion aux associés (article 1856 du Code civil). Les modalités de décision dépendent notamment des statuts.</p><button data-add="tasks">${icon('calendar')} Ajouter une échéance de suivi</button><button data-action="annual-report">${icon('file')} Préparer une synthèse annuelle</button><p class="sub">Les dates fiscales sont à vérifier chaque année. Aucun calendrier légal automatique n’est imposé par l’application.</p></div></div><div class="panel"><div class="panel-body"><h3 class="red">Suppression de la SCI</h3><p class="sub" style="margin:8px 0 15px">Cette action supprime la société et toutes ses données liées. Exportez une sauvegarde complète auparavant.</p><button class="danger" data-action="delete-sci">${icon('trash')} Supprimer cette SCI</button></div></div></div></div>`;}
-function settingsGeneral(){return `<div class="settings-grid"><div class="stack"><section class="panel"><div class="panel-head"><h2>Apparence & préférences</h2>${icon('sun')}</div><div class="panel-body"><div class="setting-row"><div><h3>Thème de l’interface</h3><p>Le même soin, de jour comme de nuit.</p></div><div class="theme-choice"><button data-theme="dark" class="${S.settings.theme==='dark'?'active':''}">${icon('moon')} Sombre</button><button data-theme="light" class="${S.settings.theme==='light'?'active':''}">${icon('sun')} Clair</button></div></div><div class="setting-row"><div><h3>Navigation compacte</h3><p>Une barre latérale discrète, plus d’espace.</p></div><button class="toggle ${S.settings.collapsed?'on':''}" data-action="collapse" aria-label="Navigation compacte" aria-pressed="${!!S.settings.collapsed}"></button></div><div class="setting-row"><div><h3>Nom de votre espace</h3><p>Affiché dans la barre latérale.</p></div><button data-action="rename-space">${icon('edit')} Modifier</button></div><div class="setting-row"><div><h3>Sauvegarde à la fermeture</h3><p>Copie complète dans le dossier sauvegardes/.</p></div><button class="toggle ${S.settings.auto_backup?'on':''}" data-action="auto-backup" aria-label="Sauvegarde à la fermeture" aria-pressed="${!!S.settings.auto_backup}"></button></div><div class="setting-row"><div><h3>Sauvegarde hebdomadaire</h3><p>Copie de data.db au premier lancement de la semaine ; deux fichiers maximum dans auto-save/.</p></div><button class="toggle ${S.settings.weekly_auto_save?'on':''}" data-action="weekly-auto-save" aria-label="Sauvegarde hebdomadaire" aria-pressed="${!!S.settings.weekly_auto_save}"></button></div></div></section><section class="panel"><div class="panel-head"><h2>Ordre de navigation</h2>${icon('panel')}</div><div class="panel-body"><p class="sub">Déplacez les pages avec les flèches. Vos nouvelles SCI apparaissent automatiquement.</p><div class="order-item locked">${icon('grid')} Tableau de bord <span style="margin-left:auto">${icon('lock')}</span></div>${navOrder().map((id,i,a)=>`<div class="order-item">${navIcon(id)}${esc(navName(id))}<div class="actions"><button data-move="${id}" data-dir="-1" ${!i?'disabled':''} title="Monter">${icon('up')}</button><button data-move="${id}" data-dir="1" ${i===a.length-1?'disabled':''} title="Descendre">${icon('down')}</button></div></div>`).join('')}<div class="order-item locked">${icon('settings')} Paramètres <span style="margin-left:auto">${icon('lock')}</span></div><p class="compact-note">Tableau de bord reste en premier, Paramètres en dernier. Quitter est une action distincte.</p></div></section></div><div class="stack"><section class="panel"><div class="panel-head"><h2>Vos données vous appartiennent</h2>${icon('database')}</div><div class="panel-body"><div class="setting-row"><div><h3>Importer des données</h3><p>JSON Dominis ou CSV de mouvements multi-SCI.<br>Aperçu et destinations avant validation.</p></div><button data-action="import">${icon('upload')} Importer</button></div><div class="setting-row"><div><h3>Exporter une sélection</h3><p>Choisissez les SCI, les données et le format.</p></div><button data-action="export">${icon('download')} Exporter</button></div><div class="setting-row"><div><h3>Sauvegarde complète</h3><p>Toutes les SCI, pièces jointes et préférences.<br>${S.settings.last_backup?'Dernière : '+new Date(S.settings.last_backup).toLocaleString('fr-FR'):'Aucune sauvegarde manuelle enregistrée.'}</p></div><button class="primary" data-action="backup">${icon('database')} Sauvegarder</button></div><div class="setting-row"><div><h3>Restaurer une sauvegarde</h3><p>Remplace l’ensemble de l’espace. Une copie<br>de sécurité est créée avant restauration.</p></div><button data-action="restore">${icon('clock')} Restaurer</button></div></div></section><section class="panel"><div class="panel-head"><h2>Stockage & confidentialité</h2>${icon('lock')}</div><div class="panel-body stack"><div class="row between"><span class="sub">Base locale</span><span class="pill green"><span class="status-dot"></span>data.db · ${num(S.db_size/1024/1024)} Mo</span></div><p class="sub">Aucune télémétrie. La gestion de vos données fonctionne hors ligne. Seule la vérification des versions contacte GitHub, sans transmettre vos données patrimoniales. Documents, réglages et historique sont stockés dans SQLite. La base n’est pas chiffrée : protégez votre session et vos sauvegardes.</p><p class="sub">Usage local, mono-utilisateur. Ne placez pas une base ouverte sur un partage réseau ou dans une synchronisation cloud.</p>${S.preview?'<div class="notice" style="margin:0">Aperçu hébergé : utilisez des données fictives uniquement. Le téléchargement et les lanceurs sont destinés à l’usage local.</div>':''}</div></section>${S.settings.demo?`<section class="panel"><div class="panel-body"><h3>Données de démonstration</h3><p class="sub" style="margin:8px 0 14px">Efface toutes les données de cet espace démo, y compris vos ajouts. Sauvegardez-les avant de repartir d’un espace vierge.</p><button class="danger" data-action="reset-demo">${icon('trash')} Vider l’espace de démonstration</button></div></section>`:''}</div><section class="panel" style="grid-column:1/-1"><div class="panel-head"><h2>Journal d’activité</h2><span class="sub">80 dernières actions</span></div><div class="panel-body audit-list">${S.audit.map(r=>`<div class="audit-line"><time>${esc(new Date(r.at).toLocaleString('fr-FR'))}</time><strong style="min-width:90px">${esc(r.action)}</strong><span class="muted">${esc(r.detail)}</span></div>`).join('')||'<p class="sub">Aucune action enregistrée.</p>'}</div></section></div>`;}
+function settingsGeneral(){return `<div class="settings-grid"><div class="stack"><section class="panel"><div class="panel-head"><h2>Apparence & préférences</h2>${icon('sun')}</div><div class="panel-body"><div class="setting-row"><div><h3>Thème de l’interface</h3><p>Le même soin, de jour comme de nuit.</p></div><div class="theme-choice"><button data-theme="dark" class="${S.settings.theme==='dark'?'active':''}">${icon('moon')} Sombre</button><button data-theme="light" class="${S.settings.theme==='light'?'active':''}">${icon('sun')} Clair</button></div></div><div class="setting-row"><div><h3>Navigation compacte</h3><p>Une barre latérale discrète, plus d’espace.</p></div><button class="toggle ${S.settings.collapsed?'on':''}" data-action="collapse" aria-label="Navigation compacte" aria-pressed="${!!S.settings.collapsed}"></button></div><div class="setting-row"><div><h3>Nom de votre espace</h3><p>Affiché dans la barre latérale.</p></div><button data-action="rename-space">${icon('edit')} Modifier</button></div><div class="setting-row"><div><h3>Sauvegarde à la fermeture</h3><p>Copie complète dans le dossier sauvegardes/.</p></div><button class="toggle ${S.settings.auto_backup?'on':''}" data-action="auto-backup" aria-label="Sauvegarde à la fermeture" aria-pressed="${!!S.settings.auto_backup}"></button></div><div class="setting-row"><div><h3>Sauvegarde hebdomadaire</h3><p>Copie de data.db au premier lancement de la semaine ; deux fichiers maximum dans auto-save/.</p></div><button class="toggle ${S.settings.weekly_auto_save?'on':''}" data-action="weekly-auto-save" aria-label="Sauvegarde hebdomadaire" aria-pressed="${!!S.settings.weekly_auto_save}"></button></div></div></section><section class="panel"><div class="panel-head"><h2>Ordre de navigation</h2>${icon('panel')}</div><div class="panel-body"><p class="sub">Déplacez les pages avec les flèches. Vos nouvelles SCI apparaissent automatiquement.</p><div class="order-item locked">${icon('grid')} Tableau de bord <span style="margin-left:auto">${icon('lock')}</span></div>${navOrder().map((id,i,a)=>`<div class="order-item">${navIcon(id)}${esc(navName(id))}<div class="actions"><button data-move="${id}" data-dir="-1" ${!i?'disabled':''} title="Monter">${icon('up')}</button><button data-move="${id}" data-dir="1" ${i===a.length-1?'disabled':''} title="Descendre">${icon('down')}</button></div></div>`).join('')}<div class="order-item locked">${icon('settings')} Paramètres <span style="margin-left:auto">${icon('lock')}</span></div><p class="compact-note">Tableau de bord reste en premier, Paramètres en dernier. Quitter est une action distincte.</p></div></section></div><div class="stack"><section class="panel"><div class="panel-head"><h2>Vos données vous appartiennent</h2>${icon('database')}</div><div class="panel-body"><div class="setting-row"><div><h3>Importer des données</h3><p>JSON Dominis, CSV ou Excel (.xlsx) de mouvements multi-SCI.<br>Aperçu et destinations avant validation.</p></div><button data-action="import">${icon('upload')} Importer</button></div><div class="setting-row"><div><h3>Exporter une sélection</h3><p>Choisissez les SCI, les données et le format.</p></div><button data-action="export">${icon('download')} Exporter</button></div><div class="setting-row"><div><h3>Sauvegarde complète</h3><p>Toutes les SCI, pièces jointes et préférences.<br>${S.settings.last_backup?'Dernière : '+new Date(S.settings.last_backup).toLocaleString('fr-FR'):'Aucune sauvegarde manuelle enregistrée.'}</p></div><button class="primary" data-action="backup">${icon('database')} Sauvegarder</button></div><div class="setting-row"><div><h3>Restaurer une sauvegarde</h3><p>Remplace l’ensemble de l’espace. Une copie<br>de sécurité est créée avant restauration.</p></div><button data-action="restore">${icon('clock')} Restaurer</button></div></div></section><section class="panel"><div class="panel-head"><h2>Stockage & confidentialité</h2>${icon('lock')}</div><div class="panel-body stack"><div class="row between"><span class="sub">Base locale</span><span class="pill green"><span class="status-dot"></span>data.db · ${num(S.db_size/1024/1024)} Mo</span></div><p class="sub">Aucune télémétrie. La gestion de vos données fonctionne hors ligne. Seule la vérification des versions contacte GitHub, sans transmettre vos données patrimoniales. Documents, réglages et historique sont stockés dans SQLite. La base n’est pas chiffrée : protégez votre session et vos sauvegardes.</p><p class="sub">Usage local, mono-utilisateur. Ne placez pas une base ouverte sur un partage réseau ou dans une synchronisation cloud.</p>${S.preview?'<div class="notice" style="margin:0">Aperçu hébergé : utilisez des données fictives uniquement. Le téléchargement et les lanceurs sont destinés à l’usage local.</div>':''}</div></section>${S.settings.demo?`<section class="panel"><div class="panel-body"><h3>Données de démonstration</h3><p class="sub" style="margin:8px 0 14px">Efface toutes les données de cet espace démo, y compris vos ajouts. Sauvegardez-les avant de repartir d’un espace vierge.</p><button class="danger" data-action="reset-demo">${icon('trash')} Vider l’espace de démonstration</button></div></section>`:''}</div><section class="panel" style="grid-column:1/-1"><div class="panel-head"><h2>Journal d’activité</h2><span class="sub">80 dernières actions</span></div><div class="panel-body audit-list">${S.audit.map(r=>`<div class="audit-line"><time>${esc(new Date(r.at).toLocaleString('fr-FR'))}</time><strong style="min-width:90px">${esc(r.action)}</strong><span class="muted">${esc(r.detail)}</span></div>`).join('')||'<p class="sub">Aucune action enregistrée.</p>'}</div></section></div>`;}
 function render(){if(!['dashboard','settings',...Object.keys(navs),...S.scis.map(s=>s.id)].includes(page))page='dashboard';renderShell();let content='';if(page==='dashboard'){content=head('Votre patrimoine, en perspective.','L’essentiel de vos sociétés, réuni au même endroit.',yearSelect()+exportBtn()+`<button class="primary" data-action="new-sci">${icon('plus')} Nouvelle SCI</button>`,'Tableau de bord général')+(S.scis.length?dashboard():empty('Bienvenue dans votre espace patrimonial','Créez votre première SCI. Son espace de gestion apparaîtra automatiquement dans la navigation.',`<button class="primary" data-action="new-sci">${icon('plus')} Créer ma première SCI</button>`));}
 else if(page==='settings')content=settingsPage();else if(navs[page])content=listPage({treasury:'entries',agenda:'tasks',documents:'documents'}[page]);else{let s=currentSCI();content=head(s.name,(s.city||s.address||'Société civile immobilière')+' · Régime '+(s.regime||'IR'),yearSelect()+`<button data-action="edit-sci">${icon('edit')} Société</button>`+`<button class="primary" data-action="quick">${icon('plus')} Ajouter</button>`,'Espace société')+`<nav class="tabs" aria-label="Gestion de la SCI">${tabs.map(([t,n])=>`<button class="tab ${tab===t?'active':''}" data-tab="${t}">${n}</button>`).join('')}</nav>`+(tab==='overview'?dashboard(s.id):tab==='identity'?identity(s):listPage(tab,s.id));}
 const recoveryNotice=S.primary_db_missing?`<div class="notice" role="alert" style="border-left-color:var(--red)"><strong>La base principale data.db était absente.</strong> Dominis a créé une base vide ; les fichiers de auto-save/ ne sont pas utilisés comme base. Avant toute nouvelle saisie, restaurez une copie dans data.db.<div style="margin-top:10px"><button class="danger" data-action="restore">${icon('clock')} Restaurer une sauvegarde</button></div></div>`:'';$('#main').innerHTML=recoveryNotice+content+`<div class="footer"><span>DOMINIS <span style="opacity:.5;margin:0 7px">/</span> Votre patrimoine, en toute clarté.</span><span class="row gap8">${icon('lock')} Enregistrement local · Outil de gestion, hors comptabilité certifiée</span></div>`;updateCount();}
@@ -5934,11 +6432,12 @@ $('#do-export').onclick=async()=>{let btn=$('#do-export');btn.disabled=true;try{
 }
 async function download(res,name){let blob=await res.blob();if(S.native){await api('native-save',{filename:name,blob:await fileBase64(blob)});return;}let url=URL.createObjectURL(blob);let a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),2000);}
 function downloadText(text,name,type='text/html;charset=utf-8'){if(S.native){fileBase64(new Blob([text],{type})).then(blob=>api('native-save',{filename:name,blob})).catch(e=>notify(e.message,true));return;}let a=document.createElement('a'),u=URL.createObjectURL(new Blob([text],{type}));a.href=u;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(u),3000);}
-function importModal(){importData=null;openModal('Importer, en toute maîtrise',`<div class="notice">Aucune donnée existante n’est écrasée. L’import ajoute de nouveaux éléments ; vérifiez les doublons si vous importez plusieurs exports qui se recouvrent.</div>${field('import-format','Format du fichier','select','json',[['json','JSON — export Dominis'],['csv','CSV — mouvements de trésorerie']])}<div class="file-drop">Sélectionnez le fichier à analyser<input id="import-file" type="file" accept=".json,.csv" aria-label="Fichier à importer"></div><p class="sub">CSV UTF-8 : <code>date;label;direction;category;amount</code><br>Dates AAAA-MM-JJ · direction Recette ou Dépense · montants positifs.<br>Colonne facultative « sci » : les lignes sont regroupées par société. Vous choisissez une destination existante pour chaque groupe avant l’import.</p><button class="text-link" id="csv-template" style="margin-top:10px">Télécharger un modèle CSV →</button><div id="import-preview"></div>`,`<button data-action="close-modal">Annuler</button><button class="primary" id="analyze-import">${icon('search')} Analyser le fichier</button>`,true);
+function importModal(){importData=null;openModal('Importer, en toute maîtrise',`<div class="notice">Aucune donnée existante n’est écrasée. L’import ajoute de nouveaux éléments ; vérifiez les doublons si vous importez plusieurs exports qui se recouvrent.</div>${field('import-format','Format du fichier','select','json',[['json','JSON — export Dominis'],['csv','CSV — mouvements de trésorerie'],['xlsx','Excel — tableaux de trésorerie (.xlsx)']])}<div class="file-drop">Sélectionnez le fichier à analyser<input id="import-file" type="file" accept=".json,.csv,.xlsx" aria-label="Fichier à importer"></div><p class="sub">CSV UTF-8 : <code>date;label;direction;category;amount</code><br>Dates AAAA-MM-JJ · direction Recette ou Dépense · montants positifs.<br>Colonne facultative « sci » : les lignes sont regroupées par société. Vous choisissez une destination existante pour chaque groupe avant l’import.<br><br>Excel .xlsx : un ou plusieurs tableaux <code>Date · Libellé · Débit · Crédit · Solde</code>,<br>sur une ou plusieurs feuilles. Titres, soldes et totaux sont reconnus ; les lignes<br>de solde servent de contrôle de cohérence et ne sont pas importées.</p><button class="text-link" id="csv-template" style="margin-top:10px">Télécharger un modèle CSV →</button><div id="import-preview"></div>`,`<button data-action="close-modal">Annuler</button><button class="primary" id="analyze-import">${icon('search')} Analyser le fichier</button>`,true);
 $('#csv-template').onclick=()=>downloadText('date;label;direction;category;amount\n2026-10-01;Exemple de loyer;Recette;Loyers;850.00\n','modele-mouvements.csv','text/csv;charset=utf-8');
 $('#analyze-import').onclick=analyzeImport;
-$('#import-file').onchange=$('#f-import-format').onchange=()=>{importData=null;$('#import-preview').innerHTML='';$('#analyze-import').innerHTML=icon('search')+' Analyser le fichier';$('#analyze-import').onclick=analyzeImport;};}
-async function analyzeImport(){let btn=$('#analyze-import');btn.disabled=true;try{let file=$('#import-file').files[0];if(!file)throw new Error('Sélectionnez un fichier.');if(file.size>60*1024*1024)throw new Error('Import limité à 60 Mo.');importData={format:$('#f-import-format').value,text:await file.text()};let b=await (await api('import-preview',importData)).json();$('#import-preview').innerHTML=`<h3 style="margin:25px 0 12px">Vérifiez les sources et choisissez les destinations</h3>${b.scis.map(s=>`<div class="panel" style="margin-bottom:10px;padding:15px"><label class="row"><input type="checkbox" name="import-source" value="${esc(s.id)}" checked><strong>${esc(s.name)}</strong></label><p class="sub" style="margin:9px 0">${Object.entries(b.counts[s.id]).filter(([k,n])=>n).map(([k,n])=>n+' '+kindNames[k].toLowerCase()).join(' · ')||'Fiche SCI seule'}</p><select data-target="${esc(s.id)}" aria-label="Destination de ${esc(s.name)}">${importData.format==='json'?'<option value="new">Créer une nouvelle SCI (copie)</option>':'<option value="">Choisir la SCI de destination</option>'}${S.scis.map(t=>`<option value="${t.id}">Ajouter à ${esc(t.name)}</option>`).join('')}</select></div>`).join('')}${b.rows.length?`<h3>Aperçu des 5 premières lignes</h3><div class="table-wrap"><table><tbody>${b.rows.map(r=>`<tr><td>${date(r.date)}</td><td>${esc(r.label)}</td><td>${esc(r.direction)}</td><td>${money(r.amount,2)}</td></tr>`).join('')}</tbody></table></div>`:''}<p class="compact-note">Dans une SCI existante, la fiche société et les réglages sont conservés. Tous les éléments sélectionnés sont ajoutés, sans fusion automatique.</p>`;btn.innerHTML=icon('check')+' Confirmer l’import';btn.onclick=async()=>{btn.disabled=true;try{let mapping={};$$('input[name=import-source]:checked').forEach(e=>{let target=$$('select[data-target]').find(t=>t.dataset.target===e.value);mapping[e.value]=target.value;});if(Object.values(mapping).some(v=>!v))throw new Error('Choisissez une SCI de destination.');let r=await (await api('import',{...importData,mapping})).json();closeModal(true);await refresh();notify(r.count+' éléments importés.');}catch(e){modalError(e);btn.disabled=false;}};}catch(e){modalError(e)}finally{btn.disabled=false;}}
+$('#import-file').onchange=$('#f-import-format').onchange=()=>{importData=null;$('#import-preview').innerHTML='';$('#csv-template').style.display=$('#f-import-format').value==='csv'?'':'none';$('#analyze-import').innerHTML=icon('search')+' Analyser le fichier';$('#analyze-import').onclick=analyzeImport;};
+$('#csv-template').style.display=$('#f-import-format').value==='csv'?'':'none';}
+async function analyzeImport(){let btn=$('#analyze-import');btn.disabled=true;try{let file=$('#import-file').files[0];if(!file)throw new Error('Sélectionnez un fichier.');if(file.size>60*1024*1024)throw new Error('Import limité à 60 Mo.');let fmt=$('#f-import-format').value;importData={format:fmt,text:fmt==='xlsx'?await fileBase64(file):await file.text()};let b=await (await api('import-preview',importData)).json();$('#import-preview').innerHTML=`<h3 style="margin:25px 0 12px">Vérifiez les sources et choisissez les destinations</h3>${b.scis.map(s=>`<div class="panel" style="margin-bottom:10px;padding:15px"><label class="row"><input type="checkbox" name="import-source" value="${esc(s.id)}" checked><strong>${esc(s.name)}</strong></label><p class="sub" style="margin:9px 0">${Object.entries(b.counts[s.id]).filter(([k,n])=>n).map(([k,n])=>n+' '+kindNames[k].toLowerCase()).join(' · ')||'Fiche SCI seule'}${s.opening!=null&&s.opening_date?` · solde d’ouverture au ${date(s.opening_date)} : ${money(s.opening,2)}`:''}</p><select data-target="${esc(s.id)}" aria-label="Destination de ${esc(s.name)}">${importData.format==='csv'?'<option value="">Choisir la SCI de destination</option>':importData.format==='xlsx'?'<option value="new">Créer la nouvelle SCI (titre du tableau)</option>':'<option value="new">Créer une nouvelle SCI (copie)</option>'}${S.scis.map(t=>`<option value="${t.id}">Ajouter à ${esc(t.name)}</option>`).join('')}</select></div>`).join('')}${b.rows.length?`<h3>Aperçu des 5 premières lignes</h3><div class="table-wrap"><table><tbody>${b.rows.map(r=>`<tr><td>${date(r.date)}</td><td>${esc(r.label)}</td><td>${esc(r.direction)}</td><td>${money(r.amount,2)}</td></tr>`).join('')}</tbody></table></div>`:''}${b.warnings&&b.warnings.length?`<div class="notice" style="margin-top:15px"><strong>Contrôles de cohérence · ${b.warnings.length} avertissement${b.warnings.length>1?'s':''}</strong><ul style="margin:9px 0 0;padding-left:18px;line-height:1.65">${b.warnings.map(w=>`<li>${esc(w)}</li>`).join('')}</ul></div>`:''}<p class="compact-note">Dans une SCI existante, la fiche société et les réglages sont conservés. Tous les éléments sélectionnés sont ajoutés, sans fusion automatique.</p>`;btn.innerHTML=icon('check')+' Confirmer l’import';btn.onclick=async()=>{btn.disabled=true;try{let mapping={};$$('input[name=import-source]:checked').forEach(e=>{let target=$$('select[data-target]').find(t=>t.dataset.target===e.value);mapping[e.value]=target.value;});if(Object.values(mapping).some(v=>!v))throw new Error('Choisissez une SCI de destination.');let r=await (await api('import',{...importData,mapping})).json();closeModal(true);await refresh();notify(r.count+' éléments importés.');}catch(e){modalError(e);btn.disabled=false;}};}catch(e){modalError(e)}finally{btn.disabled=false;}}
 function restoreModal(){openModal('Restaurer tout l’espace',`<div class="notice">Cette action remplace toutes les SCI, documents, réglages et préférences. Une copie automatique de la base actuelle sera créée dans sauvegardes/ avant la restauration.</div>${field('restore-file','Sauvegarde Dominis .db (100 Mo maximum)','file','',null,true,true)}<div style="margin-top:18px">${field('confirm-restore','Saisissez RESTAURER pour confirmer','text','',null,true,true)}</div>`,`<button data-action="close-modal">Annuler</button><button class="danger" id="do-restore">${icon('clock')} Restaurer la sauvegarde</button>`);$('#f-restore-file').accept='.db';$('#do-restore').onclick=async()=>{let b=$('#do-restore');b.disabled=true;try{if($('#f-confirm-restore').value!=='RESTAURER')throw new Error('Saisissez RESTAURER pour confirmer.');let f=$('#f-restore-file').files[0];if(!f)throw new Error('Choisissez la sauvegarde.');if(f.size>100*1024*1024)throw new Error('Maximum 100 Mo.');await settingsQueue;await api('restore',{blob:await fileBase64(f)});closeModal(true);await load();page='dashboard';tab='overview';render();notify('Sauvegarde restaurée.');}catch(e){modalError(e);b.disabled=false;}};}
 function callsModal(){if(!currentSCI())return;openModal('Appeler les loyers du mois',`<div class="notice">SCI destinataire : <strong>${esc(currentSCI().name)}</strong>.<br>Un appel est créé pour chaque bail actif du mois. Les doublons bail/mois sont ignorés. Vérifiez les proratas et les dates d’exigibilité : la date par défaut est le 5.</div>${field('period','Mois à appeler','month',today().slice(0,7),null,true)}`,`<button data-action="close-modal">Annuler</button><button class="primary" id="generate-confirm">Générer les appels</button>`);$('#generate-confirm').onclick=async()=>{let b=$('#generate-confirm');b.disabled=true;try{let r=await (await api('generate-calls',{sci:page,period:$('#f-period').value})).json();closeModal(true);await refresh();notify(r.count+' appels créés. Vérifiez les proratas.');}catch(e){modalError(e);b.disabled=false;}};}
 function receipt(id){let c=rec(id),l=rec(c.lease_id),s=sci(c.sci),p=rec(l?.property_id);if(due(c)>.005)return notify('La quittance nécessite le règlement intégral.',true);let total=Number(c.rent||0)+Number(c.charges||0);let doc=`<!doctype html><html lang="fr"><meta charset="utf-8"><title>Quittance de loyer</title><style>body{font:15px Arial;color:#263028;max-width:760px;margin:60px auto;padding:35px}h1{font:36px Georgia}header{border-bottom:2px solid #b49c67;padding-bottom:25px}p{line-height:1.8}table{width:100%;margin:30px 0;border-collapse:collapse}td{padding:15px;border-bottom:1px solid #ddd}small{color:#666}.right{text-align:right}@media print{body{margin:0}button{display:none}}</style><header><small>DOMINIS · GESTION PATRIMONIALE</small><h1>Quittance de loyer</h1><p>Période : <strong>${esc(c.period)}</strong></p></header><p><strong>Bailleur :</strong> ${esc(s.name)}<br>${esc(s.address)}<br><strong>Locataire :</strong> ${esc(l?.tenant)}<br><strong>Bien loué :</strong> ${esc(p?.address)}</p><p>Le bailleur reconnaît avoir reçu le règlement intégral des sommes indiquées ci-dessous pour la période précisée et en donne quittance, sous réserve des droits du bailleur et des sommes pouvant rester dues pour d’autres périodes.</p><table><tr><td>Loyer hors charges</td><td class="right">${money(c.rent,2)}</td></tr><tr><td>Charges</td><td class="right">${money(c.charges,2)}</td></tr><tr><td><strong>Total payé</strong></td><td class="right"><strong>${money(total,2)}</strong></td></tr></table><p>Établie le ${date(today())}<br>Le bailleur : ${esc(s.manager||s.name)}</p><p><small>Document généré à partir des paiements enregistrés. À vérifier et à signer par le bailleur. La quittance ne vaut pas renonciation à d’autres sommes éventuellement dues.</small></p><button onclick="window.print()">Imprimer / enregistrer en PDF</button></html>`;downloadText(doc,'quittance-'+c.period+'.html');notify('Quittance HTML téléchargée. Ouvrez-la pour imprimer en PDF.');}
