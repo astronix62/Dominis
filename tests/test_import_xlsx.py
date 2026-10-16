@@ -426,12 +426,141 @@ class XlsxParseTests(unittest.TestCase):
         self.assertIn('encodage', str(ctx.exception))
 
     def test_record_limit(self):
-        rows = [HEADER]
-        for i in range(app.XLSX_MAX_RECORDS + 1):
-            rows.append([(0, 'n', serial(dt.date(2026, 1, 1)) + i % 365), t(1, 'Opération'), (3, 'n', 10.0)])
+        # La limite de sécurité reste très élevée : le test l'abaisse pour rester rapide.
+        with patch.object(app, 'XLSX_MAX_RECORDS', 50):
+            rows = [HEADER]
+            for i in range(app.XLSX_MAX_RECORDS + 1):
+                rows.append([(0, 'n', serial(dt.date(2026, 1, 1)) + i % 365), t(1, 'Opération'), (3, 'n', 10.0)])
+            with self.assertRaises(ValueError) as ctx:
+                parse(build_xlsx([('Géant', rows)]))
+        self.assertIn('50 opérations', str(ctx.exception))
+        with patch.object(app, 'XLSX_MAX_RECORDS', 50):
+            with self.assertRaises(ValueError) as ctx:
+                app.parse_import({'format': 'csv', 'text': 'date;label;direction;category;amount\n' + '\n'.join(
+                    '2026-01-0%d;Loyer %d;Recette;Loyers;10' % (i % 9 + 1, i) for i in range(51))})
+        self.assertIn('1 et 50 lignes', str(ctx.exception))
+
+    def test_monthly_solde_crediteur_debiteur_blank_rows_and_zero_opening(self):
+        header = [t(0, 'Date operation'), t(1, 'Libelle'), t(2, ' Débit '), t(3, ' Crédit '), t(4, ' Solde ')]
+        rows = [
+            [t(0, 'SCI THEMA Immobilier')],
+            [t(0, 'HSBC 2021')],
+            header,
+            None,  # ligne vide juste sous l'en-tête (ligne 4)
+            [t(1, 'Solde Créditeur au 01/07/2021'), n(4, 0.0)],  # ligne 5 : solde nul -> aucun solde initial affiché
+            [n(0, serial(dt.date(2021, 7, 29)), DATE_B), t(1, 'Virement Emilie VENIEL'), n(3, 24000.0)],
+            [n(0, serial(dt.date(2021, 7, 30)), DATE_B), t(1, 'Virement Arnauld LEE'), n(3, 18000.0)],
+            [n(0, serial(dt.date(2021, 7, 30)), DATE_B), t(1, 'Virement Arnauld LEE'), n(3, 6000.0)],
+            [t(1, 'Solde Créditeur au 30/07/2021'), n(4, 48000.0)],
+            [t(1, 'Solde Créditeur au 31/08/2021')],  # aucun solde affiché -> rien ne doit apparaître
+            [n(0, serial(dt.date(2021, 9, 2)), DATE_B), t(1, 'Virement Me Delforge'), n(2, 47500.0)],
+            [n(0, serial(dt.date(2021, 9, 3)), DATE_B), t(1, 'Frais virement'), n(2, 4.0)],
+            [n(0, serial(dt.date(2021, 9, 17)), DATE_B), t(1, 'AXA'), n(2, 66.28)],
+            [t(1, 'Solde Créditeur au 30/09/2021'), n(4, 429.72)],
+            [n(0, serial(dt.date(2021, 10, 25)), DATE_B), t(1, 'Remise de chèque N° 0645031'), n(3, 178.0)],
+            [n(0, serial(dt.date(2021, 10, 28)), DATE_B), t(1, 'Virement Visite Prest. Assain. Collectif'), n(2, 120.0)],
+            [t(1, 'Solde Créditeur au 29/10/2021'), n(4, 487.72)],
+            [n(0, serial(dt.date(2021, 11, 10)), DATE_B), t(1, 'Remise de chèque N° 0645032'), n(3, 431.45)],
+            [n(0, serial(dt.date(2021, 11, 16)), DATE_B), t(1, 'Virement Eric THOMAS'), n(3, 76.0)],
+            [t(1, 'Solde Créditeur au 30/11/2021'), n(4, 995.17)],
+            [n(0, serial(dt.date(2021, 12, 16)), DATE_B), t(1, 'Virement Eric THOMAS'), n(3, 76.0)],
+            [n(0, serial(dt.date(2021, 12, 29)), DATE_B), t(1, 'Charges Copro'), n(2, 209.68)],
+            [t(1, 'Solde Créditeur au 31/12/2021'), n(4, 861.49)],
+            None,
+        ]
+        bundle = parse(build_xlsx([('2021', rows)],
+                                  numfmts={164: 'dd/mm/yy;@'},
+                                  cell_xfs=[0, 44, 164, 14]))
+        self.assertEqual(bundle['warnings'], [])
+        self.assertEqual(len(bundle['scis']), 1)
+        sci = bundle['scis'][0]
+        self.assertEqual(sci['name'], 'SCI THEMA Immobilier')
+        self.assertNotIn('opening', sci)
+        self.assertEqual(len(bundle['records']), 12)
+        net = round(sum((r['amount'] if r['direction'] == 'Recette' else -r['amount']) for r in bundle['records']), 2)
+        self.assertEqual(net, 861.49)
+
+    def test_multi_sheet_year_tabs_partial_dates_and_large_tables(self):
+        header = [t(0, 'Date operation'), t(1, 'Libelle'), t(2, 'Débit'), t(3, 'Crédit'), t(4, 'Solde')]
+        sheet_2021 = [
+            [t(0, 'SCI THEMA Immobilier')],
+            [t(0, 'HSBC 2021')],
+            header,
+            None,
+            [t(1, 'Solde Créditeur au 01/01/2021'), n(4, 1000.0)],
+            [t(0, '15/01'), t(1, 'Loyer Janvier'), n(2, 0.0), n(3, 500.0)],
+            [t(0, '28 janvier'), t(1, 'Assurance'), n(2, 100.0), n(3, 0.0)],
+            [t(1, 'Solde Créditeur au 31/01/2021'), n(4, 1400.0)],
+        ]
+        sheet_2022 = [
+            [t(0, 'HSBC 2022')],  # sous-titre bancaire seul sur l'onglet 2022
+            header,
+            [t(1, 'Solde Créditeur au 01/01/2022'), n(4, 1400.0)],
+        ]
+        running = 1400.0
+        for m in range(1, 13):
+            for d in range(1, 21):
+                amt = 50.0 if d % 2 == 0 else 20.0
+                if d % 2 == 0:
+                    running = round(running + amt, 2)
+                    sheet_2022.append([t(0, f'{d:02d}/{m:02d}'), t(1, f'Opération {m}-{d}'), n(3, amt)])
+                else:
+                    running = round(running - amt, 2)
+                    sheet_2022.append([t(0, f'{d:02d}/{m:02d}'), t(1, f'Charge {m}-{d}'), n(2, amt)])
+            sheet_2022.append([t(1, f'Solde Créditeur au 28/{m:02d}/2022'), n(4, running)])
+            sheet_2022.append(None)
+
+        bundle = parse(build_xlsx([('2021', sheet_2021), ('2022', sheet_2022)],
+                                  numfmts={164: '#,##0.00" €"'}, cell_xfs=[0, 164]))
+        self.assertEqual(bundle['warnings'], [])
+        self.assertEqual(len(bundle['scis']), 1)
+        self.assertEqual(bundle['scis'][0]['name'], 'SCI THEMA Immobilier')
+        self.assertEqual(bundle['scis'][0]['opening'], 1000.0)
+        self.assertEqual(bundle['scis'][0]['opening_date'], '2021-01-01')
+        self.assertEqual(len(bundle['records']), 2 + 12 * 20)
+        self.assertEqual(bundle['records'][0]['date'], '2021-01-15')
+        self.assertEqual(bundle['records'][1]['date'], '2021-01-28')
+        self.assertEqual(bundle['records'][2]['date'], '2022-01-01')
+
+    def test_detailed_error_messages_include_sheet_row_column_and_context(self):
+        header = [t(0, 'Date operation'), t(1, 'Libelle'), t(2, 'Débit'), t(3, 'Crédit'), t(4, 'Solde')]
+        bad_amount_rows = [
+            [t(0, 'SCI ERREUR')],
+            header,
+            [t(0, '15/07/2021'), t(1, 'Facture plombier'), t(2, '12abc')],
+        ]
         with self.assertRaises(ValueError) as ctx:
-            parse(build_xlsx([('Géant', rows)]))
-        self.assertIn('40 000', str(ctx.exception))
+            parse(build_xlsx([('2021', bad_amount_rows)]))
+        msg = str(ctx.exception)
+        self.assertIn('Feuille « 2021 »', msg)
+        self.assertIn('ligne 3', msg)
+        self.assertIn('colonne C (« Débit »)', msg)
+        self.assertIn('montant illisible', msg)
+        self.assertIn('Facture plombier', msg)
+
+    def test_tabular_csv_and_xlsx_disguised_as_csv(self):
+        csv_tabular = (
+            'SCI THEMA Immobilier;;;;\n'
+            'HSBC 2021;;;;\n'
+            'Date operation;Libelle; Débit ; Crédit ; Solde \n'
+            ';;;;\n'
+            ';Solde Créditeur au 01/07/2021;;;- €\n'
+            '29/07/2021;Virement Emilie VENIEL;;24 000,00 €;\n'
+            '30/07/2021;Virement Arnauld LEE;;18 000,00 €;\n'
+            ';Solde Créditeur au 30/07/2021;;;42 000,00 €\n'
+        )
+        bundle_csv = app.parse_import({'format': 'csv', 'text': csv_tabular})
+        self.assertEqual(bundle_csv['warnings'], [])
+        self.assertEqual(len(bundle_csv['scis']), 1)
+        self.assertEqual(bundle_csv['scis'][0]['name'], 'SCI THEMA Immobilier')
+        self.assertNotIn('opening', bundle_csv['scis'][0])
+        self.assertEqual(len(bundle_csv['records']), 2)
+        self.assertEqual(bundle_csv['records'][0]['amount'], 24000.0)
+
+        # Fichier .xlsx envoyé avec format='csv' (ex. extension .csv sur une archive .xlsx)
+        xlsx_b64 = b64(sample_xlsx())
+        bundle_auto = app.parse_import({'format': 'csv', 'text': xlsx_b64})
+        self.assertEqual(len(bundle_auto['records']), 14)
 
 
 class XlsxImportBundleTests(unittest.TestCase):

@@ -195,6 +195,234 @@ class DominisTests(unittest.TestCase):
         if os.name != 'nt':
             self.assertTrue((folder / 'Lancer_Dominis.command').stat().st_mode & 0o111)
 
+    def test_task_reminders_important_and_read_reminders_validation(self):
+        with app.connect() as c:
+            sci_id = app.save_record(c, {'kind': 'sci', 'data': {'name': 'SCI Rappels', 'opening_date': '2026-01-01'}})
+            task_id = app.save_record(c, {
+                'kind': 'tasks',
+                'sci': sci_id,
+                'data': {
+                    'name': 'Déclaration 2072',
+                    'due': '2026-05-01',
+                    'category': 'Fiscalité',
+                    'status': 'À faire',
+                    'important': True,
+                    'reminders_enabled': True,
+                    'reminder_count': 2,
+                    'reminders': ['2026-04-15', '2026-04-28'],
+                    'read_reminders': ['2026-04-15'],
+                },
+            })
+            c.commit()
+            st = app.state(c)
+            rec = next(r for r in st['records'] if r['id'] == task_id)
+            self.assertTrue(rec['important'])
+            self.assertTrue(rec['reminders_enabled'])
+            self.assertEqual(rec['reminder_count'], 2)
+            self.assertEqual(rec['reminders'], ['2026-04-15', '2026-04-28'])
+            self.assertEqual(rec['read_reminders'], ['2026-04-15'])
+
+            # Disabled reminders normalize list and count to empty / 0
+            cleaned = app.clean('tasks', {
+                'name': 'AG ordinaire',
+                'due': '2026-06-01',
+                'important': False,
+                'reminders_enabled': False,
+                'reminder_count': 3,
+                'reminders': ['2026-05-20'],
+            })
+            self.assertFalse(cleaned['important'])
+            self.assertFalse(cleaned['reminders_enabled'])
+            self.assertEqual(cleaned['reminder_count'], 0)
+            self.assertEqual(cleaned['reminders'], [])
+
+            # Invalid reminder date is rejected
+            with self.assertRaises(ValueError):
+                app.clean('tasks', {
+                    'name': 'Test invalide',
+                    'due': '2026-06-01',
+                    'reminders_enabled': True,
+                    'reminders': ['not-a-date'],
+                })
+
+    def test_table_columns_settings_persistence_and_validation(self):
+        server = app.DominisHTTPServer(('127.0.0.1', 0), app.Handler)
+        port = server.server_port
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            custom_cols = {
+                'entries': {'order': ['label', 'amount', 'date', 'sci', 'category'], 'hidden': ['category']},
+                'tasks': {'order': ['name', 'due', 'status', 'sci', 'category'], 'hidden': []},
+            }
+            req = Request(
+                f'http://127.0.0.1:{port}/api/settings',
+                data=json.dumps({'table_columns': custom_cols}).encode(),
+                headers={'Content-Type': 'application/json', 'X-Dominis-Token': app.TOKEN},
+            )
+            with LOCAL_OPENER.open(req, timeout=5) as r:
+                self.assertEqual(r.status, 200)
+
+            with app.connect() as c:
+                st = app.settings(c)
+                self.assertEqual(st['table_columns'], custom_cols)
+
+            bad_req = Request(
+                f'http://127.0.0.1:{port}/api/settings',
+                data=json.dumps({'table_columns': ['invalid']}).encode(),
+                headers={'Content-Type': 'application/json', 'X-Dominis-Token': app.TOKEN},
+            )
+            with self.assertRaises(HTTPError) as ctx:
+                LOCAL_OPENER.open(bad_req, timeout=5)
+            self.assertEqual(ctx.exception.code, 400)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_ui_template_contains_table_gear_bell_and_macos_notifications(self):
+        self.assertIn('table-gear-btn', app.HTML)
+        self.assertIn('bell-badge', app.HTML)
+        self.assertIn('mac-notif-container', app.HTML)
+        self.assertIn('f-task-important', app.HTML)
+        self.assertIn('f-task-reminders-toggle', app.HTML)
+        self.assertIn('f-reminder-count', app.HTML)
+        self.assertIn("r.direction==='Recette'?'green':'red'", app.HTML)
+
+    def test_property_photo_round_trip_and_crop_geometry(self):
+        tiny_png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+        with app.connect() as c:
+            sci = app.save_record(c, {'kind': 'sci', 'data': {'name': 'SCI Photo', 'opening_date': '2026-01-01'}})
+            prop = app.save_record(c, {'kind': 'properties', 'sci': sci, 'data': {
+                'name': 'Immeuble', 'address': '1 rue du Port', 'value': 100000,
+                'photo': tiny_png, 'photo_x': 42, 'photo_y': 8, 'photo_zoom': 1.75,
+            }})
+            saved = app.unpack(c.execute('SELECT * FROM records WHERE id=?', (prop,)).fetchone())
+            self.assertEqual(saved['photo'], tiny_png)
+            self.assertEqual(saved['photo_x'], 42)
+            self.assertEqual(saved['photo_y'], 8)
+            self.assertEqual(saved['photo_zoom'], 1.75)
+            # Un bien sans photo ne conserve aucune donnée de cadrage inventée.
+            plain = app.save_record(c, {'kind': 'properties', 'sci': sci, 'data': {
+                'name': 'Studio', 'address': '2 rue du Port', 'photo': '', 'photo_x': 12}}) 
+            plain_saved = app.unpack(c.execute('SELECT * FROM records WHERE id=?', (plain,)).fetchone())
+            self.assertNotIn('photo', plain_saved)
+            # Une photo retirée disparaît réellement du bien enregistré.
+            app.save_record(c, {'kind': 'properties', 'id': prop, 'sci': sci, 'data': {
+                'name': 'Immeuble', 'address': '1 rue du Port', 'photo': ''}})
+            updated = app.unpack(c.execute('SELECT * FROM records WHERE id=?', (prop,)).fetchone())
+            self.assertNotIn('photo', updated)
+
+    def test_document_folders_persist_and_validate(self):
+        server = app.DominisHTTPServer(('127.0.0.1', 0), app.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            folders = [{'id': 'f-statuts', 'name': 'Statuts & AG'}, {'id': 'f-perso', 'name': 'Contentieux'}]
+            req = Request('http://127.0.0.1:' + str(server.server_port) + '/api/settings',
+                          data=json.dumps({'doc_folders': folders}).encode(),
+                          headers={'Content-Type': 'application/json', 'X-Dominis-Token': app.TOKEN})
+            with LOCAL_OPENER.open(req, timeout=5) as r:
+                self.assertEqual(r.status, 200)
+            with app.connect() as c:
+                self.assertEqual(app.settings(c)['doc_folders'], folders)
+            bad = Request('http://127.0.0.1:' + str(server.server_port) + '/api/settings',
+                          data=json.dumps({'doc_folders': 'Statuts'}).encode(),
+                          headers={'Content-Type': 'application/json', 'X-Dominis-Token': app.TOKEN})
+            with self.assertRaises(HTTPError) as ctx:
+                LOCAL_OPENER.open(bad, timeout=5)
+            self.assertEqual(ctx.exception.code, 400)
+        finally:
+            server.shutdown()
+            server.server_close()
+        with app.connect() as c:
+            sci = app.save_record(c, {'kind': 'sci', 'data': {'name': 'SCI Dossiers', 'opening_date': '2026-01-01'}})
+            doc = app.save_record(c, {'kind': 'documents', 'sci': sci, 'data': {
+                'name': 'Bail signé', 'category': 'Bail', 'folder_id': 'f-immobilier', 'notes': 'Classé.'}})
+            stored = app.unpack(c.execute('SELECT * FROM records WHERE id=?', (doc,)).fetchone())
+            self.assertEqual(stored['folder_id'], 'f-immobilier')
+            # Un dossier inconnu reste accepté (chaîne libre) mais n'altère aucune donnée.
+            other = app.save_record(c, {'kind': 'documents', 'sci': sci, 'data': {
+                'name': 'Note', 'folder_id': ''}})
+            self.assertEqual(app.unpack(c.execute('SELECT * FROM records WHERE id=?', (other,)).fetchone()).get('folder_id', ''), '')
+
+    def test_document_preview_endpoint_and_query_token(self):
+        png = (b'\x89PNG\r\n\x1a\n' + b'\x00' * 24)
+        with app.connect() as c:
+            sci = app.save_record(c, {'kind': 'sci', 'data': {'name': 'SCI Aperçu', 'opening_date': '2026-01-01'}})
+            image = app.save_record(c, {'kind': 'documents', 'sci': sci, 'data': {
+                'name': 'Façade', 'category': 'Diagnostic', 'filename': 'facade.png', 'mime': 'image/png',
+                'blob': app.base64.b64encode(png).decode()}})
+            note = app.save_record(c, {'kind': 'documents', 'sci': sci, 'data': {'name': 'Note seule', 'category': 'Autre'}})
+            c.commit()
+            image_row = c.execute('SELECT * FROM records WHERE id=?', (image,)).fetchone()
+            preview = app.build_document_preview(image_row)
+            self.assertEqual(preview['preview_type'], 'image')
+            self.assertTrue(preview['data_url'].startswith('data:image/png;base64,'))
+            self.assertEqual(preview['name'], 'Façade')
+            note_row = c.execute('SELECT * FROM records WHERE id=?', (note,)).fetchone()
+            self.assertEqual(app.build_document_preview(note_row)['preview_type'], 'note')
+            self.assertNotIn('blob', app.build_document_preview(note_row))
+            for filename, mime, payload, expected in [
+                ('quittance.pdf', 'application/pdf', b'%PDF-1.4\n1 0 obj\n<<>>\nendobj\n', 'pdf'),
+                ('releve.csv', 'text/csv', b'date;libelle\n01/07/2021;Loyer\n', 'csv'),
+                ('bail.txt', 'text/plain', 'Bail notarié'.encode(), 'text'),
+                ('archive.zip', 'application/zip', b'PK\x03\x04pas un classeur', 'binary'),
+            ]:
+                with self.subTest(filename=filename):
+                    doc = app.save_record(c, {'kind': 'documents', 'sci': sci, 'data': {
+                        'name': filename, 'filename': filename, 'mime': mime,
+                        'blob': app.base64.b64encode(payload).decode()}})
+                    row = c.execute('SELECT * FROM records WHERE id=?', (doc,)).fetchone()
+                    preview = app.build_document_preview(row)
+                    self.assertEqual(preview['preview_type'], expected)
+                    if expected == 'csv':
+                        self.assertEqual(preview['rows'][1][1], 'Loyer')
+        server = app.DominisHTTPServer(('127.0.0.1', 0), app.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            base = 'http://127.0.0.1:' + str(server.server_port)
+            with patch.object(app, 'PREVIEW', True):
+                with LOCAL_OPENER.open(base + '/api/document?id=' + image + '&token=' + app.TOKEN, timeout=5) as r:
+                    self.assertEqual(r.read(), png)
+                # Le cadre d'aperçu (iframe) ne peut pas porter d'en-tête : le jeton passe en paramètre.
+                with LOCAL_OPENER.open(base + '/api/document-preview?id=' + image + '&token=' + app.TOKEN, timeout=5) as r:
+                    body = json.load(r)
+                self.assertEqual(body['preview_type'], 'image')
+                with self.assertRaises(HTTPError) as ctx:
+                    LOCAL_OPENER.open(base + '/api/document-preview?id=' + image + '&token=faux', timeout=5)
+                self.assertEqual(ctx.exception.code, 403)
+                with self.assertRaises(HTTPError) as ctx:
+                    LOCAL_OPENER.open(base + '/api/document-preview?id=introuvable&token=' + app.TOKEN, timeout=5)
+                self.assertEqual(ctx.exception.code, 400)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_ui_template_contains_photo_preview_folders_and_sidebar_fix(self):
+        self.assertIn('prop-crop-box', app.HTML)
+        self.assertIn('f-photo-file', app.HTML)
+        self.assertIn('photoCropBake', app.HTML)
+        self.assertIn('photoPosition', app.HTML)
+        self.assertIn('object-position', app.HTML)
+        self.assertIn('16:5', app.HTML)
+        self.assertIn('1600 × 500 px', app.HTML)
+        self.assertIn('doc-folders-bar', app.HTML)
+        self.assertIn('folder_id', app.HTML)
+        self.assertIn('data-doc-open', app.HTML)
+        self.assertIn('documentPreview', app.HTML)
+        self.assertIn('doc-preview-stage', app.HTML)
+        self.assertIn('docPreviewStageZoom', app.HTML)
+        self.assertIn('doc-preview-modal', app.HTML)
+        self.assertIn(".empty button{", app.HTML)
+        self.assertIn('user-lock', app.HTML)
+        self.assertIn('body.collapsed .user-details,body.collapsed .user-lock', app.HTML)
+        self.assertIn('Pièce jointe limitée à 500 Mo', app.HTML)
+        self.assertIn('Import limité à 500 Mo', app.HTML)
+        self.assertIn('MAX_TASK_REMINDERS', Path(APP).read_text(encoding='utf-8'))
+        self.assertIn('MAX_TASK_REMINDERS = 365', Path(APP).read_text(encoding='utf-8'))
+        self.assertIn('XLSX_MAX_RECORDS = 200000', Path(APP).read_text(encoding='utf-8'))
+
 
 if __name__ == '__main__':
     unittest.main()

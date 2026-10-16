@@ -4777,7 +4777,7 @@ PREVIEW = False
 AUTO_SAVE_NOTICE = None
 PRIMARY_DB_MISSING = False
 KINDS = ['properties','leases','partners','loans','calls','entries','tasks','documents']
-DEFAULTS = {'theme':'dark','collapsed':False,'order':[], 'year':dt.date.today().year, 'last_page':'dashboard','last_tab':'overview','last_backup':'','owner':'Mon espace patrimonial','auto_backup':True,'weekly_auto_save':True,'last_auto_save_week':''}
+DEFAULTS = {'theme':'dark','collapsed':False,'order':[], 'year':dt.date.today().year, 'last_page':'dashboard','last_tab':'overview','last_backup':'','owner':'Mon espace patrimonial','auto_backup':True,'weekly_auto_save':True,'last_auto_save_week':'','table_columns':{},'doc_folders':[]}
 
 # Les mises à jour ne remplacent que le script. Aucun téléchargement de data.db.
 APP_VERSION = 'v0.0.3'
@@ -5241,16 +5241,40 @@ def clean(kind,data):
     required={'sci':['name'],'properties':['name','address'],'leases':['tenant','property_id','start'],'partners':['name'],'loans':['name'],'calls':['lease_id','period','due'],'entries':['label','date','direction'],'tasks':['name','due'],'documents':['name']}
     for f in required.get(kind,[]):
         if not str(d.get(f,'')).strip(): raise ValueError('Champ obligatoire : '+f)
+    if kind=='tasks':
+        d['important']=bool(d.get('important',False))
+        d['reminders_enabled']=bool(d.get('reminders_enabled',False))
+        try: rc=int(d.get('reminder_count',0) or 0)
+        except (ValueError,TypeError): raise ValueError('Nombre de rappels invalide.')
+        if rc<0 or rc>MAX_TASK_REMINDERS: raise ValueError('Nombre de rappels hors limites.')
+        for rk in ('reminders','read_reminders'):
+            vals=d.get(rk,[])
+            if vals is None: vals=[]
+            if not isinstance(vals,list) or len(vals)>MAX_TASK_REMINDERS+100: raise ValueError('Liste de rappels invalide : '+rk)
+            cleaned_dates=[]
+            for item in vals:
+                if not isinstance(item,str): raise ValueError('Date de rappel invalide.')
+                try: dt.date.fromisoformat(item)
+                except ValueError: raise ValueError('Date de rappel invalide : '+item)
+                cleaned_dates.append(item)
+            d[rk]=cleaned_dates
+        if not d['reminders_enabled']:
+            d['reminders']=[]; d['reminder_count']=0
+        else:
+            d['reminder_count']=len(d['reminders'])
     for k,v in list(d.items()):
+        if kind=='tasks' and k in ('reminders','read_reminders'): continue
         if not isinstance(v,(str,int,float,bool,type(None))): raise ValueError('Valeur non prise en charge : '+k)
-        if isinstance(v,str) and k!='blob' and len(v)>30000: raise ValueError('Texte trop long.')
+        if isinstance(v,str) and k!='blob' and len(v)>50*1024*1024: raise ValueError('Texte trop long.')
+    if kind=='properties':
+        if not d.get('photo'): d.pop('photo',None)
     amounts=['capital','opening','value','purchase','surface','rent','charges','deposit','shares','cca','principal','balance','rate','monthly','amount','paid','interest','insurance']
     for f in amounts:
         if f in d:
             try:
                 from decimal import Decimal, InvalidOperation
                 v=Decimal(str(d[f] or 0))
-                if not v.is_finite() or abs(v)>Decimal('1000000000000'): raise ValueError('Montant hors limites.')
+                if not v.is_finite() or abs(v)>Decimal('1000000000000000000000000000'): raise ValueError('Montant hors limites.')
                 if f not in ('opening','cca') and v<0: raise ValueError('Le montant doit être positif : '+f)
                 d[f]=float(v.quantize(Decimal('0.01')))
             except (InvalidOperation,TypeError): raise ValueError('Montant invalide : '+f)
@@ -5267,11 +5291,15 @@ def clean(kind,data):
     if kind=='calls':
         try: dt.date.fromisoformat(d['period']+'-01')
         except (ValueError,TypeError): raise ValueError('Période invalide.')
-    if kind=='documents' and d.get('blob'):
-        try: raw=base64.b64decode(d['blob'],validate=True)
-        except Exception: raise ValueError('Pièce jointe invalide.')
-        if len(raw)>12*1024*1024: raise ValueError('Pièce jointe limitée à 12 Mo.')
-        d['size']=len(raw)
+    if kind=='documents':
+        if 'doc_order' in d and d['doc_order'] not in (None,''):
+            try: d['doc_order']=int(float(d['doc_order']))
+            except (ValueError,TypeError): d.pop('doc_order',None)
+        if d.get('blob'):
+            try: raw=base64.b64decode(d['blob'],validate=True)
+            except Exception: raise ValueError('Pièce jointe invalide.')
+            if len(raw)>500*1024*1024: raise ValueError('Pièce jointe limitée à 500 Mo.')
+            d['size']=len(raw)
     return d
 
 REFS={'property_id':'properties','lease_id':'leases','call_id':'calls'}
@@ -5298,8 +5326,12 @@ def save_record(c,p):
     else:
         if not c.execute('SELECT id FROM scis WHERE id=?',(sci,)).fetchone(): raise ValueError('SCI introuvable.')
         if previous and previous['sci']!=sci: raise ValueError('Impossible de changer la SCI.')
-        if kind=='documents' and previous and not d.get('blob'):
-            old=json.loads(previous['data']); d.update({k:old[k] for k in ['blob','size','filename','mime'] if k in old})
+        if kind=='documents' and previous:
+            old=json.loads(previous['data'])
+            if not d.get('blob'):
+                d.update({k:old[k] for k in ['blob','size','filename','mime'] if k in old})
+            if 'doc_order' not in d and 'doc_order' in old:
+                d['doc_order']=old['doc_order']
         validate_refs(c,sci,d,ident)
         if kind=='calls':
             for r in c.execute("SELECT * FROM records WHERE sci=? AND kind='calls' AND id<>?",(sci,ident)):
@@ -5461,11 +5493,38 @@ def export_bundle(c,p):
 # Les lignes portant un libellé sont des mouvements (Débit → Dépense, Crédit → Recette).
 # Les lignes sans libellé (soldes d'ouverture, clôtures, totaux) sont des contrôles :
 # elles ne sont pas importées mais servent à valider la réconciliation des soldes.
-XLSX_MAX_RECORDS = 40000
+XLSX_MAX_RECORDS = 200000
+# Nombre maximum de rappels datés réglable depuis une échéance (l'interface en propose 30 par défaut).
+MAX_TASK_REMINDERS = 365
 _XL_DATE_NUMFMT = {14,15,16,17,18,19,20,21,22,27,28,29,30,31,32,33,34,35,36,45,46,47,50,51,52,53,54,55,56,57,58}
 _XL_ACCENTS = str.maketrans({'à':'a','â':'a','ä':'a','ç':'c','é':'e','è':'e','ê':'e','ë':'e','î':'i','ï':'i','ô':'o','ö':'o','ù':'u','û':'u','ü':'u','œ':'oe','ÿ':'y'})
 _XL_SPACES = '\u00a0\u202f\u2009\u200b\u3000 \t\r\n\'’'
-_XL_GENERIC_SHEET = re.compile(r'^(?:feuilles?|feuils?|sheets?|classeurs?)\s*\d*$', re.I)
+_XL_GENERIC_SHEET = re.compile(r'^(?:feuilles?|feuils?|sheets?|classeurs?|csv)\s*\d*$', re.I)
+_XL_YEAR_ONLY = re.compile(r'^(?:ann[eé]es?\s+|exercices?\s+|comptes?\s+| relev[eé]s?\s+)?(19\d\d|20\d\d)$', re.I)
+_XL_MONTHS = {
+    'janvier': 1, 'janv': 1, 'jan': 1,
+    'fevrier': 2, 'fevr': 2, 'fev': 2,
+    'mars': 3, 'mar': 3,
+    'avril': 4, 'avr': 4,
+    'mai': 5,
+    'juin': 6, 'jun': 6,
+    'juillet': 7, 'juil': 7, 'jul': 7,
+    'aout': 8, 'aou': 8,
+    'septembre': 9, 'sept': 9, 'sep': 9,
+    'octobre': 10, 'oct': 10,
+    'novembre': 11, 'nov': 11,
+    'decembre': 12, 'dec': 12,
+}
+_XL_BALANCE_RE = re.compile(
+    r'^(?:solde\b|ancien\s+solde\b|nouveau\s+solde\b|report\s+(?:a\s+)?nouveau\b|report\b|'
+    r'totaux\b|total\b|sous[\s\-]*total\b|cumul\b|bilan\b|fin\s+de\s+mois\b|debut\s+de\s+mois\b)',
+    re.I,
+)
+_XL_PERIOD_SUBTITLE_RE = re.compile(
+    r'^(?:(?:mois\s+(?:de\s+|d\s*))?(?:janvier|fevrier|mars|avril|mai|juin|juillet|aout|septembre|octobre|novembre|decembre)'
+    r'(?:\s+(?:19\d\d|20\d\d))?|(?:ann[eé]e\s+|exercice\s+|trimestre\s+|semestre\s+)?(?:19\d\d|20\d\d))$',
+    re.I,
+)
 
 
 def _x_local(el):
@@ -5474,6 +5533,38 @@ def _x_local(el):
 
 def _x_present(value):
     return value is not None and (not isinstance(value, str) or value.strip() != '')
+
+
+def _x_norm(value):
+    if value is None: return ''
+    return ' '.join(str(value).lower().translate(_XL_ACCENTS).replace('’', ' ').replace("'", ' ').split())
+
+
+def _x_is_balance_label(value):
+    if not isinstance(value, str): return False
+    s = _x_norm(value)
+    return bool(_XL_BALANCE_RE.match(s))
+
+
+def _x_is_debit_balance_label(value):
+    if not _x_is_balance_label(value): return False
+    s = _x_norm(value)
+    return 'debiteur' in s or 'negatif' in s
+
+
+def _x_find_year(value):
+    if not value: return None
+    m = re.search(r'(?<!\d)(19\d\d|20\d\d)(?!\d)', str(value))
+    return int(m.group(1)) if m else None
+
+
+def _x_col_letter(col_idx):
+    if col_idx is None or col_idx < 0: return '?'
+    n, out = int(col_idx) + 1, ''
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        out = chr(65 + rem) + out
+    return out
 
 
 def _x_eur(value):
@@ -5492,54 +5583,60 @@ def _x_header_kinds(cells):
         if not s: continue
         kind = None
         if 'date' in s: kind = 'date'
-        elif any(t in s for t in ('libell', 'label', 'description', 'operation')): kind = 'label'
-        elif 'debit' in s: kind = 'debit'
-        elif 'credit' in s: kind = 'credit'
+        elif any(t in s for t in ('libell', 'label', 'description', 'operation', 'intitul', 'nature', 'objet')): kind = 'label'
+        elif 'debit' in s or re.search(r'\bd.?bit\b', s): kind = 'debit'
+        elif 'credit' in s or re.search(r'\bcr.?dit\b', s): kind = 'credit'
         elif 'solde' in s or 'balance' in s: kind = 'solde'
-        elif 'categorie' in s or 'category' in s: kind = 'category'
+        elif 'categorie' in s or 'category' in s or re.search(r'\bcat.?gorie\b', s): kind = 'category'
         if kind and kind not in kinds: kinds[kind] = col
     return kinds if all(k in kinds for k in ('date', 'label', 'debit', 'credit')) else None
 
 
-def _x_amount(value):
+def _x_amount(value, zero_dash=False):
     """Convertit un montant Excel (numérique ou texte français « 32 155,66 € ») en float."""
     if value is None or isinstance(value, bool): return None
     if isinstance(value, (dt.datetime, dt.date)): return None
     if isinstance(value, (int, float)):
         v = float(value)
     else:
-        s = str(value).strip()
-        if not s: return None
+        raw_str = str(value).strip()
+        if not raw_str: return None
+        if raw_str.startswith('#') and raw_str.endswith(('!', '?')):
+            raise ValueError('montant illisible : erreur de formule Excel « ' + raw_str[:40] + ' »')
+        s = raw_str
         paren = s.startswith('(') and s.endswith(')')
         if paren: s = s[1:-1]
-        s = s.replace('−', '-').replace('€', '')
+        s = s.replace('−', '-').replace('–', '-').replace('—', '-').replace('€', '')
         s = re.sub(r'(?i)\beur\b', '', s)
         for ch in _XL_SPACES: s = s.replace(ch, '')
-        if not s: raise ValueError('montant illisible.')
+        if not s: return None
+        if re.fullmatch(r'-+', s):
+            return 0.0 if zero_dash else None
         sign = -1 if (paren or s.startswith('-')) else 1
         s = s.lstrip('+-')
-        if not s: raise ValueError('montant illisible.')
+        if not s:
+            return 0.0 if zero_dash else None
         if ',' in s and '.' in s:
             if s.rfind(',') > s.rfind('.'): s = s.replace('.', '').replace(',', '.')
             else: s = s.replace(',', '')
         elif ',' in s:
             s = s.replace(',', '.')
         if not re.fullmatch(r'\d+(?:\.\d+)?', s):
-            raise ValueError('montant illisible : « ' + str(value).strip()[:60] + ' »')
+            raise ValueError('montant illisible : « ' + raw_str[:60] + ' »')
         try: v = sign * float(s)
-        except ValueError: raise ValueError('montant illisible : « ' + str(value).strip()[:60] + ' »')
-    if not (-1e12 < v < 1e12): raise ValueError('montant hors limites.')
+        except ValueError: raise ValueError('montant illisible : « ' + raw_str[:60] + ' »')
+    if v != v or not (-1e12 < v < 1e12): raise ValueError('montant hors limites.')
     return v
 
 
-def _x_date(value, epoch):
-    """Date Excel : sérial numérique, cellule date, ISO, ou JJ/MM/AA(A) français."""
+def _x_date(value, epoch, default_year=None):
+    """Date Excel : sérial numérique, cellule date, ISO, ou JJ/MM(/AA[AA]) français."""
     if isinstance(value, dt.datetime): return value.date()
     if isinstance(value, dt.date): return value
     if value is None or isinstance(value, bool): return None
     if isinstance(value, (int, float)):
         v = float(value)
-        if v != v or v < 0 or v > 3000000: return None
+        if v != v or v < 10000 or v > 100000: return None
         try: return epoch + dt.timedelta(days=int(v))
         except (OverflowError, ValueError): return None
     s = str(value).strip()
@@ -5549,21 +5646,62 @@ def _x_date(value, epoch):
         if sep in s: candidates.append(s.split(sep, 1)[0])
     for cand in dict.fromkeys(candidates):
         cand = cand.strip().rstrip('.').strip()
-        m = re.fullmatch(r'(\d{4})-(\d{1,2})-(\d{1,2})', cand)
+        m = re.fullmatch(r'(\d{4})[/\-.](\d{1,2})[/\-.](\d{1,2})', cand)
         if m:
             try: return dt.date(int(m[1]), int(m[2]), int(m[3]))
-            except ValueError: continue
+            except ValueError: return None
         m = re.fullmatch(r'(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})', cand)
         if m:
             day, mon, yr = int(m[1]), int(m[2]), int(m[3])
             if yr < 100: yr += 2000 if yr <= 68 else 1900
             try: return dt.date(yr, mon, day)
-            except ValueError: continue
+            except ValueError: return None
+        if default_year:
+            m = re.fullmatch(r'(\d{1,2})[/\-.](\d{1,2})[/\-.]?', cand)
+            if m:
+                try: return dt.date(int(default_year), int(m[2]), int(m[1]))
+                except ValueError: return None
+    norm = _x_norm(s).replace('.', ' ')
+    m_txt = re.fullmatch(r'(\d{1,2})(?:er)?\s+([a-z]+)(?:\s+(\d{2,4}))?', norm)
+    if m_txt and m_txt.group(2) in _XL_MONTHS:
+        day = int(m_txt.group(1))
+        mon = _XL_MONTHS[m_txt.group(2)]
+        yr = int(m_txt.group(3)) if m_txt.group(3) else default_year
+        if yr:
+            if yr < 100: yr += 2000 if yr <= 68 else 1900
+            try: return dt.date(int(yr), mon, day)
+            except ValueError: return None
     if re.fullmatch(r'\d{4,5}(?:\.0+)?', s):
         n = int(float(s))
-        if 10000 <= n <= 80000:
+        if 10000 <= n <= 100000:
             try: return epoch + dt.timedelta(days=n)
             except (OverflowError, ValueError): return None
+    return None
+
+
+def _x_extract_date_from_text(text, epoch, default_year=None):
+    """Extrait une date présente dans un libellé de solde (ex. « Solde Créditeur au 01/07/2021 »)."""
+    if not text: return None
+    direct = _x_date(text, epoch, default_year=default_year)
+    if direct is not None: return direct
+    s = str(text)
+    for m in re.finditer(r'(\d{4}[/\-.]\d{1,2}[/\-.]\d{1,2}|\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4})', s):
+        d = _x_date(m.group(1), epoch, default_year=default_year)
+        if d is not None: return d
+    norm = _x_norm(s).replace('.', ' ')
+    for m in re.finditer(r'\b(\d{1,2})(?:er)?\s+([a-z]+)(?:\s+(\d{2,4}))?\b', norm):
+        if m.group(2) in _XL_MONTHS:
+            day = int(m.group(1))
+            mon = _XL_MONTHS[m.group(2)]
+            yr = int(m.group(3)) if m.group(3) else default_year
+            if yr:
+                if yr < 100: yr += 2000 if yr <= 68 else 1900
+                try: return dt.date(int(yr), mon, day)
+                except ValueError: pass
+    if default_year:
+        for m in re.finditer(r'(?<!\d)(\d{1,2})[/\-.](\d{1,2})(?![/\-.\d])', s):
+            try: return dt.date(int(default_year), int(m.group(2)), int(m.group(1)))
+            except ValueError: pass
     return None
 
 
@@ -5588,13 +5726,26 @@ def _x_is_date_numfmt(numfmt_id, custom):
     return bool(re.search(r'[dmyhs]', code, re.I))
 
 
+def _x_rich_text(el):
+    parts = []
+    for child in el:
+        loc = _x_local(child)
+        if loc == 't':
+            parts.append(child.text or '')
+        elif loc == 'r':
+            for sub in child:
+                if _x_local(sub) == 't':
+                    parts.append(sub.text or '')
+    return ''.join(parts)
+
+
 def _x_shared_strings(zf):
     try: data = zf.read('xl/sharedStrings.xml')
     except KeyError: return []
     out = []
     for event, el in ET.iterparse(io.BytesIO(data), events=('end',)):
         if _x_local(el) == 'si':
-            out.append(''.join(t.text or '' for t in el.iter() if _x_local(t) == 't'))
+            out.append(_x_rich_text(el))
             el.clear()
     return out
 
@@ -5639,6 +5790,7 @@ def _x_sheets(zf):
     sheets = []
     for el in wb.iter():
         if _x_local(el) != 'sheet' or not el.get('name'): continue
+        if (el.get('state') or '').lower() in ('veryhidden',): continue
         rid = None
         for key, val in el.attrib.items():
             if key == 'id' or key.endswith('}id'): rid = val; break
@@ -5658,7 +5810,7 @@ def _x_sheets(zf):
     return sheets, epoch
 
 
-def _x_cell_value(el, shared, date_styles, epoch):
+def _x_cell_value(el, shared, date_styles, epoch, col_style=None):
     kind = el.get('t', 'n')
     v_el = None
     is_el = None
@@ -5672,7 +5824,7 @@ def _x_cell_value(el, shared, date_styles, epoch):
         except (TypeError, ValueError, IndexError): return None
     if kind == 'inlineStr' or is_el is not None:
         if is_el is None: return None
-        return ''.join(x.text or '' for x in is_el.iter() if _x_local(x) == 't')
+        return _x_rich_text(is_el)
     if text is None: return None
     if kind in ('str', 'e'): return text
     if kind == 'b': return text.strip().lower() in ('1', 'true')
@@ -5684,11 +5836,10 @@ def _x_cell_value(el, shared, date_styles, epoch):
     try: num = float(text)
     except ValueError: return text
     style = el.get('s')
-    if style is not None and style.isdigit() and int(style) in date_styles:
-        if 0 <= num <= 3000000:
-            try: return epoch + dt.timedelta(days=int(num))
-            except (OverflowError, ValueError): return None
-        return None
+    s_idx = int(style) if (style is not None and style.isdigit()) else col_style
+    if s_idx is not None and s_idx in date_styles and 1000 <= num <= 3000000:
+        try: return epoch + dt.timedelta(days=int(num))
+        except (OverflowError, ValueError): return None
     return num
 
 
@@ -5696,14 +5847,26 @@ def _x_sheet_rows(zf, path, shared, date_styles, epoch):
     """Parcourt une feuille : yield (numéro de ligne, {colonne: valeur}). Un trou de numérotation est une ligne vide."""
     prev = 0
     cells = {}
+    col_styles = {}
     with zf.open(path) as stream:
         for event, el in ET.iterparse(stream, events=('start', 'end')):
             if event == 'start': continue
             local = _x_local(el)
-            if local == 'c':
+            if local == 'col':
+                st = el.get('style')
+                if st and st.isdigit():
+                    try:
+                        cmin = max(1, int(el.get('min', '1')))
+                        cmax = min(256, int(el.get('max', str(cmin))))
+                        for ci in range(cmin - 1, cmax):
+                            col_styles[ci] = int(st)
+                    except ValueError:
+                        pass
+                el.clear()
+            elif local == 'c':
                 col = _x_col_ref(el.get('r'))
                 if col is None: col = (max(cells) + 1) if cells else 0
-                value = _x_cell_value(el, shared, date_styles, epoch)
+                value = _x_cell_value(el, shared, date_styles, epoch, col_styles.get(col))
                 if value is not None: cells[col] = value
                 el.clear()
             elif local == 'row':
@@ -5716,10 +5879,10 @@ def _x_sheet_rows(zf, path, shared, date_styles, epoch):
                 cells = {}
 
 
-def _x_orphan(cells, epoch):
+def _x_orphan(cells, epoch, default_year=None):
     """Une ligne qui ressemble à des données mais sans en-tête de tableau (jamais de perte silencieuse)."""
     date_cell = cells.get(0)
-    if not _x_present(date_cell) or _x_date(date_cell, epoch) is None: return False
+    if not _x_present(date_cell) or _x_date(date_cell, epoch, default_year) is None: return False
     for col in (2, 3):
         value = cells.get(col)
         if _x_present(value):
@@ -5730,17 +5893,55 @@ def _x_orphan(cells, epoch):
     return False
 
 
+def _x_subtitle_stem(text):
+    s = _x_norm(text)
+    s = re.sub(r'\b(19\d\d|20\d\d)\b', '', s)
+    return ' '.join(s.split())
+
+
+def _x_pick_sci_title(titles, current_group, sources, state):
+    """Choisit le nom de la SCI parmi les lignes de titre précédant un tableau."""
+    cleaned = []
+    for t in titles:
+        s = ' '.join(str(t).split())
+        if not s or _x_is_balance_label(s): continue
+        cleaned.append(s)
+    if not cleaned:
+        return None, []
+    non_period = [s for s in cleaned if not _XL_PERIOD_SUBTITLE_RE.match(_x_norm(s))]
+    if not non_period:
+        return None, []
+    known_stems = state.get('subtitle_stems', set())
+    if len(non_period) == 1 and (current_group is not None or len(sources) == 1):
+        stem = _x_subtitle_stem(non_period[0])
+        if stem and stem in known_stems:
+            return None, []
+    primary_idx = 0
+    entity_re = re.compile(r'\b(?:sci|societe|sarl|sas|scp|scpi|gfa|indivision)\b')
+    if len(non_period) > 1 and not entity_re.search(_x_norm(non_period[0])):
+        for idx_cand, cand in enumerate(non_period[1:], 1):
+            if entity_re.search(_x_norm(cand)):
+                primary_idx = idx_cand
+                break
+    primary = non_period[primary_idx]
+    sub_stems = [_x_subtitle_stem(s) for i, s in enumerate(non_period) if i != primary_idx and _x_subtitle_stem(s)]
+    return primary, sub_stems
+
+
 def _x_scan_sheet(sheet_name, rows, sources, records, warn, epoch, state):
     """Détecte les tableaux d'une feuille et en extrait mouvements et contrôles."""
-    mode = 'search'
+    row_list = list(rows)
     titles = []
     columns = None
+    header_names = {}
     group = None
     table_no = 0
     anchor = None            # dernier solde de contrôle connu
     seg_debit = seg_credit = 0.0     # sommes depuis le dernier contrôle (tout type)
     run_debit = run_credit = 0.0     # sommes depuis le dernier solde
-    pending = None
+    table_debit = table_credit = 0.0 # sommes cumulées du tableau courant
+    sheet_group_has_moves = set()
+    last_date = None
 
     def loc(rn, msg): return 'ligne ' + str(rn) + ' : ' + msg
 
@@ -5750,6 +5951,12 @@ def _x_scan_sheet(sheet_name, rows, sources, records, warn, epoch, state):
         col = columns.get(kind) if columns else None
         return cells.get(col) if col is not None else None
 
+    def col_desc(kind, default_label):
+        col = columns.get(kind) if columns else None
+        if col is None: return default_label
+        hname = header_names.get(kind) or default_label
+        return 'colonne ' + _x_col_letter(col) + ' (« ' + hname + ' »)'
+
     def as_text(value):
         if value is None: return ''
         if isinstance(value, float) and value == int(value) and abs(value) < 1e15: return str(int(value))
@@ -5757,83 +5964,229 @@ def _x_scan_sheet(sheet_name, rows, sources, records, warn, epoch, state):
 
     def source_key(title):
         name = ' '.join(str(title).split())[:300]
+        m_yr = re.match(r'^(.+?)\s*(?:[\-–—·•]\s*|\s+)(?:annee\s+|exercice\s+)?(19\d\d|20\d\d)$', name, re.I)
+        if m_yr:
+            base_cand = m_yr.group(1).strip()
+            norm_cand = _x_norm(base_cand)
+            if re.search(r'\b(?:sci|societe|sarl|sas|scp|scpi|gfa|indivision)\b', norm_cand) or any(
+                _x_norm(s.get('name', '')) == norm_cand for s in sources.values()
+            ):
+                name = base_cand
         key = 'xlsx_' + hashlib.sha256(name.lower().translate(_XL_ACCENTS).encode()).hexdigest()[:16]
         if key not in sources: sources[key] = {'id': key, 'name': name}
         return key
 
-    while True:
-        if pending is not None:
-            rn, cells = pending
-            pending = None
-        else:
-            try: rn, cells = next(rows)
-            except StopIteration: break
+    # Pré-analyse de l'année de référence de la feuille (nom de l'onglet ou titre de tableau sur la page).
+    context_year = _x_find_year(sheet_name)
+    if context_year is None:
+        for _rn, _cells in row_list:
+            if not _cells or _x_header_kinds(_cells): continue
+            for _v in _cells.values():
+                if isinstance(_v, str):
+                    yr = _x_find_year(_v)
+                    if yr is not None:
+                        context_year = yr
+                        break
+                elif isinstance(_v, (dt.date, dt.datetime)):
+                    context_year = _v.year
+                    break
+            if context_year is not None:
+                break
+
+    for idx, (rn, cells) in enumerate(row_list):
         if cells is None: cells = {}
         try:
-            if mode == 'search':
-                if not any(_x_present(v) for v in cells.values()): continue
-                kinds = _x_header_kinds(cells)
-                if kinds:
-                    columns = kinds
-                    table_no += 1
-                    state['tables'] += 1
-                    if titles:
-                        group = source_key(titles[0])
-                    elif group is None:
-                        base = sheet_name.strip() if sheet_name and not _XL_GENERIC_SHEET.match(sheet_name.strip()) else ''
-                        group = source_key(base or 'Tableau ' + str(table_no) + ' · ' + (sheet_name or 'sans nom'))
-                    titles = []
-                    mode = 'data'
+            if not any(_x_present(v) for v in cells.values()):
+                continue
+
+            kinds = _x_header_kinds(cells)
+            if kinds:
+                columns = kinds
+                header_names = {k: as_text(cells.get(c)) for k, c in kinds.items()}
+                table_no += 1
+                state['tables'] += 1
+                sci_title, sub_stems = _x_pick_sci_title(titles, group, sources, state)
+                for st in sub_stems:
+                    state.setdefault('subtitle_stems', set()).add(st)
+                prev_group = group
+                if sci_title:
+                    group = source_key(sci_title)
+                elif group is None:
+                    sname = (sheet_name or '').strip()
+                    if _XL_YEAR_ONLY.match(_x_norm(sname)) and len(sources) == 1:
+                        group = next(iter(sources))
+                    else:
+                        base = sname if sname and not _XL_GENERIC_SHEET.match(sname) and not _XL_YEAR_ONLY.match(_x_norm(sname)) else ''
+                        group = source_key(base or 'Tableau ' + str(table_no) + ' · ' + (sname or 'sans nom'))
+                for t_line in titles:
+                    yr = _x_find_year(t_line)
+                    if yr is not None: context_year = yr
+                titles = []
+                if group != prev_group:
                     anchor = None
-                    seg_debit = seg_credit = 0.0
                     run_debit = run_credit = 0.0
-                    continue
-                if _x_orphan(cells, epoch):
-                    raise ValueError(loc(rn, 'données sans ligne d’en-tête Date / Libellé / Débit / Crédit.'))
+                seg_debit = seg_credit = 0.0
+                table_debit = table_credit = 0.0
+                continue
+
+            if columns is None:
+                if _x_orphan(cells, epoch, context_year):
+                    preview = ' · '.join(as_text(cells[c]) for c in sorted(cells) if _x_present(cells[c]))[:80]
+                    raise ValueError(loc(rn, 'données sans ligne d’en-tête Date / Libellé / Débit / Crédit'
+                                         + (' (« ' + preview + ' »).' if preview else '.')))
                 parts = [as_text(cells[c]) for c in sorted(cells)]
                 text = ' · '.join(p for p in parts if p)
-                if text: titles.append(text)
-                continue
-            # --- mode données ---
-            if not any(_x_present(v) for v in cells.values()):
-                mode = 'search'
-                pending = (rn, cells)
-                continue
-            if _x_header_kinds(cells): continue  # en-tête répété (saut de page)
-            raw_date = cell(cells, 'date')
-            if not _x_present(raw_date):
-                if any(_x_present(cell(cells, k)) for k in ('debit', 'credit', 'solde')):
-                    raise ValueError(loc(rn, 'date manquante sur une ligne de données.'))
-                mode = 'search'
-                pending = (rn, cells)
-                continue
-            date_val = _x_date(raw_date, epoch)
-            if date_val is None:
-                if any(_x_present(cell(cells, k)) for k in ('debit', 'credit', 'solde')):
-                    raise ValueError(loc(rn, 'date illisible : « ' + as_text(raw_date)[:60] + ' »'))
-                mode = 'search'
-                pending = (rn, cells)
+                if text:
+                    titles.append(text)
+                    yr = _x_find_year(text)
+                    if yr is not None and context_year is None: context_year = yr
                 continue
 
-            def amount(kind, required):
-                value = cell(cells, kind)
-                if not _x_present(value): return None
+            # --- mode données (un en-tête de tableau est actif sur la feuille) ---
+            relevant_cols = set(columns.values())
+            if not any(_x_present(cells.get(c)) for c in relevant_cols):
+                continue
+
+            raw_date = cell(cells, 'date')
+            label = as_text(cell(cells, 'label'))
+            raw_debit = cell(cells, 'debit')
+            raw_credit = cell(cells, 'credit')
+            raw_solde = cell(cells, 'solde')
+
+            # Si un intitulé « Solde ... » ou « Total ... » a été saisi dans la colonne Date, Débit ou Crédit :
+            if not label and isinstance(raw_date, str) and _x_is_balance_label(raw_date):
+                label = as_text(raw_date)
+                raw_date = None
+            if not label and isinstance(raw_debit, str) and _x_is_balance_label(raw_debit):
+                label = as_text(raw_debit)
+                raw_debit = None
+            if not label and isinstance(raw_credit, str) and _x_is_balance_label(raw_credit):
+                label = as_text(raw_credit)
+                raw_credit = None
+
+            def parse_col_amount(val, kind, required, zero_dash=False):
+                if not _x_present(val): return None
                 try:
-                    return _x_amount(value)
+                    return _x_amount(val, zero_dash=zero_dash)
                 except ValueError as e:
-                    if required: raise ValueError(loc(rn, str(e)))
-                    warn(wloc(rn) + str(e) + ' — valeur de ' + kind + ' ignorée.')
+                    if required:
+                        raise ValueError(loc(rn, col_desc(kind, kind) + ' : ' + str(e)
+                                             + (' (ligne « ' + label[:50] + ' »)' if label else '')))
+                    warn(wloc(rn) + col_desc(kind, kind) + ' : ' + str(e) + ' — valeur de ' + kind + ' ignorée.')
                     return None
 
-            debit = amount('debit', True)
-            credit = amount('credit', True)
-            solde = amount('solde', False)
-            label = as_text(cell(cells, 'label'))
+            has_any_amount_cell = any(_x_present(v) for v in (raw_debit, raw_credit, raw_solde))
+            date_probe = _x_date(raw_date, epoch, context_year) if _x_present(raw_date) else None
+
+            # Ligne de texte sans montant et sans date (ex. titre d'un nouveau tableau ou ligne « Solde » vide)
+            if not has_any_amount_cell and date_probe is None:
+                if _x_is_balance_label(label) or (isinstance(raw_date, str) and _x_is_balance_label(raw_date)):
+                    continue
+                parts = [as_text(cells[c]) for c in sorted(cells) if c in relevant_cols and _x_present(cells.get(c))]
+                text = ' · '.join(p for p in parts if p)
+                if text:
+                    titles.append(text)
+                    yr = _x_find_year(text)
+                    if yr is not None: context_year = yr
+                continue
+
+            debit = parse_col_amount(raw_debit, 'debit', True, zero_dash=False)
+            credit = parse_col_amount(raw_credit, 'credit', True, zero_dash=False)
+            solde = parse_col_amount(raw_solde, 'solde', False, zero_dash=True)
+
+            if debit == 0.0 and credit is not None and credit != 0.0:
+                debit = None
+            elif credit == 0.0 and debit is not None and debit != 0.0:
+                credit = None
+            elif debit == 0.0 and credit == 0.0 and solde is None and not _x_is_balance_label(label):
+                debit = credit = None
+
+            is_balance_row = (
+                _x_is_balance_label(label)
+                or (debit is None and credit is None and solde is not None)
+                or (not label and (debit is not None or credit is not None) and (
+                    date_probe is not None or solde is not None or (debit is not None and credit is not None)
+                ))
+            )
+
+            if is_balance_row:
+                if debit is None and credit is None and solde is None:
+                    continue
+                is_tot_keyword = bool(re.match(r'^(?:totaux|total|sous[\s\-]*total|cumul)\b', _x_norm(label)))
+                if _x_is_balance_label(label) and not is_tot_keyword and solde is None:
+                    if credit is not None and debit is None:
+                        solde = credit
+                        credit = None
+                    elif debit is not None and credit is None:
+                        solde = -abs(debit)
+                        debit = None
+                date_val = date_probe
+                if date_val is None and _x_present(raw_date):
+                    date_val = _x_extract_date_from_text(as_text(raw_date), epoch, context_year)
+                if date_val is None and label:
+                    date_val = _x_extract_date_from_text(label, epoch, context_year)
+                has_explicit_date = date_val is not None
+                if date_val is None:
+                    date_val = last_date or dt.date(context_year or 2000, 1, 1)
+                else:
+                    last_date = date_val
+                    if context_year is None: context_year = date_val.year
+
+                check_totals = (not label) or is_tot_keyword
+                if check_totals and (debit is not None or credit is not None) and solde is None:
+                    warn(wloc(rn) + 'ligne de contrôle sans solde : totaux vérifiés, solde non actualisé.')
+                if check_totals and debit is not None:
+                    if round(seg_debit, 2) != round(debit, 2) and round(table_debit, 2) != round(debit, 2):
+                        warn(wloc(rn) + 'total débit : ' + _x_eur(debit) + ' annoncé, ' + _x_eur(seg_debit)
+                             + ' calculé depuis le contrôle précédent.')
+                if check_totals and credit is not None:
+                    if round(seg_credit, 2) != round(credit, 2) and round(table_credit, 2) != round(credit, 2):
+                        warn(wloc(rn) + 'total crédit : ' + _x_eur(credit) + ' annoncé, ' + _x_eur(seg_credit)
+                             + ' calculé depuis le contrôle précédent.')
+                if solde is not None:
+                    if _x_is_debit_balance_label(label) and solde > 0:
+                        if anchor is not None and round(anchor + run_credit - run_debit, 2) == round(-solde, 2):
+                            solde = -solde
+                        elif anchor is None:
+                            solde = -solde
+                    if anchor is not None:
+                        expected = round(anchor + run_credit - run_debit, 2)
+                        if expected != round(solde, 2):
+                            warn(wloc(rn) + 'solde au ' + date_val.strftime('%d/%m/%Y') + ' : ' + _x_eur(expected)
+                                 + ' attendu, ' + _x_eur(solde) + ' trouvé (écart ' + _x_eur(round(solde - expected, 2)) + ').')
+                    if group not in sheet_group_has_moves:
+                        state.setdefault('openings', {}).setdefault(group, []).append(
+                            (date_val.isoformat(), round(solde, 2), has_explicit_date)
+                        )
+                    if group not in state['opening'] and group not in state['movements']:
+                        state['opening'].add(group)
+                        src = sources.get(group)
+                        if src is not None and 'opening' not in src and round(solde, 2) != 0:
+                            src['opening'] = round(solde, 2)
+                            src['opening_date'] = date_val.isoformat()
+                    anchor = solde
+                    run_debit = run_credit = 0.0
+                seg_debit = seg_credit = 0.0
+                continue
+
+            # --- Ligne d'opération (mouvement) ---
+            if not _x_present(raw_date):
+                raise ValueError(loc(rn, col_desc('date', 'Date') + ' : date manquante sur une ligne de données'
+                                     + (' pour « ' + label[:60] + ' ».' if label else '.')))
+            date_val = date_probe
+            if date_val is None:
+                raise ValueError(loc(rn, col_desc('date', 'Date') + ' : date illisible : « ' + as_text(raw_date)[:60] + ' »'
+                                     + (' pour « ' + label[:50] + ' »' if label else '')
+                                     + ' (format attendu : JJ/MM/AAAA).'))
+
+            last_date = date_val
+            if context_year is None: context_year = date_val.year
             has_amount = debit is not None or credit is not None
 
             if label and has_amount:
                 if debit is not None and credit is not None:
-                    raise ValueError(loc(rn, 'montant à la fois en débit et en crédit.'))
+                    raise ValueError(loc(rn, 'montant à la fois en débit et en crédit (' + _x_eur(debit)
+                                         + ' / ' + _x_eur(credit) + ') pour « ' + label[:50] + ' ».'))
                 raw = debit if debit is not None else credit
                 direction = 'Dépense' if debit is not None else 'Recette'
                 if raw < 0:
@@ -5844,14 +6197,22 @@ def _x_scan_sheet(sheet_name, rows, sources, records, warn, epoch, state):
                 if category: d['category'] = category
                 records.append({**clean('entries', d), 'id': uid(), 'sci': group, 'kind': 'entries'})
                 state['movements'].add(group)
+                prev_min = state.setdefault('first_move_date', {}).get(group)
+                if prev_min is None or d['date'] < prev_min:
+                    state['first_move_date'][group] = d['date']
+                sheet_group_has_moves.add(group)
+                titles = []
                 if len(records) > XLSX_MAX_RECORDS:
                     raise ValueError(loc(rn, 'import limité à %s opérations.' % f'{XLSX_MAX_RECORDS:,}'.replace(',', ' ')))
-                if debit is not None: seg_debit = round(seg_debit + raw, 2)
-                else: seg_credit = round(seg_credit + raw, 2)
+                if debit is not None:
+                    seg_debit = round(seg_debit + raw, 2)
+                    table_debit = round(table_debit + raw, 2)
+                else:
+                    seg_credit = round(seg_credit + raw, 2)
+                    table_credit = round(table_credit + raw, 2)
                 run_debit = round(run_debit + (raw if debit is not None else 0.0), 2)
                 run_credit = round(run_credit + (raw if credit is not None else 0.0), 2)
                 if solde is None: continue
-                # mouvement portant un solde de contrôle
                 if anchor is not None:
                     expected = round(anchor + run_credit - run_debit, 2)
                     if expected != round(solde, 2):
@@ -5863,39 +6224,33 @@ def _x_scan_sheet(sheet_name, rows, sources, records, warn, epoch, state):
                 continue
 
             if label and solde is None:
-                warn(wloc(rn) + 'ligne ignorée : libellé sans montant.')
+                warn(wloc(rn) + 'ligne ignorée : libellé sans montant (« ' + label[:50] + ' »).')
                 continue
             if not label and not has_amount and solde is None:
-                warn(wloc(rn) + 'ligne ignorée : date seule.')
+                warn(wloc(rn) + 'ligne ignorée : date seule (' + date_val.strftime('%d/%m/%Y') + ').')
                 continue
-
-            # --- ligne de contrôle (sans libellé, ou libellé portant un solde sans montant) ---
-            if not label and has_amount and solde is None:
-                warn(wloc(rn) + 'ligne de contrôle sans solde : totaux vérifiés, solde non actualisé.')
-            if not label and debit is not None and round(seg_debit, 2) != round(debit, 2):
-                warn(wloc(rn) + 'total débit : ' + _x_eur(debit) + ' annoncé, ' + _x_eur(seg_debit)
-                     + ' calculé depuis le contrôle précédent.')
-            if not label and credit is not None and round(seg_credit, 2) != round(credit, 2):
-                warn(wloc(rn) + 'total crédit : ' + _x_eur(credit) + ' annoncé, ' + _x_eur(seg_credit)
-                     + ' calculé depuis le contrôle précédent.')
-            if solde is not None:
-                if anchor is not None:
-                    expected = round(anchor + run_credit - run_debit, 2)
-                    if expected != round(solde, 2):
-                        warn(wloc(rn) + 'solde au ' + date_val.strftime('%d/%m/%Y') + ' : ' + _x_eur(expected)
-                             + ' attendu, ' + _x_eur(solde) + ' trouvé (écart ' + _x_eur(round(solde - expected, 2)) + ').')
-                if group not in state['opening'] and group not in state['movements']:
-                    src = sources.get(group)
-                    if src is not None and 'opening' not in src:
-                        src['opening'] = round(solde, 2)
-                        src['opening_date'] = date_val.isoformat()
-                        state['opening'].add(group)
-                anchor = solde
-                run_debit = run_credit = 0.0
-            # Toute ligne de contrôle clôt le segment des totaux de période.
-            seg_debit = seg_credit = 0.0
         except ValueError as e:
             raise ValueError(str(e) if str(e).startswith('ligne ') else loc(rn, str(e)))
+
+
+def _x_finalize_openings(sources, state):
+    """Dans un classeur multi-feuilles (ex. une feuille par année), retient le solde d'ouverture le plus ancien."""
+    openings_by_group = state.get('openings', {})
+    first_moves = state.get('first_move_date', {})
+    for gid, src in sources.items():
+        cands = openings_by_group.get(gid) or []
+        if not cands: continue
+        earliest_date, earliest_solde, _explicit = min(cands, key=lambda x: x[0])
+        first_move = first_moves.get(gid)
+        if first_move and earliest_date > first_move:
+            src.pop('opening', None)
+            src.pop('opening_date', None)
+        elif round(earliest_solde, 2) == 0:
+            src.pop('opening', None)
+            src.pop('opening_date', None)
+        else:
+            src['opening'] = round(earliest_solde, 2)
+            src['opening_date'] = earliest_date
 
 
 def parse_xlsx(text):
@@ -5941,6 +6296,7 @@ def parse_xlsx(text):
                 raise ValueError('Feuille « ' + sheet_name + ' » : ' + str(e))
             except (zipfile.BadZipFile, ET.ParseError):
                 raise ValueError('Fichier Excel illisible pendant la lecture de la feuille « ' + sheet_name + ' ».')
+        _x_finalize_openings(sources, state)
         if warn_total[0] > len(warn_msgs):
             warn_msgs.append('… et %d autre(s) avertissement(s).' % (warn_total[0] - len(warn_msgs)))
         if not state['tables']:
@@ -5951,14 +6307,47 @@ def parse_xlsx(text):
         return {'application': 'Dominis', 'version': 1, 'scis': list(sources.values()), 'records': records, 'warnings': warn_msgs}
 
 
+def _parse_tabular_csv(text, delimiter=';'):
+    """Analyse un CSV structuré comme un tableau Excel (Titres, Date / Libellé / Débit / Crédit / Solde)."""
+    epoch = dt.date(1899, 12, 30)
+    raw_rows = []
+    reader = csv.reader(io.StringIO(text), delimiter=delimiter)
+    for rn, row in enumerate(reader, 1):
+        cells = {ci: val.strip() for ci, val in enumerate(row) if val and val.strip()}
+        raw_rows.append((rn, cells))
+    if not any(_x_header_kinds(c) for _, c in raw_rows if c):
+        return None
+    sources = {}
+    records = []
+    warn_msgs = []
+    warn_total = [0]
+
+    def warn(msg):
+        warn_total[0] += 1
+        if len(warn_msgs) < 30: warn_msgs.append(msg)
+
+    state = {'movements': set(), 'opening': set(), 'tables': 0}
+    try:
+        _x_scan_sheet('CSV', iter(raw_rows), sources, records, warn, epoch, state)
+    except ValueError as e:
+        raise ValueError('Fichier CSV : ' + str(e))
+    _x_finalize_openings(sources, state)
+    if warn_total[0] > len(warn_msgs):
+        warn_msgs.append('… et %d autre(s) avertissement(s).' % (warn_total[0] - len(warn_msgs)))
+    if not state['tables'] or not records:
+        raise ValueError('Les tableaux reconnus dans le CSV ne contiennent aucune opération.')
+    return {'application': 'Dominis', 'version': 1, 'scis': list(sources.values()), 'records': records, 'warnings': warn_msgs}
+
+
 def parse_import(p):
     fmt=p.get('format','json')
     if fmt=='json':
-        try: b=json.loads(p['text'])
-        except Exception: raise ValueError('Fichier JSON illisible.')
+        raw_txt = p.get('text','')
+        try: b=json.loads(raw_txt)
+        except Exception as e: raise ValueError('Fichier JSON illisible ('+str(e)[:80]+'). Si vous importez un tableau Excel ou CSV, sélectionnez le format correspondant.')
         if not isinstance(b,dict) or b.get('application') not in ('Dominis','Aurea') or b.get('version')!=1: raise ValueError('Choisissez un export JSON Dominis (ou Auréa) au format version 1.')
         if not isinstance(b.get('scis'),list) or not isinstance(b.get('records'),list): raise ValueError('Export incomplet.')
-        if len(b['records'])>40000: raise ValueError('Import limité à 40 000 lignes.')
+        if len(b['records'])>XLSX_MAX_RECORDS: raise ValueError('Import limité à %s lignes.' % f'{XLSX_MAX_RECORDS:,}'.replace(',', ' '))
         ids=set()
         for s in b['scis']:
             if not s.get('id') or s['id'] in ids: raise ValueError('Identifiants SCI invalides.')
@@ -5971,35 +6360,53 @@ def parse_import(p):
     if fmt=='xlsx': return parse_xlsx(p.get('text',''))
     if fmt!='csv': raise ValueError('Format non pris en charge.')
     text=p.get('text','').lstrip('\ufeff')
+    # Si un fichier .xlsx (encodé en base64 ou binaire PK) a été envoyé sous le format CSV :
+    if text.startswith('UEsDB') or text.startswith('PK\x03\x04'):
+        b64_txt = base64.b64encode(text.encode('latin1', errors='replace')).decode('ascii') if text.startswith('PK\x03\x04') else text
+        return parse_xlsx(b64_txt)
     try: dialect=csv.Sniffer().sniff(text[:4000],delimiters=';,\t')
     except csv.Error: dialect=csv.excel; dialect.delimiter=';'
+    delim = getattr(dialect, 'delimiter', ';') or ';'
     reader=csv.DictReader(io.StringIO(text),dialect=dialect)
-    if not set(['date','label','direction','category','amount']).issubset(reader.fieldnames or []): raise ValueError('En-têtes requis : date;label;direction;category;amount')
+    norm_fields = {(' '.join(f.lower().strip().split()) if f else ''): f for f in (reader.fieldnames or [])}
+    if not set(['date','label','direction','category','amount']).issubset(set(norm_fields.keys())):
+        # Essayer l'analyse de tableau de trésorerie (Date / Libellé / Débit / Crédit / Solde) exporté en CSV
+        for try_delim in dict.fromkeys([delim, ';', ',', '\t']):
+            tab_bundle = _parse_tabular_csv(text, try_delim)
+            if tab_bundle is not None:
+                return tab_bundle
+        raise ValueError('En-têtes requis : date;label;direction;category;amount (ou tableau avec colonnes Date, Libellé, Débit, Crédit).')
     rows=[]; sources={}
     for i,r in enumerate(reader,2):
+        if not any((v or '').strip() for v in r.values() if isinstance(v, str)): continue
         try:
-            d={k:r.get(k,'') for k in ['date','label','direction','category','amount']}
-            d['amount']=float(d['amount'].replace(' ','').replace(',','.'))
-            name=(r.get('sci') or '').strip()
+            d={k:(r.get(norm_fields[k],'') or '').strip() for k in ['date','label','direction','category','amount']}
+            amt=_x_amount(d['amount'], zero_dash=False)
+            if amt is None: raise ValueError('montant manquant dans la colonne « amount ».')
+            d['amount']=abs(amt)
+            date_parsed = _x_date(d['date'], dt.date(1899, 12, 30))
+            if date_parsed is not None: d['date'] = date_parsed.isoformat()
+            name=(r.get(norm_fields.get('sci','sci')) or '').strip()
             source='csv_'+hashlib.sha256(name.encode()).hexdigest()[:16] if name else 'csv'
             sources[source]={'id':source,'name':name or 'Mouvements CSV sans société renseignée'}
             rows.append({**clean('entries',d),'id':uid(),'sci':source,'kind':'entries'})
         except Exception as e: raise ValueError('Ligne '+str(i)+' : '+str(e))
-    if not rows or len(rows)>40000: raise ValueError('Le CSV doit contenir entre 1 et 40 000 lignes.')
+    if not rows or len(rows)>XLSX_MAX_RECORDS: raise ValueError('Le CSV doit contenir entre 1 et %s lignes.' % f'{XLSX_MAX_RECORDS:,}'.replace(',', ' '))
     return {'application':'Dominis','version':1,'scis':list(sources.values()),'records':rows}
 
 def import_bundle(c,p):
     b=parse_import(p); mapping=p.get('mapping',{})
     selected=[s for s in b['scis'] if s['id'] in mapping]
     if not selected: raise ValueError('Sélectionnez les SCI à importer et leur destination.')
-    if p.get('format')=='csv' and any(dest=='new' for dest in mapping.values()): raise ValueError('Sélectionnez une SCI existante pour le CSV.')
+    if p.get('format')=='csv' and any(dest=='new' and sid=='csv' for sid, dest in mapping.items()): raise ValueError('Sélectionnez une SCI existante pour le CSV.')
     fp=hashlib.sha256((p['text']+json.dumps(mapping,sort_keys=True)).encode()).hexdigest()
     if c.execute('SELECT 1 FROM imports WHERE fingerprint=?',(fp,)).fetchone(): raise ValueError('Ce fichier a déjà été importé vers ces destinations.')
     sci_map={}
     for s in selected:
         dest=mapping[s['id']]
         if dest=='new':
-            d=clean('sci',s); d['name']=d['name']+(('' if p.get('format')=='xlsx' else ' (import)')); new=uid()
+            d=clean('sci',s); is_table_src = (p.get('format')=='xlsx' or str(s.get('id','')).startswith('xlsx_'))
+            d['name']=d['name']+('' if is_table_src else ' (import)'); new=uid()
             c.execute('INSERT INTO scis VALUES(?,?)',(new,json.dumps(d))); sci_map[s['id']]=new
         else:
             if not c.execute('SELECT 1 FROM scis WHERE id=?',(dest,)).fetchone(): raise ValueError('SCI de destination introuvable.')
@@ -6021,7 +6428,7 @@ def import_bundle(c,p):
 
 def restore(raw):
     global PRIMARY_DB_MISSING, AUTO_SAVE_NOTICE
-    if len(raw)>100*1024*1024 or not raw.startswith(b'SQLite format 3\x00'): raise ValueError('Sauvegarde SQLite non valide (100 Mo maximum).')
+    if len(raw)>500*1024*1024 or not raw.startswith(b'SQLite format 3\x00'): raise ValueError('Sauvegarde SQLite non valide (500 Mo maximum).')
     fd,p=tempfile.mkstemp(suffix='.db'); os.close(fd)
     try:
         Path(p).write_bytes(raw)
@@ -6080,6 +6487,72 @@ def demo():
             save_record(c,{'kind':'tasks','sci':s,'data':{'name':['Taxe foncière','Renouveler l’assurance PNO','Préparer le rapport de gestion'][ix],'due':['2026-10-20','2026-10-28','2026-11-12'][ix],'category':['Fiscalité','Assurance','Juridique'][ix],'status':'À faire','notes':'Échéance fictive à adapter à votre situation.'}})
         st=settings(c); st['demo']=True; c.execute("UPDATE meta SET value=? WHERE key='settings'",(json.dumps(st),)); c.execute('DELETE FROM audit'); audit(c,'Démonstration','Jeu fictif — 3 SCI, 6 biens, 5 baux.')
 
+def build_document_preview(r):
+    d=json.loads(r['data'])
+    meta={'id':r['id'],'sci':r['sci'],'name':d.get('name',''),'category':d.get('category','Autre'),'date':d.get('date',''),'notes':d.get('notes',''),'filename':d.get('filename',''),'mime':d.get('mime',''),'size':d.get('size',0),'folder_id':d.get('folder_id','')}
+    if not d.get('blob'): return {**meta,'preview_type':'note'}
+    raw=base64.b64decode(d['blob'])
+    ext=Path(d.get('filename','')).suffix.lower()
+    mime=(d.get('mime') or '').lower()
+    if ext in ('.png','.jpg','.jpeg','.webp','.gif','.bmp','.svg') or mime.startswith('image/') or raw[:8]==b'\x89PNG\r\n\x1a\n' or raw[:3]==b'\xff\xd8\xff' or (raw[:4]==b'RIFF' and raw[8:12]==b'WEBP'):
+        if raw[:8]==b'\x89PNG\r\n\x1a\n' or ext=='.png': img_mime='image/png'
+        elif raw[:3]==b'\xff\xd8\xff' or ext in ('.jpg','.jpeg'): img_mime='image/jpeg'
+        elif ext=='.webp' or (raw[:4]==b'RIFF' and raw[8:12]==b'WEBP'): img_mime='image/webp'
+        elif ext=='.gif' or raw[:6] in (b'GIF87a',b'GIF89a'): img_mime='image/gif'
+        elif ext=='.svg': img_mime='image/svg+xml'
+        else: img_mime=mime if mime.startswith('image/') else 'image/png'
+        return {**meta,'preview_type':'image','data_url':'data:'+img_mime+';base64,'+d['blob']}
+    if ext=='.pdf' or mime=='application/pdf' or raw.startswith(b'%PDF'):
+        return {**meta,'preview_type':'pdf','blob':d['blob'],'mime':'application/pdf'}
+    if raw[:4]==b'PK\x03\x04' or ext in ('.xlsx','.docx'):
+        try:
+            with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+                names=set(zf.namelist())
+                if 'xl/workbook.xml' in names or ext=='.xlsx':
+                    shared=_x_shared_strings(zf); date_styles=_x_styles(zf); sheets,epoch=_x_sheets(zf)
+                    sheets_out=[]
+                    for sname,spath in sheets[:15]:
+                        srows=[]; max_c=0
+                        for _rn,cells in _x_sheet_rows(zf,spath,shared,date_styles,epoch):
+                            if not cells: continue
+                            if len(srows)>=200: break
+                            mc=min(max(cells.keys())+1,25)
+                            if mc>max_c: max_c=mc
+                            row_vals=[]
+                            for ci in range(mc):
+                                v=cells.get(ci)
+                                if v is None: row_vals.append('')
+                                elif isinstance(v,(dt.date,dt.datetime)): row_vals.append(v.strftime('%d/%m/%Y'))
+                                elif isinstance(v,float) and v==int(v) and abs(v)<1e15: row_vals.append(str(int(v)))
+                                else: row_vals.append(str(v))
+                            srows.append(row_vals)
+                        for r_item in srows:
+                            while len(r_item)<max_c: r_item.append('')
+                        sheets_out.append({'name':sname,'rows':srows})
+                    return {**meta,'preview_type':'xlsx','sheets':sheets_out}
+                if 'word/document.xml' in names or ext=='.docx':
+                    root=ET.fromstring(zf.read('word/document.xml'))
+                    paras=[]
+                    for el in root.iter():
+                        if _x_local(el)=='p':
+                            txt=''.join(t.text or '' for t in el.iter() if _x_local(t)=='t').strip()
+                            if txt: paras.append(txt)
+                    return {**meta,'preview_type':'docx','paragraphs':paras[:500]}
+        except Exception:
+            pass
+    if ext=='.csv' or 'csv' in mime:
+        try: txt=raw.decode('utf-8-sig')
+        except UnicodeDecodeError: txt=raw.decode('cp1252',errors='replace')
+        try: dialect=csv.Sniffer().sniff(txt[:4000],delimiters=';,\t')
+        except csv.Error: dialect=csv.excel; dialect.delimiter=';'
+        crows=list(csv.reader(io.StringIO(txt),dialect=dialect))[:200]
+        return {**meta,'preview_type':'csv','rows':crows}
+    if ext in ('.txt','.md','.json','.xml','.log','.html','.htm') or mime.startswith('text/'):
+        try: txt=raw.decode('utf-8-sig')
+        except UnicodeDecodeError: txt=raw.decode('cp1252',errors='replace')
+        return {**meta,'preview_type':'text','text':txt[:100000]}
+    return {**meta,'preview_type':'binary'}
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self,format,*args): pass
     def reply(self,data,status=200,mime='application/json; charset=utf-8',filename=None):
@@ -6091,6 +6564,11 @@ class Handler(BaseHTTPRequestHandler):
     def allowed_host(self):
         host=self.headers.get('Host','').split(':')[0].lower()
         return PREVIEW or host in ('127.0.0.1','localhost')
+    def token_ok(self):
+        # L'en-tête reste la voie normale ; le paramètre autorise l'affichage
+        # d'une pièce jointe dans un cadre (iframe/embed) qui ne peut pas porter d'en-tête.
+        if self.headers.get('X-Dominis-Token')==TOKEN: return True
+        return secrets.compare_digest(parse_qs(urlparse(self.path).query).get('token',[''])[0], TOKEN)
     def do_GET(self):
         if not self.allowed_host(): return self.reply({'error':'Accès local uniquement.'},403)
         path=urlparse(self.path).path
@@ -6098,11 +6576,16 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(HTML.replace('__TOKEN__',TOKEN),mime='text/html; charset=utf-8')
         if path=='/api/health': return self.reply({'version':APP_VERSION,'instance':INSTANCE_ID})
         if path in ('/logo.png','/favicon.ico'): return self.reply(LOGO_PNG,mime='image/png')
-        if self.headers.get('X-Dominis-Token')!=TOKEN: return self.reply({'error':'Session invalide. Rechargez la page.'},403)
+        if not self.token_ok(): return self.reply({'error':'Session invalide. Rechargez la page.'},403)
         if path=='/api/update': return self.reply(update_snapshot())
         try:
             with LOCK,connect() as c:
                 if path=='/api/state': return self.reply(state(c))
+                if path=='/api/document-preview':
+                    ident=parse_qs(urlparse(self.path).query).get('id',[''])[0]
+                    r=c.execute("SELECT * FROM records WHERE id=? AND kind='documents'",(ident,)).fetchone()
+                    if not r: raise ValueError('Document introuvable.')
+                    return self.reply(build_document_preview(r))
                 if path=='/api/document':
                     ident=parse_qs(urlparse(self.path).query).get('id',[''])[0]
                     r=c.execute("SELECT * FROM records WHERE id=? AND kind='documents'",(ident,)).fetchone()
@@ -6117,7 +6600,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get('X-Dominis-Token')!=TOKEN: return self.reply({'error':'Session invalide. Rechargez la page.'},403)
         try:
             n=int(self.headers.get('Content-Length',0))
-            if n>145*1024*1024: raise ValueError('Fichier trop volumineux.')
+            if n>750*1024*1024: raise ValueError('Fichier trop volumineux.')
             p=json.loads(self.rfile.read(n)); path=urlparse(self.path).path
             with LOCK:
                 if UPDATE_BUSY.is_set(): return self.reply({'error':'Mise à jour en cours. Les écritures sont temporairement suspendues.'},409)
@@ -6169,6 +6652,8 @@ class Handler(BaseHTTPRequestHandler):
                         for k,v in p.items():
                             if k in DEFAULTS or k=='demo': st[k]=v
                         if st['theme'] not in ['dark','light']: raise ValueError('Thème invalide.')
+                        if not isinstance(st.get('table_columns',{}),dict): raise ValueError('Configuration des colonnes invalide.')
+                        if not isinstance(st.get('doc_folders',[]),list): raise ValueError('Configuration des dossiers invalide.')
                         c.execute("UPDATE meta SET value=? WHERE key='settings'",(json.dumps(st),)); c.commit(); return self.reply({'ok':True})
                     if path=='/api/delete':
                         kind=p['kind']; ident=p['id']
@@ -6198,7 +6683,9 @@ class Handler(BaseHTTPRequestHandler):
                             if r['kind']=='entries': w.writerow([safe(names[r['sci']]),r.get('date',''),safe(r.get('label','')),r.get('direction',''),safe(r.get('category','')),str(r.get('amount',0)).replace('.',',')])
                         return self.reply(('\ufeff'+stream.getvalue()).encode(),mime='text/csv; charset=utf-8',filename='dominis-mouvements.csv')
                     if path=='/api/import-preview':
-                        b=parse_import(p); return self.reply({'scis':b['scis'],'counts':{s['id']:{k:sum(r['sci']==s['id'] and r['kind']==k for r in b['records']) for k in KINDS} for s in b['scis']},'rows':b['records'][:5] if p.get('format') in ('csv','xlsx') else [],'warnings':b.get('warnings',[])})
+                        b=parse_import(p)
+                        years=sorted({int(r['date'][:4]) for r in b['records'] if r.get('kind')=='entries' and isinstance(r.get('date'),str) and len(r['date'])>=4 and r['date'][:4].isdigit()})
+                        return self.reply({'scis':b['scis'],'counts':{s['id']:{k:sum(r['sci']==s['id'] and r['kind']==k for r in b['records']) for k in KINDS} for s in b['scis']},'rows':b['records'][:5] if p.get('format') in ('csv','xlsx') else [],'warnings':b.get('warnings',[]),'years':years})
                     if path=='/api/import':
                         count=import_bundle(c,p); c.commit(); return self.reply({'ok':True,'count':count})
                     if path=='/api/generate-calls':
@@ -6224,19 +6711,21 @@ HTML = r'''<!doctype html>
 :root[data-theme=light]{--bg:#f4f3ee;--side:#eeeee6;--panel:#fffef9;--panel2:#f0f0e8;--line:#dfdfd4;--text:#252c25;--muted:#717969;--gold:#876b35;--goldbg:#eae1cd;--green:#367858;--red:#b45043;--blue:#566db6;--shadow:0 24px 90px #36402c22;color-scheme:light}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:1.5}button,input,select,textarea{font:inherit}button,a,input,select,textarea{outline-color:var(--gold)}button,a{ -webkit-tap-highlight-color:transparent}button{cursor:pointer}button{border:1px solid var(--line);color:var(--text);background:var(--panel2);border-radius:7px;padding:9px 13px;display:inline-flex;align-items:center;justify-content:center;gap:8px;transition:background .18s,transform .18s}button:hover{background:var(--line)}button:disabled{opacity:.45;cursor:wait}button.primary{background:var(--gold);border-color:var(--gold);color:#171b15;font-weight:600}button.primary:hover{filter:brightness(1.1)}button.ghost{border-color:transparent;background:transparent}button.danger{color:var(--red)}svg.icon{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.65;stroke-linecap:round;stroke-linejoin:round;flex:none}.small-icon svg{width:15px;height:15px}.icon-only{width:34px;height:34px;padding:7px}.muted{color:var(--muted)}.gold{color:var(--gold)}.green{color:var(--green)}.red{color:var(--red)}h1,h2,h3,p{margin:0}h1{font-family:Georgia,'Times New Roman',serif;font-size:33px;font-weight:400;letter-spacing:-.7px;line-height:1.2}h2{font-size:15px;font-weight:600}h3{font-size:14px;font-weight:600}.eyebrow{font-size:10px;letter-spacing:1.8px;text-transform:uppercase;color:var(--muted);font-weight:600}.sub{font-size:12px;color:var(--muted)}.serif{font-family:Georgia,serif;font-weight:400}.row{display:flex;align-items:center;gap:12px}.between{justify-content:space-between}.wrap{flex-wrap:wrap}.stack{display:flex;flex-direction:column;gap:16px}.gap8{gap:8px}a{color:var(--gold)}
 #sidebar{width:244px;position:fixed;inset:0 auto 0 0;background:var(--side);border-right:1px solid var(--line);display:flex;flex-direction:column;z-index:30;transition:width .3s cubic-bezier(.22,.8,.25,1);overflow:hidden}.brand{height:101px;padding:25px 18px;display:flex;align-items:center;gap:12px;white-space:nowrap}.brand-mark{width:42px;height:42px;flex:none;object-fit:contain;border-radius:8px;background:#000}.brand-name{font-family:Georgia,serif;font-size:25px;letter-spacing:2px;line-height:1}.brand-caption{font-size:8px;letter-spacing:1.1px;margin-top:7px;color:var(--muted);text-transform:uppercase}.workspace{margin:0 17px 26px;border:1px solid var(--line);border-radius:8px;padding:12px;display:flex;gap:10px;align-items:center;white-space:nowrap}.workspace-icon{display:grid;place-items:center;width:30px;height:30px;background:var(--goldbg);color:var(--gold);border-radius:6px;flex:none}.nav-scroll{flex:1;overflow-y:auto;overflow-x:hidden;padding:0 14px}.nav-label{padding:0 13px;margin-bottom:10px}.nav-item{border:none;background:transparent;border-radius:7px;width:100%;display:flex;justify-content:flex-start;padding:12px 13px;gap:12px;white-space:nowrap;color:var(--muted);margin:3px 0;text-align:left;height:43px}.nav-item:hover{background:var(--panel2);color:var(--text)}.nav-item.active{color:var(--gold);background:var(--goldbg);position:relative}.nav-item.active:before{content:'';height:17px;width:2px;background:var(--gold);position:absolute;left:0;border-radius:2px}.nav-dot{width:9px;height:9px;border-radius:3px;display:inline-block;flex:none;margin:0 4px}.nav-divider{height:1px;background:var(--line);margin:19px 10px}.nav-bottom{padding:12px 14px 18px;border-top:1px solid var(--line)}.local-status{display:flex;gap:8px;align-items:center;font-size:10px;color:var(--muted);padding:13px 13px 5px;white-space:nowrap}.status-dot{height:6px;width:6px;background:var(--green);border-radius:50%;box-shadow:0 0 8px #86bea222;flex:none}.user-block{border-top:1px solid var(--line);padding:18px 22px;gap:10px;white-space:nowrap}.avatar{height:32px;width:32px;border-radius:50%;background:var(--goldbg);color:var(--gold);display:grid;place-items:center;font-family:Georgia,serif;font-size:15px;flex:none}
-#shell{margin-left:244px;transition:margin-left .3s cubic-bezier(.22,.8,.25,1)}header{height:70px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 35px;gap:15px}.breadcrumb{color:var(--muted);font-size:11px;gap:12px}.breadcrumb b{color:var(--text);font-weight:400}.search-btn{background:transparent;color:var(--muted);border:1px solid var(--line);font-size:11px;padding:7px 12px;width:218px;justify-content:flex-start}.search-btn kbd{margin-left:auto;border:1px solid var(--line);font-size:9px;padding:0 4px;border-radius:3px;color:var(--muted)}.top-date{font-size:11px;color:var(--muted)}main{max-width:1640px;margin:auto;padding:32px 35px 26px}.page-head{display:flex;align-items:center;justify-content:space-between;gap:18px;margin:0 0 27px}.page-head p{color:var(--muted);font-size:12px;margin-top:10px}.page-head .eyebrow{margin-bottom:9px}.toolbar{display:flex;gap:9px;align-items:center}.toolbar select{width:auto}.pill{border:1px solid var(--line);background:var(--panel2);border-radius:5px;padding:3px 8px;font-size:10px;display:inline-flex;align-items:center;gap:5px;white-space:nowrap}.pill.green{background:#6eaf8513;border-color:#78b28d25}.pill.red{background:#d87f7012;border-color:#d87f7025}.pill.gold{background:var(--goldbg);border-color:#c7ad7730}.notice{border:1px solid var(--line);border-left:2px solid var(--gold);border-radius:7px;padding:12px 15px;color:var(--muted);font-size:12px;background:var(--panel);margin-bottom:20px}.demo-notice{display:flex;justify-content:space-between;align-items:center;padding:8px 13px;margin-bottom:22px;font-size:11px;background:var(--goldbg);color:var(--gold);border-radius:6px;gap:10px}.demo-notice button{padding:2px 7px;color:var(--gold);font-size:10px;border-color:#c7ad7733;background:transparent}.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:23px}.kpi{border:1px solid var(--line);background:var(--panel);border-radius:var(--radius);padding:19px 20px 17px;min-width:0}.kpi-top{display:flex;align-items:center;justify-content:space-between;color:var(--muted);font-size:11px}.kpi-top svg{color:var(--gold);width:16px;height:16px}.kpi-value{font-size:29px;font-family:Georgia,serif;letter-spacing:-.5px;margin-top:13px;font-variant-numeric:tabular-nums;white-space:nowrap}.kpi-bottom{font-size:10px;color:var(--muted);margin-top:10px;display:flex;align-items:center;gap:7px}.panel{border:1px solid var(--line);background:var(--panel);border-radius:var(--radius);overflow:hidden}.panel-head{padding:21px 22px 0;display:flex;justify-content:space-between;gap:12px;align-items:center}.panel-head p{font-size:10px;color:var(--muted);margin-top:5px}.panel-body{padding:22px}.charts-grid{display:grid;grid-template-columns:1.8fr 1fr;gap:20px;margin-bottom:27px}.chart{height:238px;padding:15px 21px 8px}.chart svg{width:100%;height:100%;overflow:visible}.legend{font-size:10px;gap:13px}.legend span{display:flex;align-items:center;gap:5px}.legend i{width:7px;height:7px;border-radius:50%;display:inline-block}.donut-wrap{display:flex;align-items:center;justify-content:center;gap:30px;padding:27px 22px 24px;min-height:236px}.donut{width:164px;height:164px;border-radius:50%;display:grid;place-items:center;position:relative;flex:none}.donut:after{content:'';position:absolute;inset:19px;border-radius:50%;background:var(--panel)}.donut-label{z-index:1;text-align:center}.donut-label b{font-family:Georgia,serif;font-size:27px;font-weight:400}.donut-label small{display:block;color:var(--muted);font-size:10px;margin-top:2px}.donut-legend{display:flex;flex-direction:column;gap:18px;font-size:10px;min-width:95px}.donut-legend .amount{font-size:13px;color:var(--text);padding-left:13px;margin-top:3px}.section-title{display:flex;align-items:center;justify-content:space-between;margin:0 0 15px}.section-title small{color:var(--muted);font-size:11px;font-weight:400;margin-left:9px}.text-link{background:none;border:none;padding:3px 0;color:var(--gold);font-size:11px}.sci-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:17px;margin-bottom:27px}.sci-card{padding:20px;border:1px solid var(--line);background:var(--panel);border-radius:var(--radius);cursor:pointer;transition:border .2s,transform .2s}.sci-card:hover{transform:translateY(-3px);border-color:var(--gold)}.building-icon{width:37px;height:37px;display:grid;place-items:center;border:1px solid var(--line);border-radius:9px;background:var(--panel2);color:var(--gold);flex:none}.sci-card h3{font-size:13px}.sci-card .location{font-size:10px;color:var(--muted);margin-top:4px}.sci-stats{display:grid;grid-template-columns:1fr 1fr;margin-top:21px;gap:15px}.sci-stats label{color:var(--muted);font-size:10px;display:block}.sci-stats strong{font-size:17px;font-family:Georgia,serif;font-weight:400;display:block;margin-top:4px}.sci-card-bottom{border-top:1px solid var(--line);margin-top:18px;padding-top:13px;display:flex;align-items:center;justify-content:space-between;font-size:10px;color:var(--muted)}.mini-bar{display:flex;height:3px;gap:3px;margin-top:14px}.mini-bar i{height:3px;background:var(--green);border-radius:2px;flex:1}.lower-grid{display:grid;grid-template-columns:1.45fr 1fr;gap:20px}.table-wrap{overflow-x:auto}table{width:100%;border-collapse:collapse;white-space:nowrap}th{padding:12px 20px;color:var(--muted);text-align:left;font-size:9px;font-weight:500;letter-spacing:.7px;text-transform:uppercase;border-bottom:1px solid var(--line)}td{padding:14px 20px;border-bottom:1px solid var(--line);font-size:11px}tbody tr:last-child td{border-bottom:0}tbody tr:hover{background:var(--panel2)}td strong{font-size:11px;font-weight:500}.cell-sub{display:block;color:var(--muted);font-size:10px;margin-top:3px}.align-right{text-align:right}.actions{display:flex;justify-content:flex-end;gap:3px}.actions button{padding:4px 6px;min-width:27px;background:transparent;border:0}.actions button svg{width:14px;height:14px}.task-line{padding:15px 21px;display:flex;align-items:center;gap:12px;border-bottom:1px solid var(--line)}.task-line:last-child{border-bottom:0}.task-date{background:var(--panel2);border:1px solid var(--line);border-radius:7px;min-width:39px;text-align:center;padding:4px 6px;font-size:15px;line-height:1.2}.task-date small{font-size:8px;color:var(--muted);display:block;margin-top:3px;text-transform:uppercase}.task-line h3{font-size:11px}.task-line p{font-size:10px;color:var(--muted);margin-top:4px}.task-line .task-right{margin-left:auto}.footer{display:flex;justify-content:space-between;color:var(--muted);font-size:9px;padding:24px 1px 0;gap:12px}.tabs{display:flex;gap:20px;overflow:auto;border-bottom:1px solid var(--line);margin:-2px 0 23px}.tab{background:transparent;border:none;border-radius:0;color:var(--muted);font-size:12px;white-space:nowrap;padding:12px 1px 14px;position:relative}.tab.active{color:var(--gold)}.tab.active:after{content:'';position:absolute;bottom:0;left:0;right:0;height:2px;background:var(--gold)}.tab:hover{background:transparent;color:var(--text)}.filters{display:flex;gap:9px;margin-bottom:17px;align-items:center}.filters input{max-width:310px}.filters select{width:auto;max-width:220px}.empty{padding:48px 22px;text-align:center;color:var(--muted)}.empty svg{height:32px;width:32px;color:var(--gold);margin-bottom:12px}.empty h3{color:var(--text);margin-bottom:7px}.empty button{margin-top:18px}.settings-grid{display:grid;grid-template-columns:1fr 1fr;gap:20px}.setting-row{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:17px 0;border-bottom:1px solid var(--line)}.setting-row:first-child{padding-top:0}.setting-row:last-child{padding-bottom:0;border:0}.setting-row p{font-size:11px;color:var(--muted);margin-top:5px}.theme-choice{display:flex;gap:9px}.theme-choice button.active{border-color:var(--gold);color:var(--gold);background:var(--goldbg)}.order-item{padding:10px 12px;border:1px solid var(--line);border-radius:7px;margin-top:8px;display:flex;align-items:center;gap:9px;background:var(--panel2);font-size:12px}.order-item .actions{margin-left:auto}.order-item.locked{color:var(--muted);background:transparent;border-style:dashed}.toggle{height:23px;width:41px;border-radius:20px;background:var(--line);padding:3px;position:relative;border:0}.toggle:after{content:'';height:17px;width:17px;position:absolute;left:3px;top:3px;border-radius:50%;background:var(--muted);transition:left .2s}.toggle.on{background:var(--gold)}.toggle.on:after{left:21px;background:#fff}.info-grid{display:grid;grid-template-columns:1fr 1fr;gap:22px}.info-item label{color:var(--muted);font-size:11px;display:block;margin-bottom:5px}.info-item span{font-size:13px}.audit-list{max-height:310px;overflow:auto}.audit-line{padding:12px 0;border-bottom:1px solid var(--line);font-size:11px;display:flex;gap:16px}.audit-line time{color:var(--muted);min-width:115px}.color-dot{width:8px;height:8px;display:inline-block;border-radius:50%;margin-right:6px}.property-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}.property-card{padding:21px}.property-cover{height:100px;border-radius:8px;margin-bottom:17px;background:linear-gradient(130deg,var(--goldbg),var(--panel2));position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center;color:var(--gold)}.property-cover svg{height:65px;width:65px;opacity:.65}.property-cover .pill{position:absolute;top:10px;right:10px;background:var(--panel)}.property-metrics{display:flex;justify-content:space-between;margin-top:18px;border-top:1px solid var(--line);padding-top:15px}.property-metrics small{display:block;color:var(--muted);font-size:10px;margin-bottom:4px}.property-metrics strong{font-size:17px;font-family:Georgia,serif;font-weight:400}.compact-note{color:var(--muted);font-size:11px;margin-top:15px}.balance-card{padding:24px;background:linear-gradient(120deg,var(--goldbg),var(--panel));border:1px solid #c7ad7735;border-radius:12px;margin-bottom:20px}.balance-card strong{font-size:33px;font-family:Georgia,serif;font-weight:400}.annual-bars{display:flex;align-items:end;gap:6px;height:90px}.progress{height:5px;background:var(--line);border-radius:5px;overflow:hidden}.progress i{height:100%;display:block;background:var(--gold);border-radius:5px}.search-results{display:flex;flex-direction:column;gap:7px;max-height:420px;overflow:auto}.search-result{padding:13px;text-align:left;justify-content:flex-start}.search-result small{display:block;color:var(--muted)}.modal-backdrop{position:fixed;inset:0;background:#060906b8;backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;z-index:80;padding:22px;animation:fade .15s ease}.modal{background:var(--panel);border:1px solid var(--line);border-radius:15px;width:600px;max-width:100%;max-height:91vh;display:flex;flex-direction:column;box-shadow:var(--shadow)}.modal.wide{width:780px}.modal-head{display:flex;align-items:center;justify-content:space-between;padding:21px 25px;border-bottom:1px solid var(--line)}.modal-head h2{font-family:Georgia,serif;font-size:23px;font-weight:400}.modal-content{padding:23px 25px;overflow:auto}.modal-footer{display:flex;justify-content:flex-end;gap:9px;padding:17px 25px;border-top:1px solid var(--line)}.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:17px}.field{display:flex;flex-direction:column;gap:7px}.field.full{grid-column:1/-1}.field label{font-size:11px;color:var(--muted)}input,select,textarea{background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:10px 11px;width:100%;min-width:0}textarea{resize:vertical;min-height:75px}input[type=color]{height:40px;padding:5px}input[type=checkbox]{width:15px;height:15px;accent-color:var(--gold);flex:none;cursor:pointer}input:focus,select:focus,textarea:focus{border-color:var(--gold);outline:1px solid #c7ad7733}.checks{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin:10px 0 20px}.check{display:flex;align-items:center;gap:9px;font-size:12px;border:1px solid var(--line);border-radius:7px;padding:10px;cursor:pointer}.file-drop{border:1px dashed var(--gold);border-radius:8px;padding:19px;margin:12px 0;background:var(--goldbg);color:var(--gold)}.file-drop input{margin-top:12px}.error{padding:10px 12px;border-radius:6px;color:var(--red);background:#df8e8311;font-size:12px;margin-top:15px}.toast-container{position:fixed;right:25px;bottom:23px;display:flex;flex-direction:column;gap:8px;z-index:110}.toast{padding:13px 18px;background:var(--panel2);border:1px solid var(--line);border-left:3px solid var(--green);border-radius:8px;box-shadow:var(--shadow);max-width:420px;font-size:12px;animation:slide .2s ease}.toast.error-toast{border-left-color:var(--red)}.loading{padding:120px 20px;text-align:center;color:var(--muted)}body.collapsed #sidebar{width:76px}body.collapsed #shell{margin-left:76px}body.collapsed .brand{padding:25px 17px}body.collapsed .brand-text,body.collapsed .nav-text,body.collapsed .workspace,body.collapsed .nav-label,body.collapsed .user-details,body.collapsed .local-status{display:none}body.collapsed .nav-scroll{padding:0 10px}body.collapsed .nav-bottom{padding:12px 10px}body.collapsed .nav-item{padding:12px 17px}body.collapsed .user-block{padding:18px 22px}body.collapsed .nav-divider{margin:18px 8px}body.collapsed .nav-item svg{flex:none}#modal:empty{display:none}.amount{font-variant-numeric:tabular-nums}.mobile-title{display:none}@keyframes fade{from{opacity:0}to{opacity:1}}@keyframes slide{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}@media(min-width:1550px){main{padding:40px 45px}.kpi-value{font-size:34px}.chart{height:260px}.donut-wrap{min-height:258px}.donut{width:180px;height:180px}}
+#shell{margin-left:244px;transition:margin-left .3s cubic-bezier(.22,.8,.25,1)}header{height:70px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 35px;gap:15px}.breadcrumb{color:var(--muted);font-size:11px;gap:12px}.breadcrumb b{color:var(--text);font-weight:400}.search-btn{background:transparent;color:var(--muted);border:1px solid var(--line);font-size:11px;padding:7px 12px;width:218px;justify-content:flex-start}.search-btn kbd{margin-left:auto;border:1px solid var(--line);font-size:9px;padding:0 4px;border-radius:3px;color:var(--muted)}.top-date{font-size:11px;color:var(--muted)}main{max-width:1640px;margin:auto;padding:32px 35px 26px}.page-head{display:flex;align-items:center;justify-content:space-between;gap:18px;margin:0 0 27px}.page-head p{color:var(--muted);font-size:12px;margin-top:10px}.page-head .eyebrow{margin-bottom:9px}.toolbar{display:flex;gap:9px;align-items:center}.toolbar select{width:auto}.pill{border:1px solid var(--line);background:var(--panel2);border-radius:5px;padding:3px 8px;font-size:10px;display:inline-flex;align-items:center;gap:5px;white-space:nowrap}.pill.green{background:#6eaf8513;border-color:#78b28d25}.pill.red{background:#d87f7012;border-color:#d87f7025}.pill.gold{background:var(--goldbg);border-color:#c7ad7730}.notice{border:1px solid var(--line);border-left:2px solid var(--gold);border-radius:7px;padding:12px 15px;color:var(--muted);font-size:12px;background:var(--panel);margin-bottom:20px}.demo-notice{display:flex;justify-content:space-between;align-items:center;padding:8px 13px;margin-bottom:22px;font-size:11px;background:var(--goldbg);color:var(--gold);border-radius:6px;gap:10px}.demo-notice button{padding:2px 7px;color:var(--gold);font-size:10px;border-color:#c7ad7733;background:transparent}.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:23px}.kpi{border:1px solid var(--line);background:var(--panel);border-radius:var(--radius);padding:19px 20px 17px;min-width:0}.kpi-top{display:flex;align-items:center;justify-content:space-between;color:var(--muted);font-size:11px}.kpi-top svg{color:var(--gold);width:16px;height:16px}.kpi-value{font-size:29px;font-family:Georgia,serif;letter-spacing:-.5px;margin-top:13px;font-variant-numeric:tabular-nums;white-space:nowrap}.kpi-bottom{font-size:10px;color:var(--muted);margin-top:10px;display:flex;align-items:center;gap:7px}.panel{border:1px solid var(--line);background:var(--panel);border-radius:var(--radius);overflow:hidden}.panel-head{padding:21px 22px 0;display:flex;justify-content:space-between;gap:12px;align-items:center}.panel-head p{font-size:10px;color:var(--muted);margin-top:5px}.panel-body{padding:22px}.charts-grid{display:grid;grid-template-columns:1.8fr 1fr;gap:20px;margin-bottom:27px}.chart{height:238px;padding:15px 21px 8px}.chart svg{width:100%;height:100%;overflow:visible}.legend{font-size:10px;gap:13px}.legend span{display:flex;align-items:center;gap:5px}.legend i{width:7px;height:7px;border-radius:50%;display:inline-block}.donut-wrap{display:flex;align-items:center;justify-content:center;gap:30px;padding:27px 22px 24px;min-height:236px}.donut{width:164px;height:164px;border-radius:50%;display:grid;place-items:center;position:relative;flex:none}.donut:after{content:'';position:absolute;inset:19px;border-radius:50%;background:var(--panel)}.donut-label{z-index:1;text-align:center}.donut-label b{font-family:Georgia,serif;font-size:27px;font-weight:400}.donut-label small{display:block;color:var(--muted);font-size:10px;margin-top:2px}.donut-legend{display:flex;flex-direction:column;gap:18px;font-size:10px;min-width:95px}.donut-legend .amount{font-size:13px;color:var(--text);padding-left:13px;margin-top:3px}.section-title{display:flex;align-items:center;justify-content:space-between;margin:0 0 15px}.section-title small{color:var(--muted);font-size:11px;font-weight:400;margin-left:9px}.text-link{background:none;border:none;padding:3px 0;color:var(--gold);font-size:11px}.sci-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:17px;margin-bottom:27px}.sci-card{padding:20px;border:1px solid var(--line);background:var(--panel);border-radius:var(--radius);cursor:pointer;transition:border .2s,transform .2s}.sci-card:hover{transform:translateY(-3px);border-color:var(--gold)}.building-icon{width:37px;height:37px;display:grid;place-items:center;border:1px solid var(--line);border-radius:9px;background:var(--panel2);color:var(--gold);flex:none}.sci-card h3{font-size:13px}.sci-card .location{font-size:10px;color:var(--muted);margin-top:4px}.sci-stats{display:grid;grid-template-columns:1fr 1fr;margin-top:21px;gap:15px}.sci-stats label{color:var(--muted);font-size:10px;display:block}.sci-stats strong{font-size:17px;font-family:Georgia,serif;font-weight:400;display:block;margin-top:4px}.sci-card-bottom{border-top:1px solid var(--line);margin-top:18px;padding-top:13px;display:flex;align-items:center;justify-content:space-between;font-size:10px;color:var(--muted)}.mini-bar{display:flex;height:3px;gap:3px;margin-top:14px}.mini-bar i{height:3px;background:var(--green);border-radius:2px;flex:1}.lower-grid{display:grid;grid-template-columns:1.45fr 1fr;gap:20px}.table-wrap{overflow-x:auto}table{width:100%;border-collapse:collapse;white-space:nowrap}th{padding:12px 20px;color:var(--muted);text-align:left;font-size:9px;font-weight:500;letter-spacing:.7px;text-transform:uppercase;border-bottom:1px solid var(--line)}td{padding:14px 20px;border-bottom:1px solid var(--line);font-size:11px}tbody tr:last-child td{border-bottom:0}tbody tr:hover{background:var(--panel2)}td strong{font-size:11px;font-weight:500}.cell-sub{display:block;color:var(--muted);font-size:10px;margin-top:3px}.align-right{text-align:right}.actions{display:flex;justify-content:flex-end;gap:3px}.actions button{padding:4px 6px;min-width:27px;background:transparent;border:0}.actions button svg{width:14px;height:14px}.task-line{padding:15px 21px;display:flex;align-items:center;gap:12px;border-bottom:1px solid var(--line)}.task-line:last-child{border-bottom:0}.task-date{background:var(--panel2);border:1px solid var(--line);border-radius:7px;min-width:39px;text-align:center;padding:4px 6px;font-size:15px;line-height:1.2}.task-date small{font-size:8px;color:var(--muted);display:block;margin-top:3px;text-transform:uppercase}.task-line h3{font-size:11px}.task-line p{font-size:10px;color:var(--muted);margin-top:4px}.task-line .task-right{margin-left:auto}.footer{display:flex;justify-content:space-between;color:var(--muted);font-size:9px;padding:24px 1px 0;gap:12px}.tabs{display:flex;gap:20px;overflow:auto;border-bottom:1px solid var(--line);margin:-2px 0 23px}.tab{background:transparent;border:none;border-radius:0;color:var(--muted);font-size:12px;white-space:nowrap;padding:12px 1px 14px;position:relative}.tab.active{color:var(--gold)}.tab.active:after{content:'';position:absolute;bottom:0;left:0;right:0;height:2px;background:var(--gold)}.tab:hover{background:transparent;color:var(--text)}.filters{display:flex;gap:9px;margin-bottom:17px;align-items:center}.filters input{max-width:310px}.filters select{width:auto;max-width:220px}.empty{padding:48px 22px;text-align:center;color:var(--muted);display:flex;flex-direction:column;align-items:center;justify-content:center}.empty>svg{height:32px;width:32px;color:var(--gold);margin-bottom:12px}.empty h3{color:var(--text);margin-bottom:7px}.empty p{max-width:440px}.empty button{margin-top:18px;padding:10px 18px;border-radius:8px;font-weight:600;box-shadow:0 6px 18px rgba(0,0,0,.18)}.empty button svg{width:16px;height:16px;color:currentColor;margin:0}.settings-grid{display:grid;grid-template-columns:1fr 1fr;gap:20px}.setting-row{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:17px 0;border-bottom:1px solid var(--line)}.setting-row:first-child{padding-top:0}.setting-row:last-child{padding-bottom:0;border:0}.setting-row p{font-size:11px;color:var(--muted);margin-top:5px}.theme-choice{display:flex;gap:9px}.theme-choice button.active{border-color:var(--gold);color:var(--gold);background:var(--goldbg)}.order-item{padding:10px 12px;border:1px solid var(--line);border-radius:7px;margin-top:8px;display:flex;align-items:center;gap:9px;background:var(--panel2);font-size:12px}.order-item .actions{margin-left:auto}.order-item.locked{color:var(--muted);background:transparent;border-style:dashed}.toggle{height:23px;width:41px;border-radius:20px;background:var(--line);padding:3px;position:relative;border:0}.toggle:after{content:'';height:17px;width:17px;position:absolute;left:3px;top:3px;border-radius:50%;background:var(--muted);transition:left .2s}.toggle.on{background:var(--gold)}.toggle.on:after{left:21px;background:#fff}.info-grid{display:grid;grid-template-columns:1fr 1fr;gap:22px}.info-item label{color:var(--muted);font-size:11px;display:block;margin-bottom:5px}.info-item span{font-size:13px}.audit-list{max-height:310px;overflow:auto}.audit-line{padding:12px 0;border-bottom:1px solid var(--line);font-size:11px;display:flex;gap:16px}.audit-line time{color:var(--muted);min-width:115px}.color-dot{width:8px;height:8px;display:inline-block;border-radius:50%;margin-right:6px}.property-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}.property-card{padding:21px}.property-cover{height:100px;border-radius:8px;margin-bottom:17px;background:linear-gradient(130deg,var(--goldbg),var(--panel2));position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center;color:var(--gold)}.property-cover svg{height:65px;width:65px;opacity:.65}.property-cover.has-photo{height:auto;aspect-ratio:16/5}.property-cover img.property-cover-img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;z-index:0}.property-cover .pill{position:absolute;top:10px;right:10px;background:var(--panel);z-index:2}.property-metrics{display:flex;justify-content:space-between;margin-top:18px;border-top:1px solid var(--line);padding-top:15px}.property-metrics small{display:block;color:var(--muted);font-size:10px;margin-bottom:4px}.property-metrics strong{font-size:17px;font-family:Georgia,serif;font-weight:400}.compact-note{color:var(--muted);font-size:11px;margin-top:15px}.balance-card{padding:24px;background:linear-gradient(120deg,var(--goldbg),var(--panel));border:1px solid #c7ad7735;border-radius:12px;margin-bottom:20px}.balance-card strong{font-size:33px;font-family:Georgia,serif;font-weight:400}.annual-bars{display:flex;align-items:end;gap:6px;height:90px}.progress{height:5px;background:var(--line);border-radius:5px;overflow:hidden}.progress i{height:100%;display:block;background:var(--gold);border-radius:5px}.search-results{display:flex;flex-direction:column;gap:7px;max-height:420px;overflow:auto}.search-result{padding:13px;text-align:left;justify-content:flex-start}.search-result small{display:block;color:var(--muted)}.modal-backdrop{position:fixed;inset:0;background:#060906b8;backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;z-index:80;padding:22px;animation:fade .15s ease}.modal{background:var(--panel);border:1px solid var(--line);border-radius:15px;width:600px;max-width:100%;max-height:91vh;display:flex;flex-direction:column;box-shadow:var(--shadow)}.modal.wide{width:780px}.modal.doc-preview-modal{width:980px}.modal-head{display:flex;align-items:center;justify-content:space-between;padding:21px 25px;border-bottom:1px solid var(--line)}.modal-head h2{font-family:Georgia,serif;font-size:23px;font-weight:400}.modal-content{padding:23px 25px;overflow:auto}.modal-footer{display:flex;justify-content:flex-end;gap:9px;padding:17px 25px;border-top:1px solid var(--line)}.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:17px}.field{display:flex;flex-direction:column;gap:7px}.field.full{grid-column:1/-1}.field label{font-size:11px;color:var(--muted)}input,select,textarea{background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:10px 11px;width:100%;min-width:0}textarea{resize:vertical;min-height:75px}input[type=color]{height:40px;padding:5px}input[type=checkbox]{width:15px;height:15px;accent-color:var(--gold);flex:none;cursor:pointer}input:focus,select:focus,textarea:focus{border-color:var(--gold);outline:1px solid #c7ad7733}.checks{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin:10px 0 20px}.check{display:flex;align-items:center;gap:9px;font-size:12px;border:1px solid var(--line);border-radius:7px;padding:10px;cursor:pointer}.file-drop{border:1px dashed var(--gold);border-radius:8px;padding:19px;margin:12px 0;background:var(--goldbg);color:var(--gold)}.file-drop input{margin-top:12px}.error{padding:10px 12px;border-radius:6px;color:var(--red);background:#df8e8311;font-size:12px;margin-top:15px;white-space:pre-wrap}.toast-container{position:fixed;right:25px;bottom:23px;display:flex;flex-direction:column;gap:8px;z-index:110}.toast{padding:13px 18px;background:var(--panel2);border:1px solid var(--line);border-left:3px solid var(--green);border-radius:8px;box-shadow:var(--shadow);max-width:420px;font-size:12px;animation:slide .2s ease}.toast.error-toast{border-left-color:var(--red)}.loading{padding:120px 20px;text-align:center;color:var(--muted)}.user-lock{margin-left:auto;display:inline-flex;color:var(--muted)}body.collapsed #sidebar{width:76px}body.collapsed #shell{margin-left:76px}body.collapsed .brand{padding:25px 17px}body.collapsed .brand-text,body.collapsed .nav-text,body.collapsed .workspace,body.collapsed .nav-label,body.collapsed .user-details,body.collapsed .user-lock,body.collapsed .user-block svg,body.collapsed .local-status{display:none}body.collapsed .nav-scroll{padding:0 10px}body.collapsed .nav-bottom{padding:12px 10px}body.collapsed .nav-item{padding:12px 17px}body.collapsed .user-block{padding:18px 0;justify-content:center}body.collapsed .nav-divider{margin:18px 8px}body.collapsed .nav-item svg{flex:none}#modal:empty{display:none}.amount{font-variant-numeric:tabular-nums}.mobile-title{display:none}@keyframes fade{from{opacity:0}to{opacity:1}}@keyframes slide{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}@media(min-width:1550px){main{padding:40px 45px}.kpi-value{font-size:34px}.chart{height:260px}.donut-wrap{min-height:258px}.donut{width:180px;height:180px}}
 @media(max-width:1180px){#sidebar{width:218px}#shell{margin-left:218px}main{padding:26px 24px}header{padding:0 24px}.kpi{padding:16px}.kpi-value{font-size:25px}.donut-wrap{gap:17px;padding:28px 15px}.donut{width:140px;height:140px}.sci-grid{gap:12px}.sci-card{padding:16px}.top-date{display:none}.charts-grid{grid-template-columns:1.5fr 1fr}.property-grid{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:950px){.kpis{grid-template-columns:repeat(2,1fr)}.charts-grid,.lower-grid,.settings-grid{grid-template-columns:1fr}.sci-grid{grid-template-columns:1fr}.donut-wrap{min-height:225px}.sci-stats{grid-template-columns:1fr 1fr}.chart{height:250px}.page-head{align-items:flex-start}.toolbar{flex-wrap:wrap;justify-content:flex-end}.search-btn{width:150px}.search-btn kbd{display:none}.sci-card-bottom{margin-top:14px}}
-@media(max-width:640px){#sidebar{width:76px}#shell{margin-left:76px}.brand{padding:25px 17px}.brand-text,.nav-text,.workspace,.nav-label,.user-details,.local-status{display:none}.nav-scroll{padding:0 10px}.nav-bottom{padding:12px 10px}.nav-item{padding:12px 17px}.user-block{padding:18px 22px}.nav-divider{margin:18px 8px}header{padding:0 15px;height:60px}.breadcrumb{display:none}.search-btn{width:145px}main{padding:22px 14px}.page-head{flex-direction:column;gap:16px}h1{font-size:29px}.toolbar{justify-content:flex-start}.kpis{gap:10px}.kpi{padding:13px}.kpi-value{font-size:24px}.kpi-top{font-size:10px}.kpi-bottom{font-size:9px}.property-grid{grid-template-columns:1fr}.form-grid,.info-grid{grid-template-columns:1fr}.checks{grid-template-columns:1fr}.modal-backdrop{padding:10px}.modal-content{padding:18px}.modal-head{padding:17px}.footer{flex-direction:column}.legend{gap:7px;font-size:9px}.filters{flex-wrap:wrap}.panel-head{padding:18px 16px 0}.panel-body{padding:17px}.chart{padding:15px 10px}.demo-notice{align-items:flex-start} .setting-row{flex-wrap:wrap}.tabs{gap:17px}}
+@media(max-width:640px){#sidebar{width:76px}#shell{margin-left:76px}.brand{padding:25px 17px}.brand-text,.nav-text,.workspace,.nav-label,.user-details,.user-lock,.user-block svg,.local-status{display:none}.nav-scroll{padding:0 10px}.nav-bottom{padding:12px 10px}.nav-item{padding:12px 17px}.user-block{padding:18px 0;justify-content:center}.nav-divider{margin:18px 8px}header{padding:0 15px;height:60px}.breadcrumb{display:none}.search-btn{width:145px}main{padding:22px 14px}.page-head{flex-direction:column;gap:16px}h1{font-size:29px}.toolbar{justify-content:flex-start}.kpis{gap:10px}.kpi{padding:13px}.kpi-value{font-size:24px}.kpi-top{font-size:10px}.kpi-bottom{font-size:9px}.property-grid{grid-template-columns:1fr}.form-grid,.info-grid{grid-template-columns:1fr}.checks{grid-template-columns:1fr}.modal-backdrop{padding:10px}.modal-content{padding:18px}.modal-head{padding:17px}.footer{flex-direction:column}.legend{gap:7px;font-size:9px}.filters{flex-wrap:wrap}.panel-head{padding:18px 16px 0}.panel-body{padding:17px}.chart{padding:15px 10px}.demo-notice{align-items:flex-start} .setting-row{flex-wrap:wrap}.tabs{gap:17px}}
 .update-steps{padding-left:22px;margin:20px 0;line-height:2.2}.tabs button{white-space:nowrap}.tabs{overflow-x:auto}
+.prop-crop-box{grid-column:1/-1;border:1px solid var(--line);background:var(--panel2);border-radius:10px;padding:15px 16px;display:flex;flex-direction:column;gap:12px}.prop-crop-stage-wrap{position:relative;width:100%;aspect-ratio:16/5;background:linear-gradient(130deg,var(--goldbg),var(--panel));border:1px dashed var(--gold);border-radius:8px;overflow:hidden;cursor:grab;user-select:none;touch-action:none;display:flex;align-items:center;justify-content:center;color:var(--gold)}.prop-crop-stage-wrap:active{cursor:grabbing}.prop-crop-stage-wrap canvas{width:100%;height:100%;display:block}.prop-crop-placeholder{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:12px;text-align:center;pointer-events:none}.prop-crop-placeholder svg{width:46px;height:46px;opacity:.65}.prop-crop-grid{position:absolute;inset:0;pointer-events:none;background-image:linear-gradient(to right,rgba(199,173,119,.28) 1px,transparent 1px),linear-gradient(to bottom,rgba(199,173,119,.28) 1px,transparent 1px);background-size:33.333% 33.333%;border:1px solid rgba(199,173,119,.5);border-radius:8px}.prop-crop-badge{position:absolute;bottom:8px;left:10px;pointer-events:none;background:var(--panel);color:var(--text);opacity:.94;font-size:10px;padding:3px 8px;border-radius:5px;border:1px solid #c7ad7759}.prop-crop-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.prop-crop-controls input[type=range]{flex:1;min-width:130px;padding:0;accent-color:var(--gold)}.doc-folders-bar{display:flex;gap:10px;overflow-x:auto;padding-bottom:6px;margin-bottom:18px;align-items:stretch}.doc-folder-card{border:1px solid var(--line);background:var(--panel);border-radius:10px;padding:11px 14px;min-width:175px;display:flex;flex-direction:column;gap:7px;cursor:pointer;transition:border-color .18s,background .18s,transform .18s;flex:none;text-align:left}.doc-folder-card:hover{border-color:var(--gold);transform:translateY(-1px)}.doc-folder-card.active{border-color:var(--gold);background:var(--goldbg)}.doc-folder-top{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%}.doc-folder-name{font-weight:600;font-size:12px;color:var(--text);display:flex;align-items:center;gap:7px;overflow:hidden;text-overflow:ellipsis}.doc-folder-meta{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:10px;color:var(--muted);width:100%}.doc-folder-actions{display:flex;gap:2px;margin-left:auto}.doc-folder-actions button{padding:2px 4px;min-width:21px;height:21px;background:transparent;border:0;color:var(--muted);border-radius:4px}.doc-folder-actions button:hover{color:var(--gold);background:var(--panel2)}.doc-folder-actions button svg{width:12px;height:12px}tr.doc-row{cursor:pointer}.doc-preview-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:10px 14px;background:var(--panel2);border:1px solid var(--line);border-radius:9px;margin-bottom:14px}.doc-preview-zoom-bar{display:flex;align-items:center;gap:7px;flex-wrap:wrap}.doc-preview-zoom-bar input[type=range]{width:130px;padding:0;accent-color:var(--gold)}.doc-preview-viewport{height:64vh;min-height:390px;background:var(--bg);border:1px solid var(--line);border-radius:10px;overflow:auto;display:flex;position:relative;padding:16px}.doc-preview-stage{margin:auto;width:calc(100% * var(--doc-zoom,1));height:calc(100% * var(--doc-zoom,1));min-width:120px;min-height:120px;display:flex;align-items:center;justify-content:center;flex:none}.doc-preview-img{max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;display:block;border-radius:6px;box-shadow:0 8px 28px rgba(0,0,0,.28)}.doc-preview-frame{width:100%;height:100%;border:0;border-radius:6px;background:#fff}.doc-preview-sheet{width:100%;min-height:100%;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:22px 26px;color:var(--text);overflow:auto;box-shadow:0 8px 28px rgba(0,0,0,.2);font-size:calc(13px * var(--doc-zoom,1));line-height:1.6}
+th.col-settings-th{padding:6px 14px;width:44px;text-align:right;vertical-align:middle}.table-gear-btn{width:28px;height:28px;padding:5px;color:var(--muted);border-radius:6px;border-color:transparent;background:transparent;display:inline-flex;align-items:center;justify-content:center}.table-gear-btn svg{width:15px;height:15px;transition:transform .22s ease}.table-gear-btn:hover{color:var(--gold);background:var(--panel2);border-color:var(--line)}.table-gear-btn:hover svg{transform:rotate(30deg)}.col-config-item{padding:10px 12px;border:1px solid var(--line);border-radius:7px;margin-top:8px;display:flex;align-items:center;gap:10px;background:var(--panel2);font-size:12px;transition:opacity .18s,background .18s}.col-config-item.col-hidden{opacity:.65;background:transparent;border-style:dashed}.col-config-item .actions{margin-left:auto}.bell-btn{position:relative}.bell-badge{position:absolute;top:2px;right:2px;min-width:16px;height:16px;padding:0 4px;border-radius:999px;background:#e5484d;color:#fff;font-size:9px;font-weight:700;line-height:12px;display:inline-flex;align-items:center;justify-content:center;border:2px solid var(--bg);box-shadow:0 2px 6px rgba(229,72,77,.45);pointer-events:none;animation:badgePop .22s cubic-bezier(.22,1,.36,1)}@keyframes badgePop{from{transform:scale(0);opacity:0}to{transform:scale(1);opacity:1}}.bell-list{display:flex;flex-direction:column;gap:10px;max-height:400px;overflow:auto}.bell-item{border:1px solid var(--line);background:var(--panel2);border-radius:10px;padding:13px 15px;display:flex;align-items:center;justify-content:space-between;gap:14px;transition:border-color .18s}.bell-item:hover{border-color:var(--gold)}.bell-item.important{border-left:3px solid var(--red)}.task-params-box{grid-column:1/-1;border:1px solid var(--line);background:var(--panel2);border-radius:10px;padding:14px 16px;display:flex;flex-direction:column;gap:12px}.task-param-row{display:flex;align-items:center;justify-content:space-between;gap:14px}.task-param-row+.task-param-row{border-top:1px solid var(--line);padding-top:12px}.task-param-row h4{margin:0;font-size:12px;font-weight:600;color:var(--text)}.task-param-row p{margin:3px 0 0;font-size:11px;color:var(--muted)}.task-reminders-area{border-top:1px solid var(--line);padding-top:12px;display:flex;flex-direction:column;gap:12px}.task-reminders-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(175px,1fr));gap:12px}.mac-notif-container{position:fixed;top:16px;right:18px;z-index:200;display:flex;flex-direction:column;gap:10px;pointer-events:none;max-width:calc(100vw - 32px)}.mac-notif{pointer-events:auto;width:376px;max-width:100%;background:rgba(30,34,30,.9);backdrop-filter:blur(24px) saturate(180%);-webkit-backdrop-filter:blur(24px) saturate(180%);border:1px solid rgba(255,255,255,.15);border-radius:16px;padding:13px 15px;box-shadow:0 20px 48px rgba(0,0,0,.52),0 3px 10px rgba(0,0,0,.25);color:var(--text);position:relative;animation:macNotifIn .45s cubic-bezier(.22,1,.36,1);transform-origin:top right}:root[data-theme=light] .mac-notif{background:rgba(252,251,247,.92);border-color:rgba(37,44,37,.13);box-shadow:0 18px 42px rgba(37,44,37,.18),0 3px 10px rgba(37,44,37,.08)}.mac-notif.closing{animation:macNotifOut .32s cubic-bezier(.4,0,1,1) forwards;pointer-events:none}@keyframes macNotifIn{0%{opacity:0;transform:translateX(calc(100% + 28px)) scale(.95)}70%{opacity:1;transform:translateX(-4px) scale(1.005)}100%{opacity:1;transform:translateX(0) scale(1)}}@keyframes macNotifOut{0%{opacity:1;transform:translateX(0) scale(1)}100%{opacity:0;transform:translateX(calc(100% + 28px)) scale(.95)}}.mac-notif-main{display:flex;align-items:flex-start;gap:12px}.mac-notif-icon{width:38px;height:38px;border-radius:9px;object-fit:contain;background:#000;flex:none;box-shadow:0 2px 6px rgba(0,0,0,.3)}.mac-notif-body{flex:1;min-width:0}.mac-notif-top{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:10px;color:var(--muted);letter-spacing:.5px;text-transform:uppercase;font-weight:600}.mac-notif-title{font-size:13px;font-weight:600;color:var(--text);margin-top:2px;line-height:1.3;overflow:hidden;text-overflow:ellipsis}.mac-notif-sub{font-size:11px;color:var(--muted);margin-top:2px;line-height:1.35}.mac-notif-actions{display:flex;justify-content:flex-end;gap:7px;margin-top:10px;padding-top:9px;border-top:1px solid rgba(146,152,141,.18)}.mac-notif-btn{padding:5px 11px;font-size:11px;border-radius:6px}.mac-notif-x{position:absolute;top:-6px;left:-6px;width:21px;height:21px;padding:3px;border-radius:50%;background:var(--panel2);border:1px solid var(--line);color:var(--muted);box-shadow:0 2px 6px rgba(0,0,0,.25);opacity:0;transition:opacity .15s}.mac-notif:hover .mac-notif-x,.mac-notif:focus-within .mac-notif-x{opacity:1}.mac-notif-x svg{width:11px;height:11px}
 @media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
-@media print{#sidebar,header,.toolbar,.tabs,.footer,button,.demo-notice{display:none!important}#shell{margin:0!important}body{background:white;color:black}main{padding:10px}.panel,.kpi,.sci-card{break-inside:avoid;background:white;border-color:#ccc}.chart svg text{fill:#555}}
-</style></head><body><aside id="sidebar"></aside><div id="shell"><header id="header"></header><main id="main"><div class="loading">Ouverture de votre espace patrimonial…</div></main></div><div id="modal"></div><div class="toast-container" id="toasts" role="status" aria-live="polite"></div>
+@media print{#sidebar,header,.toolbar,.tabs,.footer,button,.demo-notice,.mac-notif-container{display:none!important}#shell{margin:0!important}body{background:white;color:black}main{padding:10px}.panel,.kpi,.sci-card{break-inside:avoid;background:white;border-color:#ccc}.chart svg text{fill:#555}}
+</style></head><body><aside id="sidebar"></aside><div id="shell"><header id="header"></header><main id="main"><div class="loading">Ouverture de votre espace patrimonial…</div></main></div><div id="modal"></div><div class="mac-notif-container" id="mac-notifications" aria-live="assertive"></div><div class="toast-container" id="toasts" role="status" aria-live="polite"></div>
 <script>
 'use strict';
 const TOKEN='__TOKEN__';
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
-const paths={grid:'M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z',building:'M4 21V7l8-4 8 4v14 M2 21h20 M8 8v2 M12 7v3 M16 8v2 M8 13v2 M12 13v2 M16 13v2 M10 21v-3h4v3',wallet:'M3 6h16v14H3z M3 6V4h14v2 M15 11h6v5h-6z M17 13.5h1',calendar:'M4 5h16v16H4z M8 3v4 M16 3v4 M4 10h16 M8 14h2 M14 14h2 M8 17h2',folder:'M3 6h7l2 2h9v12H3z',settings:'M9 3h6l1 3 3 1 2 5-2 5-3 1-1 3H9l-1-3-3-1-2-5 2-5 3-1z M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0',exit:'M10 4H4v16h6 M13 8l4 4-4 4 M8 12h13',chevron:'m9 5 7 7-7 7',down:'m6 9 6 6 6-6',up:'m6 15 6-6 6 6',arrow:'M5 12h14 m-5-5 5 5-5 5',plus:'M12 5v14 M5 12h14',search:'M16 16l5 5 M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0',panel:'M3 4h18v16H3z M9 4v16',bell:'M6 8a6 6 0 0 1 12 0v7l3 3H3l3-3z M10 21h4',download:'M12 3v12 m-5-5 5 5 5-5 M4 16v5h16v-5',upload:'M12 16V4 m-5 5 5-5 5 5 M4 17v4h16v-4',trend:'m3 17 6-6 4 3 8-10 M15 4h6v6',check:'m5 12 4 4L19 6',close:'m6 6 12 12 M6 18 18 6',edit:'m14 5 5 5 M4 20l5-1L21 7l-5-5L4 14z',trash:'M4 6h16 M9 6V3h6v3 M6 6l1 15h10l1-15 M10 10v7 M14 10v7',users:'M16 21v-3c0-4-12-4-12 0v3 M10 3a4 4 0 1 1 0 8 4 4 0 0 1 0-8 M17 4a4 4 0 0 1 0 7 M18 15c3 0 4 1 4 4v2',file:'M5 3h9l5 5v13H5z M14 3v6h5 M8 13h8 M8 17h6',lock:'M5 10h14v11H5z M8 10V6a4 4 0 0 1 8 0v4 M12 14v3',sun:'M12 2v2 M12 20v2 M2 12h2 M20 12h2 M5 5l1 1 M18 18l1 1 M5 19l1-1 M18 6l1-1 M17 12a5 5 0 1 1-10 0 5 5 0 0 1 10 0',moon:'M21 13A9 9 0 0 1 11 3a9 9 0 1 0 10 10',database:'M3 6c0-5 18-5 18 0s-18 5-18 0 M3 6v12c0 5 18 5 18 0V6 M3 12c0 5 18 5 18 0',info:'M12 11v6 M12 7v1 M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0',home:'m3 10 9-7 9 7 M5 9v12h14V9 M9 21v-7h6v7',more:'M5 12h1 M11 12h1 M17 12h1',clock:'M12 6v6l4 2 M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0',percent:'m5 19 14-14 M9 6a3 3 0 1 1-6 0 3 3 0 0 1 6 0 M21 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0',print:'M7 8V3h10v5 M7 17H3V8h18v9h-4 M7 14h10v7H7z'};
+const paths={grid:'M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z',building:'M4 21V7l8-4 8 4v14 M2 21h20 M8 8v2 M12 7v3 M16 8v2 M8 13v2 M12 13v2 M16 13v2 M10 21v-3h4v3',wallet:'M3 6h16v14H3z M3 6V4h14v2 M15 11h6v5h-6z M17 13.5h1',calendar:'M4 5h16v16H4z M8 3v4 M16 3v4 M4 10h16 M8 14h2 M14 14h2 M8 17h2',folder:'M3 6h7l2 2h9v12H3z',settings:'M9 3h6l1 3 3 1 2 5-2 5-3 1-1 3H9l-1-3-3-1-2-5 2-5 3-1z M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0',exit:'M10 4H4v16h6 M13 8l4 4-4 4 M8 12h13',chevron:'m9 5 7 7-7 7',down:'m6 9 6 6 6-6',up:'m6 15 6-6 6 6',arrow:'M5 12h14 m-5-5 5 5-5 5',plus:'M12 5v14 M5 12h14',search:'M16 16l5 5 M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0',panel:'M3 4h18v16H3z M9 4v16',bell:'M6 8a6 6 0 0 1 12 0v7l3 3H3l3-3z M10 21h4',download:'M12 3v12 m-5-5 5 5 5-5 M4 16v5h16v-5',upload:'M12 16V4 m-5 5 5-5 5 5 M4 17v4h16v-4',trend:'m3 17 6-6 4 3 8-10 M15 4h6v6',check:'m5 12 4 4L19 6',close:'m6 6 12 12 M6 18 18 6',edit:'m14 5 5 5 M4 20l5-1L21 7l-5-5L4 14z',trash:'M4 6h16 M9 6V3h6v3 M6 6l1 15h10l1-15 M10 10v7 M14 10v7',users:'M16 21v-3c0-4-12-4-12 0v3 M10 3a4 4 0 1 1 0 8 4 4 0 0 1 0-8 M17 4a4 4 0 0 1 0 7 M18 15c3 0 4 1 4 4v2',file:'M5 3h9l5 5v13H5z M14 3v6h5 M8 13h8 M8 17h6',lock:'M5 10h14v11H5z M8 10V6a4 4 0 0 1 8 0v4 M12 14v3',sun:'M12 2v2 M12 20v2 M2 12h2 M20 12h2 M5 5l1 1 M18 18l1 1 M5 19l1-1 M18 6l1-1 M17 12a5 5 0 1 1-10 0 5 5 0 0 1 10 0',moon:'M21 13A9 9 0 0 1 11 3a9 9 0 1 0 10 10',database:'M3 6c0-5 18-5 18 0s-18 5-18 0 M3 6v12c0 5 18 5 18 0V6 M3 12c0 5 18 5 18 0',info:'M12 11v6 M12 7v1 M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0',home:'m3 10 9-7 9 7 M5 9v12h14V9 M9 21v-7h6v7',more:'M5 12h1 M11 12h1 M17 12h1',clock:'M12 6v6l4 2 M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0',refresh:'M20.5 12a8.5 8.5 0 1 1-2.6-6.1 M20.5 3.5v5h-5',percent:'m5 19 14-14 M9 6a3 3 0 1 1-6 0 3 3 0 0 1 6 0 M21 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0',print:'M7 8V3h10v5 M7 17H3V8h18v9h-4 M7 14h10v7H7z'};
 const icon=n=>`<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="${paths[n]||paths.file}"/></svg>`;
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const money=(n,d=0)=>new Intl.NumberFormat('fr-FR',{style:'currency',currency:'EUR',maximumFractionDigits:d,minimumFractionDigits:d}).format(Number(n)||0);
@@ -6247,7 +6736,7 @@ const palette=['#c7ad77','#879ad8','#70b7a6','#ce9683','#a08dcc','#7bb5c8'];
 const kindNames={properties:'Biens immobiliers',leases:'Baux & locataires',calls:'Appels de loyers',entries:'Trésorerie',partners:'Associés',loans:'Emprunts',tasks:'Échéances',documents:'Documents'};
 const navs={treasury:['Trésorerie','wallet'],agenda:['Échéancier','calendar'],documents:['Documents','folder']};
 const tabs=[['overview','Vue d’ensemble'],['properties','Biens'],['leases','Baux & locataires'],['calls','Loyers'],['entries','Trésorerie'],['partners','Associés'],['loans','Emprunts'],['tasks','Échéances'],['documents','Documents'],['identity','Société']];
-let S={scis:[],records:[],settings:{},audit:[]}, page='dashboard',tab='overview',query='',scope='',filter='',modalDirty=false,previousFocus=null,settingsQueue=Promise.resolve(),closing=false,importData=null;
+let S={scis:[],records:[],settings:{},audit:[]}, page='dashboard',tab='overview',query='',scope='',filter='',docFolder='',modalDirty=false,previousFocus=null,settingsQueue=Promise.resolve(),closing=false,importData=null;
 let settingsSection='general', updateInfo={status:'checking',current:'',message:'Vérification sur GitHub…'}, updateInstalling=false, updateRequestPending=false, updatePrompted=false, updateInstance=null, restartSince=0, restartNotified=false;
 const updateLabels={idle:'En attente',checking:'Vérification en cours',available:'Mise à jour disponible',current:'À jour',unavailable:'Vérification impossible',disabled:'Aperçu',downloading:'Téléchargement en cours',installing:'Installation en cours',restarting:'Redémarrage automatique',failed:'Installation annulée'};
 const busyUpdate=()=>['downloading','installing','restarting'].includes(updateInfo.status);
@@ -6327,6 +6816,127 @@ function label(r){return r?.name||r?.label||r?.tenant||r?.period||'—'}
 const currentSCI=()=>sci(page);
 const activeYear=()=>Number(S.settings.year)||2026;
 const yr=r=>(r.date||'').startsWith(String(activeYear()));
+const defaultTableColumns={
+entries:[{id:'label',label:'Opération'},{id:'sci',label:'SCI'},{id:'date',label:'Date'},{id:'category',label:'Catégorie'},{id:'amount',label:'Montant'}],
+leases:[{id:'tenant',label:'Locataire'},{id:'property',label:'Bien'},{id:'bail',label:'Bail'},{id:'rent',label:'Loyer / charges'},{id:'status',label:'Statut'}],
+calls:[{id:'tenant',label:'Locataire / période'},{id:'due',label:'Échéance'},{id:'called',label:'Appelé'},{id:'paid',label:'Encaissé'},{id:'status',label:'Statut'}],
+partners:[{id:'name',label:'Associé'},{id:'role',label:'Fonction'},{id:'shares',label:'Parts sociales'},{id:'participation',label:'Participation'},{id:'cca',label:'Compte courant déclaré'}],
+loans:[{id:'name',label:'Financement'},{id:'principal',label:'Capital initial'},{id:'balance',label:'Capital restant dû'},{id:'rate',label:'Taux / mensualité'},{id:'end',label:'Fin'}],
+tasks:[{id:'name',label:'Échéance'},{id:'sci',label:'SCI'},{id:'due',label:'Date'},{id:'category',label:'Catégorie'},{id:'status',label:'Statut'}],
+documents:[{id:'name',label:'Document'},{id:'sci',label:'SCI'},{id:'folder',label:'Dossier'},{id:'category',label:'Catégorie'},{id:'date',label:'Date'},{id:'file',label:'Fichier'}],
+entries_preview:[{id:'label',label:'Opération / société'},{id:'date',label:'Date'},{id:'amount',label:'Montant'}]
+};
+function getTableColumns(kind){
+    let defs=defaultTableColumns[kind]||[];
+    let cfg=(S.settings.table_columns&&typeof S.settings.table_columns==='object')?S.settings.table_columns[kind]:null;
+    let order=Array.isArray(cfg?.order)?cfg.order:[];
+    let hidden=new Set(Array.isArray(cfg?.hidden)?cfg.hidden:[]);
+    let validIds=defs.map(d=>d.id);
+    let finalOrder=[...order.filter((x,i,a)=>validIds.includes(x)&&a.indexOf(x)===i),...validIds.filter(x=>!order.includes(x))];
+    let cols=finalOrder.map(id=>{let d=defs.find(x=>x.id===id);return {id,label:d.label,visible:!hidden.has(id)};});
+    if(cols.length&&!cols.some(c=>c.visible))cols[0].visible=true;
+    return cols;
+}
+async function saveTableColumns(kind,cols){
+    let all={...(S.settings.table_columns&&typeof S.settings.table_columns==='object'?S.settings.table_columns:{})};
+    all[kind]={order:cols.map(c=>c.id),hidden:cols.filter(c=>!c.visible).map(c=>c.id)};
+    await setPref({table_columns:all});
+}
+function renderTableColumnsList(kind){
+    let cols=getTableColumns(kind),visCount=cols.filter(c=>c.visible).length;
+    return `<p class="sub" style="margin-bottom:12px">Activez ou masquez les colonnes souhaitées et réorganisez leur ordre d’affichage avec les flèches. Vos réglages sont enregistrés automatiquement.</p><div id="col-config-list">${cols.map((c,i)=>`<div class="col-config-item ${!c.visible?'col-hidden':''}" data-col-item="${c.id}"><button type="button" class="toggle ${c.visible?'on':''}" data-col-toggle="${c.id}" data-col-kind="${kind}" role="switch" aria-checked="${c.visible}" aria-label="Afficher la colonne ${esc(c.label)}" ${c.visible&&visCount<=1?'disabled title="Au moins une colonne doit rester affichée"':''}></button><span style="font-weight:500">${esc(c.label)}</span><span class="pill ${c.visible?'green':''}" style="margin-left:auto;margin-right:6px">${c.visible?'Affichée':'Masquée'}</span><div class="actions" style="margin-left:0"><button type="button" data-col-move="${c.id}" data-col-kind="${kind}" data-dir="-1" ${i===0?'disabled':''} title="Monter" aria-label="Monter ${esc(c.label)}">${icon('up')}</button><button type="button" data-col-move="${c.id}" data-col-kind="${kind}" data-dir="1" ${i===cols.length-1?'disabled':''} title="Descendre" aria-label="Descendre ${esc(c.label)}">${icon('down')}</button></div></div>`).join('')}</div>`;
+}
+function openTableColumnsModal(kind){
+    let title=kindNames[kind]||(kind==='entries_preview'?'Dernières opérations':'Tableau');
+    openModal('Colonnes · '+title,`<div id="col-config-wrap">${renderTableColumnsList(kind)}</div>`,`<button type="button" data-col-reset="${kind}">Réinitialiser par défaut</button><button type="button" class="primary" data-action="close-modal">${icon('check')} Enregistrer</button>`);
+}
+let shownMacNotifs=new Set(),macNotifTimers=new Map(),taskEditSnapshot=null;
+function taskReminderDates(r){
+    if(!r||r.kind!=='tasks')return [];
+    if(r.reminders_enabled&&Array.isArray(r.reminders)&&r.reminders.length)return r.reminders.filter(Boolean);
+    if(r.important&&r.due)return [r.due];
+    return [];
+}
+function taskUnreadReachedDates(r){
+    if(!r||r.kind!=='tasks'||r.status==='Terminé')return [];
+    let nowDate=today(),read=new Set(Array.isArray(r.read_reminders)?r.read_reminders:[]);
+    return taskReminderDates(r).filter(d=>d&&d<=nowDate&&!read.has(d));
+}
+function unreadReminderTasks(){
+    return rows('tasks').filter(r=>taskUnreadReachedDates(r).length>0).sort((a,b)=>a.due.localeCompare(b.due));
+}
+function updateBellBadge(){
+    let btn=$('#header .bell-btn');
+    if(!btn)return;
+    let count=unreadReminderTasks().length;
+    let badge=btn.querySelector('.bell-badge');
+    if(count>0){
+        let txt=count>9?'9+':String(count);
+        if(badge){badge.textContent=txt;badge.setAttribute('aria-label',count+' notification'+(count>1?'s':'')+' non lue'+(count>1?'s':''));}
+        else btn.insertAdjacentHTML('beforeend',`<span class="bell-badge" aria-label="${count} notification${count>1?'s':''} non lue${count>1?'s':''}">${txt}</span>`);
+    }else if(badge){badge.remove();}
+}
+function dismissMacNotification(taskId){
+    let timer=macNotifTimers.get(taskId);
+    if(timer){clearTimeout(timer);macNotifTimers.delete(taskId);}
+    let el=$(`#mac-notifications [data-mac-notif="${taskId}"]`);
+    if(el&&!el.classList.contains('closing')){
+        el.classList.add('closing');
+        setTimeout(()=>el.remove(),330);
+    }
+}
+async function markTaskRemindersRead(taskId,sync=true){
+    let r=rec(taskId);
+    if(!r||r.kind!=='tasks')return;
+    let reached=taskReminderDates(r).filter(d=>d&&d<=today());
+    if(!reached.length&&!taskUnreadReachedDates(r).length){dismissMacNotification(taskId);updateBellBadge();return;}
+    let merged=[...new Set([...(Array.isArray(r.read_reminders)?r.read_reminders:[]),...reached])];
+    r.read_reminders=merged;
+    dismissMacNotification(taskId);
+    updateBellBadge();
+    if(sync){
+        try{await api('save',{kind:'tasks',id:r.id,sci:r.sci,data:r});}catch(e){}
+    }
+}
+function showMacNotification(r){
+    let container=$('#mac-notifications');
+    if(!container||!r)return;
+    let existing=container.querySelector(`[data-mac-notif="${r.id}"]`);
+    if(existing)existing.remove();
+    let reached=taskUnreadReachedDates(r);
+    let remText=reached.length?`Rappel atteint (${date(reached[reached.length-1])})`:`Échéance le ${date(r.due)}`;
+    let card=document.createElement('div');
+    card.className='mac-notif';
+    card.dataset.macNotif=r.id;
+    card.setAttribute('role','alert');
+    card.innerHTML=`<button type="button" class="mac-notif-x" data-mac-close="${r.id}" title="Fermer" aria-label="Fermer la notification">${icon('close')}</button><div class="mac-notif-main"><img class="mac-notif-icon" src="/logo.png" width="38" height="38" alt="Dominis"><div class="mac-notif-body"><div class="mac-notif-top"><span class="gold">DOMINIS · IMPORTANT</span><span>Maintenant</span></div><div class="mac-notif-title">${esc(r.name)}</div><div class="mac-notif-sub">${esc(sciname(r.sci))} · ${esc(remText)}</div></div></div><div class="mac-notif-actions"><button type="button" class="mac-notif-btn" data-mac-close="${r.id}">Fermer</button><button type="button" class="mac-notif-btn primary" data-mac-view="${r.id}">Voir l’échéance</button></div>`;
+    container.appendChild(card);
+    let prevTimer=macNotifTimers.get(r.id);
+    if(prevTimer)clearTimeout(prevTimer);
+    macNotifTimers.set(r.id,setTimeout(()=>dismissMacNotification(r.id),10000));
+}
+function checkTaskNotifications(){
+    updateBellBadge();
+    let active=unreadReminderTasks();
+    active.forEach(r=>{
+        if(r.important){
+            let key=r.id+':'+taskUnreadReachedDates(r).join(',');
+            if(!shownMacNotifs.has(key)){
+                shownMacNotifs.add(key);
+                showMacNotification(r);
+            }
+        }
+    });
+}
+function renderBellModalContent(){
+    let list=unreadReminderTasks();
+    if(!list.length)return empty('Aucune notification en attente','Tous vos rappels et échéances importantes ont été consultés.');
+    return `<p class="sub" style="margin-bottom:12px">Les échéances consultées disparaissent automatiquement de la cloche.</p><div class="bell-list">${list.map(r=>{let dates=taskUnreadReachedDates(r);return `<div class="bell-item ${r.important?'important':''}" data-bell-item="${r.id}"><div><div class="row gap8"><strong>${esc(r.name)}</strong>${r.important?'<span class="pill red">Important</span>':''}<span class="pill">${esc(r.category||'Échéance')}</span></div><p class="sub" style="margin-top:4px">${esc(sciname(r.sci))} · Échéance prévue le ${date(r.due)}${dates.length?` · Rappel : ${dates.map(date).join(', ')}`:''}</p></div><div class="row gap8"><button type="button" class="primary" data-bell-view="${r.id}" style="padding:6px 11px;font-size:11px">Voir l’échéance</button><button type="button" data-bell-read="${r.id}" title="Marquer comme lu" aria-label="Marquer ${esc(r.name)} comme lu" style="padding:6px 9px;font-size:11px">${icon('check')}</button></div></div>`;}).join('')}</div>`;
+}
+function openBellModal(){
+    let list=unreadReminderTasks();
+    openModal('Notifications & rappels',`<div id="bell-modal-body">${renderBellModalContent()}</div>`,`${list.length?`<button type="button" data-bell-read-all="1">${icon('check')} Tout marquer comme lu</button>`:''}<button type="button" data-bell-agenda="1">${icon('calendar')} Voir l’échéancier</button><button type="button" class="primary" data-action="close-modal">Fermer</button>`);
+}
 function paid(c){return Math.round(rows('entries',c.sci).filter(e=>e.call_id===c.id&&e.date<=today()).reduce((a,e)=>a+Number(e.amount||0),0)*100)/100;}
 function due(c){return Math.max(0,Math.round(((Number(c.rent)||0)+(Number(c.charges)||0)-paid(c))*100)/100);}
 function metrics(id){let p=rows('properties',id), es=rows('entries',id), e=es.filter(yr),sc=S.scis.filter(s=>!id||s.id===id);let income=e.filter(r=>r.direction==='Recette').reduce((a,r)=>a+Number(r.amount||0),0),expense=e.filter(r=>r.direction==='Dépense').reduce((a,r)=>a+Number(r.amount||0),0);return {value:p.reduce((a,r)=>a+Number(r.value||0),0),income,expense,cash:sc.reduce((a,s)=>a+Number(s.opening||0)+es.filter(r=>r.sci===s.id&&r.date>=(s.opening_date||'2000-01-01')&&r.date<=today()).reduce((t,r)=>t+(r.direction==='Recette'?1:-1)*Number(r.amount||0),0),0),debt:rows('loans',id).reduce((a,r)=>a+Number(r.balance||0),0),occupied:p.filter(r=>r.status==='Loué').length,properties:p.length,overdue:rows('calls',id).filter(r=>r.due<today()).reduce((a,r)=>a+due(r),0)};}
@@ -6341,30 +6951,247 @@ function navIcon(id){return navs[id]?icon(navs[id][1]):`<span class="nav-dot" st
 function color(v){return /^#[0-9a-fA-F]{6}$/.test(v||'')?v:'#c7ad77'}
 function navigate(id,t='overview'){page=id;tab=t;query='';filter='';scope='';setPref({last_page:page,last_tab:tab});render();window.scrollTo({top:0,behavior:'smooth'});}
 function renderShell(){document.documentElement.dataset.theme=S.settings.theme||'dark';document.body.classList.toggle('collapsed',!!S.settings.collapsed);
-$('#sidebar').innerHTML=`<div class="brand"><img class="brand-mark" src="/logo.png" width="42" height="42" alt="Logo Dominis"><div class="brand-text"><div class="brand-name">DOMINIS</div><div class="brand-caption">Gestion patrimoniale</div></div></div><div class="workspace"><div class="workspace-icon">${icon('building')}</div><div><div style="font-size:11px">${esc(S.settings.owner||'Mon espace patrimonial')}</div><div class="sub" style="font-size:9px">${S.scis.length} sociétés · Espace privé</div></div></div><div class="nav-scroll"><div class="eyebrow nav-label">Votre patrimoine</div><button class="nav-item ${page==='dashboard'?'active':''}" data-nav="dashboard" title="Tableau de bord général">${icon('grid')}<span class="nav-text">Tableau de bord</span></button><div class="nav-divider"></div>${navOrder().map(id=>`<button class="nav-item ${page===id?'active':''}" data-nav="${id}" title="${esc(navName(id))}">${navIcon(id)}<span class="nav-text">${esc(navName(id))}</span></button>`).join('')}<button class="nav-item" data-action="new-sci" title="Ajouter une SCI" style="font-size:11px;color:var(--gold);margin-top:14px">${icon('plus')}<span class="nav-text">Ajouter une SCI</span></button></div><div class="nav-bottom"><button class="nav-item ${page==='settings'?'active':''}" data-nav="settings" title="Paramètres">${icon('settings')}<span class="nav-text">Paramètres</span></button><button class="nav-item" data-action="quit" title="Enregistrer et quitter">${icon('exit')}<span class="nav-text">Quitter l’application</span></button><div class="local-status"><span class="status-dot"></span>Données enregistrées en local</div></div><div class="user-block row"><div class="avatar">D</div><div class="user-details"><div style="font-size:11px">Votre espace privé</div><div class="sub" style="font-size:9px">Local · Base SQLite</div></div>${icon('lock')}</div>`;
+$('#sidebar').innerHTML=`<div class="brand"><img class="brand-mark" src="/logo.png" width="42" height="42" alt="Logo Dominis"><div class="brand-text"><div class="brand-name">DOMINIS</div><div class="brand-caption">Gestion patrimoniale</div></div></div><div class="workspace"><div class="workspace-icon">${icon('building')}</div><div><div style="font-size:11px">${esc(S.settings.owner||'Mon espace patrimonial')}</div><div class="sub" style="font-size:9px">${S.scis.length} sociétés · Espace privé</div></div></div><div class="nav-scroll"><div class="eyebrow nav-label">Votre patrimoine</div><button class="nav-item ${page==='dashboard'?'active':''}" data-nav="dashboard" title="Tableau de bord général">${icon('grid')}<span class="nav-text">Tableau de bord</span></button><div class="nav-divider"></div>${navOrder().map(id=>`<button class="nav-item ${page===id?'active':''}" data-nav="${id}" title="${esc(navName(id))}">${navIcon(id)}<span class="nav-text">${esc(navName(id))}</span></button>`).join('')}<button class="nav-item" data-action="new-sci" title="Ajouter une SCI" style="font-size:11px;color:var(--gold);margin-top:14px">${icon('plus')}<span class="nav-text">Ajouter une SCI</span></button></div><div class="nav-bottom"><button class="nav-item ${page==='settings'?'active':''}" data-nav="settings" title="Paramètres">${icon('settings')}<span class="nav-text">Paramètres</span></button><button class="nav-item" data-action="quit" title="Enregistrer et quitter">${icon('exit')}<span class="nav-text">Quitter l’application</span></button><div class="local-status"><span class="status-dot"></span>Données enregistrées en local</div></div><div class="user-block row"><div class="avatar">D</div><div class="user-details"><div style="font-size:11px">Votre espace privé</div><div class="sub" style="font-size:9px">Local · Base SQLite</div></div><span class="user-lock">${icon('lock')}</span></div>`;
 let title=page==='dashboard'?'Vue d’ensemble':page==='settings'?'Paramètres':navs[page]?.[0]||sciname(page);
-$('#header').innerHTML=`<div class="row"><button class="ghost icon-only" data-action="collapse" title="Réduire / déployer la navigation" aria-label="Réduire ou déployer la navigation">${icon('panel')}</button><div class="breadcrumb row">Espace patrimonial <span>/</span> <b>${esc(title)}</b></div></div><div class="row"><button class="search-btn" data-action="search">${icon('search')} Rechercher… <kbd>⌘ K</kbd></button><span class="top-date">${new Date().toLocaleDateString('fr-FR',{day:'numeric',month:'long',year:'numeric'})}</span><button class="ghost icon-only" data-nav="agenda" title="Échéances à suivre">${icon('bell')}</button><div class="avatar" style="width:29px;height:29px;font-size:12px">D</div></div>`;
+let unreadCount=unreadReminderTasks().length;
+$('#header').innerHTML=`<div class="row"><button class="ghost icon-only" data-action="collapse" title="Réduire / déployer la navigation" aria-label="Réduire ou déployer la navigation">${icon('panel')}</button><div class="breadcrumb row">Espace patrimonial <span>/</span> <b>${esc(title)}</b></div></div><div class="row"><button class="search-btn" data-action="search">${icon('search')} Rechercher… <kbd>⌘ K</kbd></button><span class="top-date">${new Date().toLocaleDateString('fr-FR',{day:'numeric',month:'long',year:'numeric'})}</span><button class="ghost icon-only bell-btn" data-action="bell" title="Notifications et rappels d’échéances" aria-label="Notifications et rappels d’échéances">${icon('bell')}${unreadCount>0?`<span class="bell-badge" aria-label="${unreadCount} notification${unreadCount>1?'s':''} non lue${unreadCount>1?'s':''}">${unreadCount>9?'9+':unreadCount}</span>`:''}</button><div class="avatar" style="width:29px;height:29px;font-size:12px">D</div></div>`;
 }
 function head(title,subtitle,buttons='',eyebrow='Votre espace patrimonial'){return `<div class="page-head"><div><div class="eyebrow">${esc(eyebrow)}</div><h1>${esc(title)}</h1><p>${esc(subtitle)}</p></div><div class="toolbar">${buttons}</div></div>`;}
 function yearSelect(){let years=[...new Set([2026,new Date().getFullYear(),activeYear(),...rows('entries').map(r=>Number(r.date?.slice(0,4))).filter(Boolean)])].sort((a,b)=>b-a);return `<select id="year" aria-label="Année civile affichée">${years.map(y=>`<option ${y===activeYear()?'selected':''}>${y}</option>`).join('')}</select>`;}
 function exportBtn(){return `<button data-action="export">${icon('download')} Exporter</button>`;}
 function addBtn(kind,text){return `<button class="primary" data-add="${kind}">${icon('plus')}${esc(text||'Ajouter')}</button>`;}
 function empty(title,msg,button=''){return `<div class="empty">${icon('building')}<h3>${title}</h3><p>${msg}</p>${button}</div>`;}
-function kpis(id){let m=metrics(id);return `<div class="kpis">${[
-['Patrimoine immobilier',money(m.value),'building',`${m.properties} biens · ${id?'Valeurs renseignées':S.scis.length+' sociétés'}`,'Valeur estimée'],
-['Recettes encaissées',money(m.income),'trend',`Année civile ${activeYear()} · Toutes catégories`,'Flux annuels'],
-['Trésorerie disponible',money(m.cash),'wallet',`Solde d’ouverture + mouvements à ce jour`,'Solde calculé'],
-['Taux d’occupation',m.properties?num(m.occupied/m.properties*100)+' %':'—','home',`${m.occupied} biens loués sur ${m.properties} · Statuts saisis`,'Occupation actuelle']
-].map(([l,v,i,n,h])=>`<div class="kpi"><div class="kpi-top">${l}${icon(i)}</div><div class="kpi-value">${v}</div><div class="kpi-bottom"><span class="${i==='home'?'green':'gold'}">${h}</span></div><div class="sub" style="font-size:9px;margin-top:4px">${n}</div></div>`).join('')}</div>`;}
+const photoCrop={img:null,x:50,y:50,zoom:1,current:'',removed:false,dirty:false,drag:null,error:false};
+const PHOTO_OUT_W=1600,PHOTO_OUT_H=500;
+function photoPosition(r){
+    let x=Number(r?.photo_x),y=Number(r?.photo_y);
+    if(!Number.isFinite(x))x=50;
+    if(!Number.isFinite(y))y=50;
+    return Math.min(100,Math.max(0,x))+'% '+Math.min(100,Math.max(0,y))+'%';
+}
+function photoCropGeom(){
+    let img=photoCrop.img,box=$('#prop-crop-box');
+    if(!img||!box)return null;
+    const W=Math.max(1,box.clientWidth),H=Math.max(1,box.clientHeight);
+    const nw=img.naturalWidth||1,nh=img.naturalHeight||1;
+    const cover=Math.max(W/nw,H/nh)*photoCrop.zoom;
+    const dw=nw*cover,dh=nh*cover;
+    return {W,H,dw,dh,ox:-(dw-W)*(photoCrop.x/100),oy:-(dh-H)*(photoCrop.y/100)};
+}
+function photoCropDraw(){
+    let canvas=$('#prop-crop-canvas'),g=photoCropGeom();
+    if(!canvas||!g)return;
+    canvas.width=Math.round(g.W);canvas.height=Math.round(g.H);
+    const ctx=canvas.getContext('2d');
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    ctx.drawImage(photoCrop.img,g.ox,g.oy,g.dw,g.dh);
+    let range=$('#prop-crop-zoom');if(range)range.value=String(Math.round(photoCrop.zoom*100));
+    let label=$('#prop-crop-zoom-label');if(label)label.textContent='×'+photoCrop.zoom.toFixed(2);
+}
+function photoCropBake(){
+    const img=photoCrop.img,g=photoCropGeom();
+    if(!img||!g)return '';
+    const canvas=document.createElement('canvas');
+    canvas.width=PHOTO_OUT_W;canvas.height=PHOTO_OUT_H;
+    const ctx=canvas.getContext('2d');
+    const k=PHOTO_OUT_W/g.W;
+    ctx.imageSmoothingEnabled=true;ctx.imageSmoothingQuality='high';
+    ctx.drawImage(img,g.ox*k,g.oy*k,g.dw*k,g.dh*k);
+    return canvas.toDataURL('image/jpeg',0.92);
+}
+function photoCropToggleControls(enabled){
+    ['prop-crop-zoom','prop-crop-remove','prop-crop-reset'].forEach(id=>{let el=document.getElementById(id);if(el)el.disabled=!enabled;});
+    let badge=$('#prop-crop-badge');if(badge)badge.style.display=enabled?'':'none';
+}
+function initPhotoCropEditor(r){
+    photoCrop.img=null;photoCrop.removed=false;photoCrop.dirty=false;photoCrop.error=false;photoCrop.drag=null;
+    photoCrop.x=Number.isFinite(Number(r?.photo_x))?Math.min(100,Math.max(0,Number(r.photo_x))):50;
+    photoCrop.y=Number.isFinite(Number(r?.photo_y))?Math.min(100,Math.max(0,Number(r.photo_y))):50;
+    photoCrop.zoom=Number.isFinite(Number(r?.photo_zoom))?Math.min(4,Math.max(1,Number(r.photo_zoom))):1;
+    photoCrop.current=r?.photo||'';
+    let box=$('#prop-crop-box'),range=$('#prop-crop-zoom');
+    if(!box)return;
+    if(range)range.value=String(Math.round(photoCrop.zoom*100));
+    if(photoCrop.current)photoCropShow(photoCrop.current);else{photoCropShow('');photoCropToggleControls(false);}
+    $('#f-photo-file')?.addEventListener('change',ev=>{
+        let file=ev.target.files&&ev.target.files[0];
+        if(!file)return;
+        if(!/^image\//.test(file.type||'')){notify('Choisissez un fichier image : PNG, JPEG, WebP ou GIF.',true);ev.target.value='';return;}
+        if(file.size>25*1024*1024){notify('Photo limitée à 25 Mo.',true);ev.target.value='';return;}
+        let reader=new FileReader();
+        reader.onload=()=>{photoCrop.removed=false;photoCrop.dirty=true;photoCrop.x=50;photoCrop.y=50;photoCrop.zoom=1;photoCropShow(String(reader.result));modalDirty=true;};
+        reader.onerror=()=>notify('Impossible de lire cette image.',true);
+        reader.readAsDataURL(file);
+    });
+    range?.addEventListener('input',ev=>{photoCrop.zoom=Math.min(4,Math.max(1,(Number(ev.target.value)||100)/100));photoCrop.dirty=true;modalDirty=true;photoCropDraw();});
+    $('#prop-crop-remove')?.addEventListener('click',()=>{photoCrop.removed=true;photoCrop.dirty=true;photoCropShow('');let f=$('#f-photo-file');if(f)f.value='';modalDirty=true;notify('La photo sera retirée à l’enregistrement.');});
+    $('#prop-crop-reset')?.addEventListener('click',()=>{photoCrop.x=50;photoCrop.y=50;photoCrop.zoom=1;photoCrop.dirty=true;photoCropDraw();modalDirty=true;});
+    box.addEventListener('pointerdown',ev=>{if(!photoCrop.img)return;photoCrop.drag={x:ev.clientX,y:ev.clientY,px:photoCrop.x,py:photoCrop.y};try{box.setPointerCapture(ev.pointerId)}catch(e){}ev.preventDefault();});
+    box.addEventListener('pointermove',ev=>{
+        if(!photoCrop.drag||!photoCrop.img)return;
+        let g=photoCropGeom();
+        if(!g)return;
+        const overX=Math.max(g.dw-g.W,1),overY=Math.max(g.dh-g.H,1);
+        photoCrop.x=Math.min(100,Math.max(0,photoCrop.drag.px-(ev.clientX-photoCrop.drag.x)*100/overX));
+        photoCrop.y=Math.min(100,Math.max(0,photoCrop.drag.py-(ev.clientY-photoCrop.drag.y)*100/overY));
+        photoCrop.dirty=true;modalDirty=true;
+        photoCropDraw();
+    });
+    const cropStop=ev=>{if(!photoCrop.drag)return;photoCrop.drag=null;try{box.releasePointerCapture(ev.pointerId)}catch(e){}};
+    box.addEventListener('pointerup',cropStop);
+    box.addEventListener('pointercancel',cropStop);
+    box.addEventListener('keydown',ev=>{
+        if(!photoCrop.img)return;
+        if(!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(ev.key))return;
+        ev.preventDefault();
+        let step=ev.shiftKey?5:1;
+        if(ev.key==='ArrowLeft')photoCrop.x=Math.max(0,photoCrop.x-step);
+        if(ev.key==='ArrowRight')photoCrop.x=Math.min(100,photoCrop.x+step);
+        if(ev.key==='ArrowUp')photoCrop.y=Math.max(0,photoCrop.y-step);
+        if(ev.key==='ArrowDown')photoCrop.y=Math.min(100,photoCrop.y+step);
+        photoCrop.dirty=true;modalDirty=true;photoCropDraw();
+    });
+    if(!photoCrop.resizeBound){
+        photoCrop.resizeBound=true;
+        window.addEventListener('resize',()=>{if($('#prop-crop-canvas')&&document.body.contains($('#prop-crop-canvas')))photoCropDraw();});
+    }
+}
+function photoCropShow(src){
+    photoCrop.img=null;photoCrop.error=false;
+    let box=$('#prop-crop-box'),ph=$('#prop-crop-placeholder');
+    let canvas=$('#prop-crop-canvas');
+    if(canvas)canvas.remove();
+    if(!src){
+        photoCrop.current='';
+        if(ph)ph.style.display='';
+        photoCropToggleControls(false);
+        if(box){let stage=box.querySelector('.prop-crop-stage-wrap');if(stage)stage.classList.remove('is-armed');}
+        return;
+    }
+    let img=new Image();
+    img.onload=()=>{photoCrop.img=img;photoCrop.current=src;if(ph)ph.style.display='none';photoCropToggleControls(true);let b=$('#prop-crop-box');if(b&&!$('#prop-crop-canvas')){let c=document.createElement('canvas');c.id='prop-crop-canvas';b.insertBefore(c,b.firstChild);}photoCropDraw();};
+    img.onerror=()=>{photoCrop.error=true;notify('Image illisible : utilisez un fichier PNG, JPEG, WebP ou GIF.',true);photoCropShow('');};
+    img.src=src;
+}
+function docPreviewStageZoom(z){
+    docPreviewZoom=Math.min(4,Math.max(0.25,z));
+    let stage=$('#doc-preview-stage');
+    if(stage)stage.style.setProperty('--doc-zoom',String(docPreviewZoom));
+    let range=$('#doc-zoom-range');if(range)range.value=String(Math.round(docPreviewZoom*100));
+    let label=$('#doc-zoom-label');if(label)label.textContent='×'+docPreviewZoom.toFixed(2).replace('.',',');
+}
+function docPreviewSheetHtml(index){
+    let sheet=docPreviewSheets[index];
+    if(!sheet)return '';
+    if(!sheet.rows||!sheet.rows.length)return '<p class="sub">Onglet sans contenu exploitable.</p>';
+    return `<div class="table-wrap"><table>${sheet.rows.map((r,i)=>`<tr>${r.map(v=>i?'<td>'+esc(v)+'</td>':'<th>'+esc(v)+'</th>').join('')}</tr>`).join('')}</table></div>`;
+}
+function docPreviewSheetSelect(index){
+    docPreviewSheets.forEach((s,i)=>s.active=i===index);
+    $$('#doc-preview-body [data-doc-sheet]').forEach(b=>b.classList.toggle('active',Number(b.dataset.docSheet)===index));
+    let body=$('#doc-sheet-body');
+    if(body)body.innerHTML=docPreviewSheetHtml(index);
+}
+let docPreviewId='',docPreviewZoom=1,docPreviewSheets=[];
+function fmtBytes(n){n=Number(n)||0;if(n<1024)return n+' o';if(n<1024*1024)return num(n/1024)+' Ko';return num(n/1024/1024)+' Mo';}
+function docPreviewToolbar(p){
+    return `<div class="doc-preview-toolbar"><div class="row gap8 wrap">${p.category?`<span class="pill gold">${esc(p.category)}</span>`:''}${p.filename?`<span class="sub">${esc(p.filename)}</span>`:''}${p.size?`<span class="muted">${fmtBytes(p.size)}</span>`:''}${p.date?`<span class="muted">${date(p.date)}</span>`:''}</div><div class="doc-preview-zoom-bar"><button type="button" data-doc-zoom="out" title="Réduire" aria-label="Réduire le zoom">−</button><input id="doc-zoom-range" type="range" min="25" max="400" step="5" value="100" aria-label="Niveau de zoom de l’aperçu"><span id="doc-zoom-label" class="pill">×1,00</span><button type="button" data-doc-zoom="100" title="Revenir à ×1" aria-label="Revenir au zoom par défaut">×1</button><button type="button" data-doc-zoom="in" title="Agrandir" aria-label="Agrandir le zoom">+</button></div></div>`;
+}
+function docPreviewBody(p){
+    if(p.preview_type==='image')return docPreviewToolbar(p)+`<div class="doc-preview-viewport" id="doc-preview-viewport"><div class="doc-preview-stage" id="doc-preview-stage" style="--doc-zoom:1"><img class="doc-preview-img" src="${p.data_url}" alt="Aperçu de ${esc(p.name)}"></div></div>`;
+    if(p.preview_type==='pdf')return docPreviewToolbar(p)+`<div class="doc-preview-viewport" id="doc-preview-viewport"><div class="doc-preview-stage" id="doc-preview-stage" style="--doc-zoom:1"><iframe class="doc-preview-frame" src="/api/document?id=${encodeURIComponent(p.id)}&token=${TOKEN}" title="Aperçu PDF de ${esc(p.name)}"></iframe></div></div>`;
+    if(p.preview_type==='xlsx'){
+        docPreviewSheets=(p.sheets||[]).map(s=>({name:s.name,rows:s.rows,active:false}));
+        if(!docPreviewSheets.length)return docPreviewToolbar(p)+'<p class="sub">Aucune feuille lisible dans ce classeur.</p>';
+        return docPreviewToolbar(p)+`${docPreviewSheets.length>1?`<div class="tabs" style="margin-bottom:12px" role="tablist">${docPreviewSheets.map((s,i)=>`<button type="button" role="tab" aria-selected="${i===0}" class="tab ${i===0?'active':''}" data-doc-sheet="${i}">${esc(s.name)}</button>`).join('')}</div>`:''}<div class="doc-preview-viewport" id="doc-preview-viewport"><div class="doc-preview-stage" id="doc-preview-stage" style="--doc-zoom:1"><div class="doc-preview-sheet" id="doc-sheet-body">${docPreviewSheetHtml(0)}</div></div></div>`;
+    }
+    if(p.preview_type==='csv'){
+        let csvRows=p.rows||[];
+        return docPreviewToolbar(p)+`<div class="doc-preview-viewport" id="doc-preview-viewport"><div class="doc-preview-stage" id="doc-preview-stage" style="--doc-zoom:1"><div class="doc-preview-sheet">${csvRows.length?`<div class="table-wrap"><table>${csvRows.map((r,i)=>`<tr>${(r||[]).map(v=>i?'<td>'+esc(v)+'</td>':'<th>'+esc(v)+'</th>').join('')}</tr>`).join('')}</table></div>`:'<p class="sub">Fichier CSV vide.</p>'}</div></div></div>`;
+    }
+    if(p.preview_type==='docx'){
+        let paras=p.paragraphs||[];
+        return docPreviewToolbar(p)+`<div class="doc-preview-viewport" id="doc-preview-viewport"><div class="doc-preview-stage" id="doc-preview-stage" style="--doc-zoom:1"><div class="doc-preview-sheet">${paras.length?paras.map(t=>`<p>${esc(t)}</p>`).join(''):'<p class="sub">Document Word sans texte exploitable.</p>'}</div></div></div>`;
+    }
+    if(p.preview_type==='text')return docPreviewToolbar(p)+`<div class="doc-preview-viewport" id="doc-preview-viewport"><div class="doc-preview-stage" id="doc-preview-stage" style="--doc-zoom:1"><div class="doc-preview-sheet"><pre style="white-space:pre-wrap;margin:0;font:inherit">${esc(p.text||'')}</pre></div></div></div>`;
+    if(p.preview_type==='note')return docPreviewToolbar(p)+`<div class="doc-preview-viewport" id="doc-preview-viewport"><div class="doc-preview-stage" id="doc-preview-stage" style="--doc-zoom:1"><div class="doc-preview-sheet"><p class="sub">Cette fiche ne contient aucune pièce jointe.</p>${p.notes?`<p style="white-space:pre-wrap;margin-top:12px">${esc(p.notes)}</p>`:''}</div></div></div>`;
+    return docPreviewToolbar(p)+`<div class="doc-preview-viewport" id="doc-preview-viewport"><div class="doc-preview-stage" id="doc-preview-stage" style="--doc-zoom:1"><div class="doc-preview-sheet"><p>Ce format ne peut pas être affiché directement dans Dominis.</p><p class="sub">Le fichier reste disponible au téléchargement.</p><button type="button" class="primary" data-document="${esc(p.id)}">${icon('download')} Télécharger le fichier</button></div></div></div>`;
+}
+async function documentPreview(id){
+    let r=rec(id);
+    if(!r||r.kind!=='documents')return;
+    docPreviewId=id;
+    let folderOptions=`<option value="">Sans dossier</option>${docFolders().map(f=>`<option value="${esc(f.id)}" ${resolveDocFolder(r)===f.id?'selected':''}>${esc(f.name)}</option>`).join('')}`;
+    let footer=`<select id="doc-preview-folder" style="width:auto;min-width:190px;margin-right:auto" aria-label="Dossier de classement du document">${folderOptions}</select><button type="button" data-action="close-modal">Fermer</button>${r.size?`<button type="button" class="primary" data-document="${esc(r.id)}">${icon('download')} Télécharger</button>`:''}`;
+    openModal('Aperçu · '+r.name,`<div id="doc-preview-body"><div class="loading" style="padding:70px 20px">Chargement de l’aperçu…</div></div>`,footer,true);
+    $('#modal .modal')?.classList.add('doc-preview-modal');
+    try{
+        let p=await (await api('document-preview?id='+encodeURIComponent(id))).json();
+        let body=$('#doc-preview-body');
+        if(body)body.innerHTML=docPreviewBody(p);
+        docPreviewStageZoom(1);
+    }catch(e){
+        let body=$('#doc-preview-body');
+        if(body)body.innerHTML=`<div class="error">${esc(e.message)}</div>`;
+    }
+}
+function newDocFolderModal(){
+    openModal('Nouveau dossier',`<p class="sub" style="margin-bottom:15px">Regroupez vos documents par thème : baux, comptabilité, travaux, assurances…</p>${field('folder-name','Nom du dossier','text','',null,true,true)}`,`<button data-action="close-modal">Annuler</button><button class="primary" id="create-folder">${icon('check')} Créer le dossier</button>`);
+    $('#create-folder').onclick=async()=>{
+        let name=$('#f-folder-name').value.trim();
+        if(!name)return modalError(new Error('Saisissez un nom de dossier.'));
+        if(name.length>80)return modalError(new Error('Nom de dossier limité à 80 caractères.'));
+        let folders=docFolders();
+        if(folders.some(f=>f.name.toLowerCase()===name.toLowerCase()))return modalError(new Error('Un dossier porte déjà ce nom.'));
+        let stored=[...(Array.isArray(S.settings.doc_folders)?S.settings.doc_folders:[]),{id:'f-'+Date.now().toString(36)+Math.random().toString(36).slice(2,7),name}];
+        await setPref({doc_folders:stored});
+        closeModal(true);notify('Dossier « '+name+' » créé.');render();
+    };
+}
+function renameDocFolderModal(id){
+    let folder=docFolders().find(f=>f.id===id);
+    if(!folder)return;
+    openModal('Renommer le dossier',field('folder-name','Nom du dossier','text',folder.name,null,true,true),`<button data-action="close-modal">Annuler</button><button class="primary" id="rename-folder">${icon('check')} Renommer</button>`);
+    $('#rename-folder').onclick=async()=>{
+        let name=$('#f-folder-name').value.trim();
+        if(!name)return modalError(new Error('Saisissez un nom de dossier.'));
+        if(name.length>80)return modalError(new Error('Nom de dossier limité à 80 caractères.'));
+        if(docFolders().some(f=>f.id!==id&&f.name.toLowerCase()===name.toLowerCase()))return modalError(new Error('Un dossier porte déjà ce nom.'));
+        let stored=(Array.isArray(S.settings.doc_folders)?S.settings.doc_folders:[]).filter(f=>f&&f.id!==id);
+        stored.push({id,name});
+        await setPref({doc_folders:stored});
+        closeModal(true);notify('Dossier renommé.');render();
+    };
+}
+function deleteDocFolder(id){
+    let folder=docFolders().find(f=>f.id===id);
+    if(!folder)return;
+    if(folder.builtin)return notify('Les dossiers proposés par défaut ne peuvent pas être supprimés.',true);
+    let count=folderDocCount(id);
+    openModal('Supprimer ce dossier ?',`<p>Le dossier <strong>${esc(folder.name)}</strong> sera retiré de la liste.</p><p class="sub" style="margin-top:12px">${count?`Les ${count} document${count>1?'s':''} qu’il contient sont conservés et restent visibles dans « Tous les documents ».`:'Ce dossier est vide.'} Aucun document n’est supprimé.</p>`,`<button data-action="close-modal">Annuler</button><button class="danger" id="confirm-folder-delete">${icon('trash')} Supprimer le dossier</button>`);
+    $('#confirm-folder-delete').onclick=async()=>{
+        let stored=(Array.isArray(S.settings.doc_folders)?S.settings.doc_folders:[]).filter(f=>f&&f.id!==id);
+        if(docFolder===id)docFolder='';
+        await setPref({doc_folders:stored});
+        closeModal(true);notify('Dossier supprimé. Les documents sont conservés.');render();
+    };
+}
+function kpis(id){
+let m=metrics(id);return `<div class="kpis">${[
+['Patrimoine immobilier',money(m.value),'building',`${m.properties} biens · ${id?'Valeurs renseignées':S.scis.length+' sociétés'}`,'Valeur estimée',false],
+['Recettes encaissées',money(m.income),'trend',`Année civile ${activeYear()} · Toutes catégories`,'Flux annuels',false],
+['Trésorerie disponible',money(m.cash),'wallet',`Solde d’ouverture + mouvements à ce jour`,'Solde calculé',m.cash<0],
+['Taux d’occupation',m.properties?num(m.occupied/m.properties*100)+' %':'—','home',`${m.occupied} biens loués sur ${m.properties} · Statuts saisis`,'Occupation actuelle',false]
+].map(([l,v,i,n,h,neg])=>`<div class="kpi"><div class="kpi-top">${l}${icon(i)}</div><div class="kpi-value ${neg?'red':''}">${v}</div><div class="kpi-bottom"><span class="${neg?'red':i==='home'?'green':'gold'}">${h}</span></div><div class="sub" style="font-size:9px;margin-top:4px">${n}</div></div>`).join('')}</div>`;}
 function chart(id){let e=rows('entries',id).filter(yr),a=Array.from({length:12},(_,m)=>['Recette','Dépense'].map(d=>e.filter(r=>Number(r.date.slice(5,7))===m+1&&r.direction===d).reduce((s,r)=>s+Number(r.amount||0),0))),max=Math.max(100,...a.flat())*1.15;let months=['Jan','Fév','Mar','Avr','Mai','Juin','Juil','Août','Sep','Oct','Nov','Déc'];let w=660,h=205,left=46,right=15,top=9,bottom=27,pw=w-left-right,ph=h-top-bottom,step=pw/12;
 let svg=`<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="Recettes et dépenses mensuelles de ${activeYear()}"><defs><linearGradient id="barGold" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#cbb582"/><stop offset="1" stop-color="#988254"/></linearGradient></defs>`;
 for(let i=0;i<4;i++){let y=top+ph*i/3;svg+=`<line x1="${left}" y1="${y}" x2="${w-right}" y2="${y}" stroke="var(--line)" stroke-dasharray="3 5"/><text x="${left-10}" y="${y+3}" text-anchor="end" fill="var(--muted)" font-family="Arial" font-size="9">${num(Math.round(max*(1-i/3)/100)*100/1000)} k</text>`;}
 a.forEach((v,m)=>{let x=left+m*step+step/2;v.forEach((n,i)=>{let bh=n/max*ph;svg+=`<rect x="${x+(i?2:-14)}" y="${top+ph-bh}" width="12" height="${Math.max(bh,0)}" rx="3" fill="${i?'#789187':'url(#barGold)'}"><title>${months[m]} · ${i?'Dépenses':'Recettes'} : ${money(n,2)}</title></rect>`});svg+=`<text x="${x}" y="${h-6}" text-anchor="middle" fill="var(--muted)" font-family="Arial" font-size="9">${months[m]}</text>`});svg+='</svg>';
 return `<div class="panel"><div class="panel-head"><div><h2>Les flux de votre patrimoine</h2><p>Recettes et dépenses · Année civile ${activeYear()}</p></div><div class="row legend"><span><i style="background:#c7ad77"></i>Recettes</span><span><i style="background:#789187"></i>Dépenses</span></div></div><div class="chart">${svg}</div></div>`;}
 function donut(id){let list=id?rows('properties',id).map((r,i)=>({name:r.name,value:Number(r.value||0),color:palette[i%6]})):S.scis.map((s,i)=>({name:s.name,value:metrics(s.id).value,color:color(s.color||palette[i%6])}));let total=list.reduce((a,r)=>a+r.value,0),offset=0;let bg=total?list.map(r=>{let start=offset;offset+=r.value/total*100;return `${r.color} ${start}% ${offset}%`}).join(','):'var(--line) 0% 100%';return `<div class="panel"><div class="panel-head"><div><h2>Répartition du patrimoine</h2><p>${id?'Par bien immobilier':'Par société civile immobilière'}</p></div>${icon('building')}</div><div class="donut-wrap"><div class="donut" style="background:conic-gradient(${bg})"><div class="donut-label"><b>${total>=1000000?num(total/1000000)+' M€':total>=1000?num(total/1000)+' k€':money(total)}</b><small>Valeur totale estimée</small></div></div><div class="donut-legend">${list.slice(0,4).map(r=>`<div><span class="color-dot" style="background:${r.color}"></span>${esc(r.name)}<div class="amount">${total?num(r.value/total*100):0} %</div></div>`).join('')||'<span>Aucun bien renseigné</span>'}${list.length>4?`<div class="muted">+ ${list.length-4} autres biens / SCI</div>`:''}</div></div></div>`;}
-function sciCards(){return `<div class="section-title"><h2>Vos sociétés <small>${S.scis.length} SCI dans votre portefeuille</small></h2><button class="text-link row" data-action="new-sci">${icon('plus')} Ajouter une SCI</button></div><div class="sci-grid">${S.scis.map((s,i)=>{let m=metrics(s.id);return `<article class="sci-card" data-nav="${s.id}" tabindex="0" role="button" aria-label="Ouvrir ${esc(s.name)}"><div class="row between"><div class="row"><div class="building-icon" style="color:${color(s.color)}">${icon('building')}</div><div><h3>${esc(s.name)}</h3><div class="location">${esc(s.city||s.address||'Adresse à renseigner')}</div></div></div><span class="pill">${esc(s.regime||'IR')}</span></div><div class="sci-stats"><div><label>Patrimoine estimé</label><strong>${money(m.value)}</strong></div><div><label>Trésorerie actuelle</label><strong>${money(m.cash)}</strong></div></div><div class="mini-bar">${Array.from({length:m.properties||1},(_,j)=>`<i style="background:${j<m.occupied?color(s.color):'var(--line)'}"></i>`).join('')}</div><div class="sci-card-bottom"><span>${m.properties} biens <span style="margin:0 5px">·</span> ${rows('leases',s.id).filter(r=>r.status==='Actif').length} baux actifs</span><span class="row gap8 ${m.overdue?'gold':'green'}">${m.overdue?'Loyers à suivre':'Voir la société'} ${icon('arrow')}</span></div></article>`}).join('')}</div>`;}
-function tasksPreview(id){let list=rows('tasks',id).filter(r=>r.status!=='Terminé').sort((a,b)=>a.due.localeCompare(b.due)).slice(0,4);return `<div class="panel"><div class="panel-head" style="padding-bottom:15px"><h2>Prochaines échéances</h2><button class="text-link" data-nav="${id||'agenda'}" ${id?'data-tab="tasks"':''}>Tout voir ↗</button></div>${list.map(r=>{let d=new Date(r.due+'T12:00:00');return `<div class="task-line"><div class="task-date">${d.getDate()}<small>${d.toLocaleDateString('fr-FR',{month:'short'})}</small></div><div><h3>${esc(r.name)}</h3><p>${esc(sciname(r.sci))} · ${esc(r.category||'Général')}</p></div><button class="ghost icon-only task-right" data-edit="${r.id}" title="Consulter l’échéance">${icon('chevron')}</button></div>`}).join('')||empty('Tout est à jour','Aucune échéance à venir.')}</div>`;}
-function entriesPreview(id){let list=rows('entries',id).filter(yr).sort((a,b)=>b.date.localeCompare(a.date)).slice(0,4);return `<div class="panel"><div class="panel-head" style="padding-bottom:17px"><h2>Dernières opérations</h2><button class="text-link" data-nav="${id||'treasury'}" ${id?'data-tab="entries"':''}>Tout voir ↗</button></div><div class="table-wrap"><table><thead><tr><th>Opération / société</th><th>Date</th><th class="align-right">Montant</th></tr></thead><tbody>${list.map(r=>`<tr><td><strong>${esc(r.label)}</strong><span class="cell-sub">${esc(sciname(r.sci))}</span></td><td class="muted">${date(r.date)}</td><td class="align-right ${r.direction==='Recette'?'green':''}">${r.direction==='Recette'?'+':'−'} ${money(r.amount,2)}</td></tr>`).join('')}</tbody></table>${!list.length?empty('Aucune opération','Enregistrez votre premier mouvement.') :''}</div></div>`;}
+function sciCards(){return `<div class="section-title"><h2>Vos sociétés <small>${S.scis.length} SCI dans votre portefeuille</small></h2><button class="text-link row" data-action="new-sci">${icon('plus')} Ajouter une SCI</button></div><div class="sci-grid">${S.scis.map((s,i)=>{let m=metrics(s.id);return `<article class="sci-card" data-nav="${s.id}" tabindex="0" role="button" aria-label="Ouvrir ${esc(s.name)}"><div class="row between"><div class="row"><div class="building-icon" style="color:${color(s.color)}">${icon('building')}</div><div><h3>${esc(s.name)}</h3><div class="location">${esc(s.city||s.address||'Adresse à renseigner')}</div></div></div><span class="pill">${esc(s.regime||'IR')}</span></div><div class="sci-stats"><div><label>Patrimoine estimé</label><strong>${money(m.value)}</strong></div><div><label>Trésorerie actuelle</label><strong class="${m.cash<0?'red':''}">${money(m.cash)}</strong></div></div><div class="mini-bar">${Array.from({length:m.properties||1},(_,j)=>`<i style="background:${j<m.occupied?color(s.color):'var(--line)'}"></i>`).join('')}</div><div class="sci-card-bottom"><span>${m.properties} biens <span style="margin:0 5px">·</span> ${rows('leases',s.id).filter(r=>r.status==='Actif').length} baux actifs</span><span class="row gap8 ${m.overdue?'gold':'green'}">${m.overdue?'Loyers à suivre':'Voir la société'} ${icon('arrow')}</span></div></article>`}).join('')}</div>`;}
+function tasksPreview(id){let list=rows('tasks',id).filter(r=>r.status!=='Terminé').sort((a,b)=>a.due.localeCompare(b.due)).slice(0,4);return `<div class="panel"><div class="panel-head" style="padding-bottom:15px"><h2>Prochaines échéances</h2><button class="text-link" data-nav="${id||'agenda'}" ${id?'data-tab="tasks"':''}>Tout voir ↗</button></div>${list.map(r=>{let d=new Date(r.due+'T12:00:00');return `<div class="task-line"><div class="task-date">${d.getDate()}<small>${d.toLocaleDateString('fr-FR',{month:'short'})}</small></div><div><h3>${esc(r.name)}${r.important?' <span class="pill red" style="margin-left:5px">Important</span>':''}</h3><p>${esc(sciname(r.sci))} · ${esc(r.category||'Général')}</p></div><button class="ghost icon-only task-right" data-edit="${r.id}" title="Consulter l’échéance">${icon('chevron')}</button></div>`}).join('')||empty('Tout est à jour','Aucune échéance à venir.')}</div>`;}
+function entriesPreview(id){let list=rows('entries',id).filter(yr).sort((a,b)=>b.date.localeCompare(a.date)).slice(0,4);let cols=getTableColumns('entries_preview').filter(c=>c.visible);let gear=`<th class="align-right col-settings-th"><button type="button" class="ghost icon-only table-gear-btn" data-table-config="entries_preview" title="Réglages des colonnes" aria-label="Réglages des colonnes">${icon('settings')}</button></th>`;return `<div class="panel"><div class="panel-head" style="padding-bottom:17px"><h2>Dernières opérations</h2><button class="text-link" data-nav="${id||'treasury'}" ${id?'data-tab="entries"':''}>Tout voir ↗</button></div><div class="table-wrap"><table><thead><tr>${cols.map(c=>`<th ${c.id==='amount'?'class="align-right"':''}>${esc(c.label)}</th>`).join('')}${gear}</tr></thead><tbody>${list.map(r=>{let cells={label:`<strong>${esc(r.label)}</strong><span class="cell-sub">${esc(sciname(r.sci))}</span>`,date:`<span class="muted">${date(r.date)}</span>`,amount:`<span class="${r.direction==='Recette'?'green':'red'}">${r.direction==='Recette'?'+':'−'} ${money(r.amount,2)}</span>`};return `<tr>${cols.map(c=>`<td ${c.id==='amount'?'class="align-right"':''}>${cells[c.id]}</td>`).join('')}<td class="align-right"><div class="actions"><button data-edit="${r.id}" title="Modifier" aria-label="Modifier ${esc(label(r))}">${icon('edit')}</button></div></td></tr>`;}).join('')}</tbody></table>${!list.length?empty('Aucune opération','Enregistrez votre premier mouvement.') :''}</div></div>`;}
 function dashboard(id){let m=metrics(id);return `${S.settings.demo&&!id?`<div class="demo-notice"><span>ESPACE DE DÉMONSTRATION <span style="opacity:.6;margin:0 9px">/</span> Données fictives pour explorer Dominis en toute liberté.</span><button data-nav="settings">Gérer les données</button></div>`:''}${kpis(id)}<div class="charts-grid">${chart(id)}${donut(id)}</div>${!id?sciCards():`<div class="notice row between"><div>${m.overdue?`<span class="gold">${money(m.overdue,2)} de loyers échus restent à encaisser.</span>`:'Aucun solde de loyer échu à ce jour.'} <span style="margin-left:10px">Dette renseignée : ${money(m.debt)}.</span></div><button class="text-link" data-tab="calls">Consulter les loyers →</button></div>`}<div class="lower-grid">${entriesPreview(id)}${tasksPreview(id)}</div>${attention(id)}`;}
 
 function attention(id){let alerts=[],limit=new Date();limit.setDate(limit.getDate()+60);let until=limit.toISOString().slice(0,10);S.scis.filter(s=>!id||s.id===id).forEach(s=>{let m=metrics(s.id);if(m.overdue)alerts.push({sci:s.id,tab:'calls',title:money(m.overdue,2)+' de loyers échus à encaisser',detail:s.name+' · Consulter les appels et les paiements',icon:'wallet'});if(s.regime==='IR'&&rows('leases',s.id).some(l=>l.type==='Habitation meublée'&&l.status==='Actif'))alerts.push({sci:s.id,tab:'identity',title:'Location meublée : régime fiscal à examiner',detail:s.name+' · Vérifier les conséquences avec votre conseil fiscal',icon:'info'});});rows('properties',id).forEach(r=>{if(['F','G'].includes(r.dpe)||r.dpe_date&&r.dpe_date<today())alerts.push({sci:r.sci,tab:'properties',title:'Diagnostic à vérifier · '+r.name,detail:'DPE '+(r.dpe||'non renseigné')+' · Vérifier validité, décence et éventuels travaux',icon:'home'});});rows('leases',id).filter(r=>r.status==='Actif'&&r.end&&r.end<=until).forEach(r=>alerts.push({sci:r.sci,tab:'leases',title:'Fin de bail à examiner · '+r.tenant,detail:date(r.end)+' · Anticiper la suite selon les règles du bail',icon:'calendar'}));rows('tasks',id).filter(r=>r.status!=='Terminé'&&r.due<today()).forEach(r=>alerts.push({sci:r.sci,tab:'tasks',title:'Échéance dépassée · '+r.name,detail:sciname(r.sci)+' · Prévue le '+date(r.due),icon:'clock'}));if(!alerts.length)return '';return `<div class="panel" style="margin-top:23px"><div class="panel-head" style="padding-bottom:14px"><h2>Points d’attention <small class="gold" style="margin-left:8px">${alerts.length}</small></h2><span class="sub">À partir des données renseignées</span></div>${alerts.slice(0,6).map(a=>`<div class="task-line"><span class="gold">${icon(a.icon)}</span><div><h3>${esc(a.title)}</h3><p>${esc(a.detail)}</p></div><button class="ghost icon-only task-right" data-nav="${a.sci}" data-tab="${a.tab}" title="Examiner">${icon('arrow')}</button></div>`).join('')}${alerts.length>6?'<div class="panel-body sub">Les six premiers points sont affichés. Consultez aussi les échéances de chaque SCI.</div>':''}</div>`;}
@@ -6376,55 +7203,167 @@ function callStatus(r){return due(r)<.005?'Payé':r.due<today()?'En retard':paid
 function badge(text){let c=['Payé','Terminé','Actif','Loué'].includes(text)?'green':['En retard','Vacant'].includes(text)?'red':'gold';return `<span class="pill ${c}">${esc(text||'—')}</span>`;}
 function actions(r,extra=''){return `<div class="actions">${extra}<button data-edit="${r.id}" title="Modifier" aria-label="Modifier ${esc(label(r))}">${icon('edit')}</button><button data-delete="${r.id}" title="Supprimer" aria-label="Supprimer ${esc(label(r))}">${icon('trash')}</button></div>`;}
 function filtered(kind,id){return rows(kind,id||scope).filter(r=>{let text=Object.values(r).filter(v=>typeof v==='string').join(' ')+' '+sciname(r.sci)+' '+label(rec(r.property_id))+' '+label(rec(r.lease_id));let status=kind==='calls'?callStatus(r):kind==='entries'?r.direction:r.status;return text.toLowerCase().includes(query.toLowerCase())&&(!filter||status===filter)}).sort((a,b)=>['entries','calls'].includes(kind)?(b.date||b.period).localeCompare(a.date||a.period):kind==='tasks'?a.due.localeCompare(b.due):0);}
-function listing(kind,id){let list=filtered(kind,id);if(!list.length)return empty('Aucun élément à afficher',query||filter||scope?'Essayez un autre filtre.':'Ajoutez vos premières données pour compléter cet espace.',!query&&!filter?addBtn(kind,'Ajouter un élément'):'');
-if(kind==='properties')return `<div class="property-grid">${list.map(r=>`<div class="panel property-card"><div class="property-cover">${icon('building')}${badge(r.status)}</div><div class="row between"><h3>${esc(r.name)}</h3>${actions(r)}</div><p class="sub" style="margin-top:5px">${esc(r.address)}</p><div class="property-metrics"><div><small>Valeur estimée</small><strong>${money(r.value)}</strong></div><div><small>Surface</small><strong>${num(r.surface)} m²</strong></div><div><small>DPE</small><strong style="color:${['F','G'].includes(r.dpe)?'var(--red)':'var(--green)'}">${esc(r.dpe||'—')}</strong></div></div></div>`).join('')}</div>`;
-let headers=[],body=[];
-if(kind==='entries'){headers=['Opération','SCI','Date','Catégorie','Montant',''];body=list.map(r=>[`${esc(r.label)}${r.call_id?'<span class="cell-sub">Liée à un appel de loyer</span>':''}`,esc(sciname(r.sci)),date(r.date),esc(r.category),`<span class="${r.direction==='Recette'?'green':''}">${r.direction==='Recette'?'+':'−'} ${money(r.amount,2)}</span>`,actions(r)]);}
-if(kind==='leases'){headers=['Locataire','Bien','Bail','Loyer / charges','Statut',''];body=list.map(r=>[esc(r.tenant)+`<span class="cell-sub">${esc(r.email)}</span>`,esc(label(rec(r.property_id))),`${date(r.start)} → ${date(r.end)}<span class="cell-sub">${esc(r.type)}</span>`,`${money(r.rent,2)}<span class="cell-sub">Charges : ${money(r.charges,2)} / mois</span>`,badge(r.status),actions(r)]);}
-if(kind==='calls'){headers=['Locataire / période','Échéance','Appelé','Encaissé','Statut',''];body=list.map(r=>[`${esc(label(rec(r.lease_id)))}<span class="cell-sub">${esc(r.period)} · ${esc(sciname(r.sci))}</span>`,date(r.due),money((+r.rent||0)+(+r.charges||0),2),money(paid(r),2),badge(callStatus(r)),actions(r,due(r)>.005?`<button data-pay="${r.id}" title="Encaisser un paiement">${icon('wallet')}</button>`:`<button data-receipt="${r.id}" title="Télécharger la quittance">${icon('file')}</button>`)]);}
-if(kind==='partners'){let total=rows('partners',id).reduce((s,r)=>s+Number(r.shares||0),0);headers=['Associé','Fonction','Parts sociales','Participation','Compte courant déclaré',''];body=list.map(r=>[esc(r.name)+`<span class="cell-sub">${esc(r.email)}</span>`,esc(r.role),num(r.shares),total?num(r.shares/total*100)+' %':'—',money(r.cca,2),actions(r)]);}
-if(kind==='loans'){headers=['Financement','Capital initial','Capital restant dû','Taux / mensualité','Fin',''];body=list.map(r=>[esc(r.name)+`<span class="cell-sub">${esc(r.bank)}</span>`,money(r.principal),`${money(r.balance)}<span class="cell-sub">Situation au ${date(r.balance_date)}</span>`,`${num(r.rate)} %<span class="cell-sub">${money(r.monthly,2)} / mois</span>`,date(r.end),actions(r)]);}
-if(kind==='tasks'){headers=['Échéance','SCI','Date','Catégorie','Statut',''];body=list.map(r=>[esc(r.name),esc(sciname(r.sci)),`<span class="${r.due<today()&&r.status!=='Terminé'?'red':''}">${date(r.due)}</span>`,esc(r.category),badge(r.status),actions(r,r.status!=='Terminé'?`<button data-complete="${r.id}" title="Marquer comme terminé">${icon('check')}</button>`:'')]);}
-if(kind==='documents'){headers=['Document','SCI','Catégorie','Date','Fichier',''];body=list.map(r=>[`${icon('file')} <span style="vertical-align:super;margin-left:6px">${esc(r.name)}</span>`,esc(sciname(r.sci)),esc(r.category),date(r.date),r.size?num(r.size/1024)+' Ko':'Note seule',actions(r,r.size?`<button data-document="${r.id}" title="Télécharger le document">${icon('download')}</button>`:'')]);}
-return `<div class="panel table-wrap"><table><thead><tr>${headers.map((h,i)=>`<th ${i===headers.length-1?'class="align-right"':''}>${h}</th>`).join('')}</tr></thead><tbody>${body.map(c=>`<tr>${c.map(t=>`<td>${t}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;}
-function listPage(kind,id){let title=kindNames[kind];let buttons=(kind==='entries'?yearSelect():'')+(kind==='calls'?`<button data-action="generate-calls">${icon('calendar')} Appeler les loyers</button>`:'')+addBtn(kind,kind==='entries'?'Nouvelle opération':kind==='documents'?'Ajouter un document':'Ajouter');let intro='';if(kind==='entries'){let m=metrics(id||scope);intro=`<div class="balance-card row between"><div><div class="eyebrow">Solde calculé · À ce jour</div><strong>${money(m.cash,2)}</strong></div><div><div class="sub">Flux net de l’année civile ${activeYear()}</div><div class="gold" style="font-size:19px;margin-top:5px">${money(m.income-m.expense,2)}</div></div></div><div class="notice">Livre de trésorerie de gestion, toutes dates ci-dessous. Le solde part du solde d’ouverture de chaque SCI. Il ne constitue pas un résultat fiscal ni une comptabilité d’engagement.</div>`;}
+const defaultDocFolders=[{id:'f-statuts',name:'Statuts & vie sociale',builtin:true},{id:'f-immobilier',name:'Baux & immobilier',builtin:true},{id:'f-comptable',name:'Comptabilité & fiscalité',builtin:true},{id:'f-banque',name:'Banque & financement',builtin:true},{id:'f-technique',name:'Travaux & diagnostics',builtin:true},{id:'f-assurance',name:'Assurances',builtin:true}];
+function docFolders(){
+    let stored=Array.isArray(S.settings.doc_folders)?S.settings.doc_folders:[];
+    let list=defaultDocFolders.map(f=>({...f}));
+    stored.forEach(f=>{
+        if(!f||typeof f!=='object')return;
+        let id=String(f.id||'').trim().slice(0,60), name=String(f.name||'').trim().slice(0,80);
+        if(!id||!name)return;
+        let found=list.find(x=>x.id===id);
+        if(found)found.name=name; else list.push({id,name});
+    });
+    return list;
+}
+function docFolderName(id){return docFolders().find(f=>f.id===id)?.name||''}
+function docCategoryFolder(category){
+    if(category==='Statuts'||category==='Assemblée / rapport')return 'f-statuts';
+    if(category==='Bail')return 'f-immobilier';
+    if(category==='Fiscalité'||category==='Facture')return 'f-comptable';
+    if(category==='Assurance')return 'f-assurance';
+    if(category==='Diagnostic')return 'f-technique';
+    return '';
+}
+function resolveDocFolder(r){
+    let folders=docFolders();
+    if(r&&r.folder_id&&folders.some(f=>f.id===r.folder_id))return r.folder_id;
+    return docCategoryFolder(r?.category)||'';
+}
+function folderDocCount(id){return rows('documents').filter(r=>resolveDocFolder(r)===id).length}
+function docFolderBar(){
+    let folders=docFolders(), all=rows('documents').length, unclassed=rows('documents').filter(r=>!resolveDocFolder(r)).length;
+    return `<div class="doc-folders-bar"><article class="doc-folder-card ${docFolder===''?'active':''}" data-doc-folder="" role="button" tabindex="0" aria-label="Afficher tous les documents"><div class="doc-folder-top"><span class="doc-folder-name">${icon('grid')} Tous les documents</span></div><div class="doc-folder-meta"><span>${all} document${all>1?'s':''}</span></div></article>${folders.map(f=>`<article class="doc-folder-card ${docFolder===f.id?'active':''}" data-doc-folder="${esc(f.id)}" role="button" tabindex="0" aria-label="Ouvrir le dossier ${esc(f.name)}"><div class="doc-folder-top"><span class="doc-folder-name">${icon('folder')} ${esc(f.name)}</span><div class="doc-folder-actions"><button type="button" data-folder-rename="${esc(f.id)}" title="Renommer le dossier" aria-label="Renommer ${esc(f.name)}">${icon('edit')}</button>${f.builtin?'':`<button type="button" data-folder-delete="${esc(f.id)}" title="Supprimer le dossier" aria-label="Supprimer ${esc(f.name)}">${icon('trash')}</button>`}</div></div><div class="doc-folder-meta"><span>${folderDocCount(f.id)} document${folderDocCount(f.id)>1?'s':''}</span><span class="muted">${esc(f.name)}</span></div></article>`).join('')}<article class="doc-folder-card ${docFolder==='none'?'active':''}" data-doc-folder="none" role="button" tabindex="0" aria-label="Documents sans dossier"><div class="doc-folder-top"><span class="doc-folder-name">${icon('file')} Sans dossier</span></div><div class="doc-folder-meta"><span>${unclassed} document${unclassed>1?'s':''}</span></div></article><button type="button" class="doc-folder-card" data-folder-new="1" style="justify-content:center;color:var(--gold);border-style:dashed" aria-label="Créer un dossier de classement">${icon('plus')} Nouveau dossier</button></div>`;
+}
+function moveDocToFolder(id,folderId){
+    let target=rec(id);
+    if(!target||target.kind!=='documents')return;
+    if(folderId&&!docFolders().some(f=>f.id===folderId))return;
+    let updated={...target,folder_id:folderId||''};
+    Object.keys(updated).forEach(k=>{if(k==='id'||k==='sci'||k==='kind')delete updated[k];});
+    target.folder_id=folderId||'';
+    api('save',{kind:'documents',id:target.id,sci:target.sci,data:updated})
+        .then(()=>{notify(folderId?'Document classé dans « '+docFolderName(folderId)+' ».':'Document déplacé hors dossier.');render();})
+        .catch(async e=>{notify(e.message,true);await load();render();});
+}
+function listing(kind,id){let list=filtered(kind,id);
+if(kind==='properties'){if(!list.length)return empty('Aucun élément à afficher',query||filter||scope?'Essayez un autre filtre.':'Ajoutez vos premières données pour compléter cet espace.',!query&&!filter?addBtn(kind,'Ajouter un élément'):'');return `<div class="property-grid">${list.map(r=>`<div class="panel property-card"><div class="property-cover ${r.photo?'has-photo':''}">${r.photo?`<img class="property-cover-img" src="${esc(r.photo)}" style="object-position:${photoPosition(r)}" alt="Photo de ${esc(r.name)}">`:icon('building')}${badge(r.status)}</div><div class="row between"><h3>${esc(r.name)}</h3>${actions(r)}</div><p class="sub" style="margin-top:5px">${esc(r.address)}</p><div class="property-metrics"><div><small>Valeur estimée</small><strong>${money(r.value)}</strong></div><div><small>Surface</small><strong>${num(r.surface)} m²</strong></div><div><small>DPE</small><strong style="color:${['F','G'].includes(r.dpe)?'var(--red)':'var(--green)'}">${esc(r.dpe||'—')}</strong></div></div></div>`).join('')}</div>`;}
+if(kind==='documents')list=docFolder===''?list:(docFolder==='none'?list.filter(r=>!resolveDocFolder(r)):list.filter(r=>resolveDocFolder(r)===docFolder));
+let cols=getTableColumns(kind).filter(c=>c.visible);
+let gearTh=`<th class="align-right col-settings-th"><button type="button" class="ghost icon-only table-gear-btn" data-table-config="${kind}" title="Réglages des colonnes" aria-label="Réglages des colonnes">${icon('settings')}</button></th>`;
+if(!list.length)return `${kind==='documents'?docFolderBar():''}<div class="panel table-wrap"><table><thead><tr>${cols.map(c=>`<th>${esc(c.label)}</th>`).join('')}${gearTh}</tr></thead></table>${empty('Aucun élément à afficher',query||filter||scope?'Essayez un autre filtre.':'Ajoutez vos premières données pour compléter cet espace.',!query&&!filter?addBtn(kind,'Ajouter un élément'):'')}</div>`;
+let totalShares=kind==='partners'?rows('partners',id).reduce((s,r)=>s+Number(r.shares||0),0):0;
+let rowsHtml=list.map(r=>{
+    let cellMap={},act='';
+    if(kind==='entries'){cellMap={label:`${esc(r.label)}${r.call_id?'<span class="cell-sub">Liée à un appel de loyer</span>':''}`,sci:esc(sciname(r.sci)),date:date(r.date),category:esc(r.category),amount:`<span class="${r.direction==='Recette'?'green':'red'}">${r.direction==='Recette'?'+':'−'} ${money(r.amount,2)}</span>`};act=actions(r);}
+    else if(kind==='leases'){cellMap={tenant:esc(r.tenant)+`<span class="cell-sub">${esc(r.email)}</span>`,property:esc(label(rec(r.property_id))),bail:`${date(r.start)} → ${date(r.end)}<span class="cell-sub">${esc(r.type)}</span>`,rent:`${money(r.rent,2)}<span class="cell-sub">Charges : ${money(r.charges,2)} / mois</span>`,status:badge(r.status)};act=actions(r);}
+    else if(kind==='calls'){cellMap={tenant:`${esc(label(rec(r.lease_id)))}<span class="cell-sub">${esc(r.period)} · ${esc(sciname(r.sci))}</span>`,due:date(r.due),called:money((+r.rent||0)+(+r.charges||0),2),paid:money(paid(r),2),status:badge(callStatus(r))};act=actions(r,due(r)>.005?`<button data-pay="${r.id}" title="Encaisser un paiement">${icon('wallet')}</button>`:`<button data-receipt="${r.id}" title="Télécharger la quittance">${icon('file')}</button>`);}
+    else if(kind==='partners'){cellMap={name:esc(r.name)+`<span class="cell-sub">${esc(r.email)}</span>`,role:esc(r.role),shares:num(r.shares),participation:totalShares?num(r.shares/totalShares*100)+' %':'—',cca:`<span class="${Number(r.cca)<0?'red':''}">${money(r.cca,2)}</span>`};act=actions(r);}
+    else if(kind==='loans'){cellMap={name:esc(r.name)+`<span class="cell-sub">${esc(r.bank)}</span>`,principal:money(r.principal),balance:`${money(r.balance)}<span class="cell-sub">Situation au ${date(r.balance_date)}</span>`,rate:`${num(r.rate)} %<span class="cell-sub">${money(r.monthly,2)} / mois</span>`,end:date(r.end)};act=actions(r);}
+    else if(kind==='tasks'){let remDates=r.reminders_enabled&&Array.isArray(r.reminders)?r.reminders:[];cellMap={name:`<strong>${esc(r.name)}</strong>${r.important?' <span class="pill red" style="margin-left:6px">Important</span>':''}${remDates.length?`<span class="cell-sub">${remDates.length} rappel${remDates.length>1?'s':''} · ${remDates.map(date).join(', ')}</span>`:''}`,sci:esc(sciname(r.sci)),due:`<span class="${r.due<today()&&r.status!=='Terminé'?'red':''}">${date(r.due)}</span>`,category:esc(r.category),status:badge(r.status)};act=actions(r,r.status!=='Terminé'?`<button data-complete="${r.id}" title="Marquer comme terminé">${icon('check')}</button>`:'');}
+    else if(kind==='documents'){let folder=resolveDocFolder(r);cellMap={name:`${icon('file')} <span style="vertical-align:super;margin-left:6px">${esc(r.name)}</span>`,sci:esc(sciname(r.sci)),category:esc(r.category),folder:folder?`<span class="pill">${icon('folder')} ${esc(docFolderName(folder))}</span>`:'<span class="muted">Sans dossier</span>',date:date(r.date),file:r.size?num(r.size/1024)+' Ko':'Note seule'};act=`<div class="actions"><button data-document-preview="${r.id}" title="Ouvrir l’aperçu" aria-label="Ouvrir l’aperçu de ${esc(r.name)}">${icon('search')}</button>${r.size?`<button data-document="${r.id}" title="Télécharger le document" aria-label="Télécharger ${esc(r.name)}">${icon('download')}</button>`:''}<button data-edit="${r.id}" title="Modifier" aria-label="Modifier ${esc(r.name)}">${icon('edit')}</button><button data-delete="${r.id}" title="Supprimer" aria-label="Supprimer ${esc(r.name)}">${icon('trash')}</button></div>`;}
+    return `<tr${kind==='documents'?` class="doc-row" data-doc-open="${r.id}" title="Ouvrir l’aperçu de ${esc(r.name)}"`:''}>${cols.map(c=>`<td>${cellMap[c.id]??''}</td>`).join('')}<td>${act}</td></tr>`;
+}).join('');
+if(kind==='documents')return `${docFolderBar()}<div class="panel table-wrap"><table><thead><tr>${cols.map(c=>`<th>${esc(c.label)}</th>`).join('')}${gearTh}</tr></thead><tbody>${rowsHtml}</tbody></table></div><p class="compact-note">Cliquez sur une ligne pour ouvrir l’aperçu du document, avec un zoom réglable (par défaut ×1 pour voir le document entier).</p>`;
+return `<div class="panel table-wrap"><table><thead><tr>${cols.map(c=>`<th>${esc(c.label)}</th>`).join('')}${gearTh}</tr></thead><tbody>${rowsHtml}</tbody></table></div>`;}
+function listPage(kind,id){let title=kindNames[kind];let buttons=(kind==='entries'?yearSelect():'')+(kind==='calls'?`<button data-action="generate-calls">${icon('calendar')} Appeler les loyers</button>`:'')+(kind==='documents'?`<button data-action="doc-folder-new">${icon('folder')} Nouveau dossier</button>`:'')+addBtn(kind,kind==='entries'?'Nouvelle opération':kind==='documents'?'Ajouter un document':'Ajouter');let intro='';if(kind==='entries'){let m=metrics(id||scope),net=m.income-m.expense;intro=`<div class="balance-card row between"><div><div class="eyebrow">Solde calculé · À ce jour</div><strong class="${m.cash<0?'red':''}">${money(m.cash,2)}</strong></div><div><div class="sub">Flux net de l’année civile ${activeYear()}</div><div class="${net<0?'red':'gold'}" style="font-size:19px;margin-top:5px">${money(net,2)}</div></div></div><div class="notice">Livre de trésorerie de gestion, toutes dates ci-dessous. Le solde part du solde d’ouverture de chaque SCI. Il ne constitue pas un résultat fiscal ni une comptabilité d’engagement.</div>`;}
 if(kind==='loans')intro='<div class="notice">Capital restant dû et mensualités renseignés manuellement. Les paiements sont à enregistrer séparément en trésorerie : aucune écriture automatique ni simulation d’amortissement.</div>';
 if(kind==='partners')intro='<div class="notice">La participation est calculée sur les parts renseignées. Les comptes courants sont des soldes déclarés, à rapprocher de la comptabilité ; ils ne génèrent pas d’opérations de trésorerie.</div>';
+if(kind==='documents')intro='<div class="notice">Classez vos documents dans des dossiers pour les retrouver instantanément. Un document sans dossier est rangé automatiquement selon sa catégorie (statuts, baux, comptabilité, assurances, diagnostics). Cliquez sur une ligne pour ouvrir l’aperçu.</div>';
 return `${!id?head(title,'Une vision centralisée, avec une affectation explicite à chaque SCI.',buttons):`<div class="section-title"><h2>${title}</h2><div class="toolbar">${buttons}</div></div>`}${intro}${tableFilters(kind,id)}<div id="listing">${listing(kind,id)}</div>${kind==='calls'?'<p class="compact-note">Un paiement peut être partiel. La quittance est disponible uniquement après règlement intégral du loyer et des charges. Les appels générés sont mensuels, à ajuster en cas de prorata.</p>':''}`;}
-function identity(s){return `<div class="settings-grid"><div class="panel"><div class="panel-head"><h2>Identité de la société</h2><button data-action="edit-sci">${icon('edit')} Modifier</button></div><div class="panel-body info-grid">${[['Dénomination',s.name],['SIREN',s.siren||'Non renseigné'],['Gérant',s.manager||'Non renseigné'],['Siège social',s.address||'Non renseigné'],['Capital social',money(s.capital,2)],['Régime fiscal',s.regime||'IR'],['Clôture de l’exercice',s.closing||'31/12'],['Solde d’ouverture',money(s.opening,2)+' au '+date(s.opening_date)]].map(([k,v])=>`<div class="info-item"><label>${k}</label><span>${esc(v)}</span></div>`).join('')}<div class="info-item" style="grid-column:1/-1"><label>Notes de gestion</label><span style="white-space:pre-wrap">${esc(s.notes||'Aucune note.')}</span></div></div></div><div class="stack"><div class="panel"><div class="panel-head"><h2>Repères de gestion · ${esc(s.regime||'IR')}</h2></div><div class="panel-body stack"><p class="sub">${s.regime==='IS'?'Préparer la déclaration 2065 et ses annexes avec une comptabilité d’engagement, les immobilisations et les amortissements. Dominis ne produit pas de liasse fiscale ni de FEC.':'Préparer les informations de la déclaration 2072 selon votre situation. Les recettes et dépenses enregistrées ne déterminent pas automatiquement le résultat foncier imposable.'}</p><p class="sub">Le gérant doit rendre compte annuellement de sa gestion aux associés (article 1856 du Code civil). Les modalités de décision dépendent notamment des statuts.</p><button data-add="tasks">${icon('calendar')} Ajouter une échéance de suivi</button><button data-action="annual-report">${icon('file')} Préparer une synthèse annuelle</button><p class="sub">Les dates fiscales sont à vérifier chaque année. Aucun calendrier légal automatique n’est imposé par l’application.</p></div></div><div class="panel"><div class="panel-body"><h3 class="red">Suppression de la SCI</h3><p class="sub" style="margin:8px 0 15px">Cette action supprime la société et toutes ses données liées. Exportez une sauvegarde complète auparavant.</p><button class="danger" data-action="delete-sci">${icon('trash')} Supprimer cette SCI</button></div></div></div></div>`;}
+function identity(s){let openTxt=s.opening&&Number(s.opening)!==0?money(s.opening,2)+(s.opening_date?' au '+date(s.opening_date):''):'—';return `<div class="settings-grid"><div class="panel"><div class="panel-head"><h2>Identité de la société</h2><button data-action="edit-sci">${icon('edit')} Modifier</button></div><div class="panel-body info-grid">${[['Dénomination',s.name],['SIREN',s.siren||'Non renseigné'],['Gérant',s.manager||'Non renseigné'],['Siège social',s.address||'Non renseigné'],['Capital social',money(s.capital,2)],['Régime fiscal',s.regime||'IR'],['Clôture de l’exercice',s.closing||'31/12'],['Solde d’ouverture',openTxt]].map(([k,v])=>`<div class="info-item"><label>${k}</label><span>${esc(v)}</span></div>`).join('')}<div class="info-item" style="grid-column:1/-1"><label>Notes de gestion</label><span style="white-space:pre-wrap">${esc(s.notes||'Aucune note.')}</span></div></div></div><div class="stack"><div class="panel"><div class="panel-head"><h2>Repères de gestion · ${esc(s.regime||'IR')}</h2></div><div class="panel-body stack"><p class="sub">${s.regime==='IS'?'Préparer la déclaration 2065 et ses annexes avec une comptabilité d’engagement, les immobilisations et les amortissements. Dominis ne produit pas de liasse fiscale ni de FEC.':'Préparer les informations de la déclaration 2072 selon votre situation. Les recettes et dépenses enregistrées ne déterminent pas automatiquement le résultat foncier imposable.'}</p><p class="sub">Le gérant doit rendre compte annuellement de sa gestion aux associés (article 1856 du Code civil). Les modalités de décision dépendent notamment des statuts.</p><button data-add="tasks">${icon('calendar')} Ajouter une échéance de suivi</button><button data-action="annual-report">${icon('file')} Préparer une synthèse annuelle</button><p class="sub">Les dates fiscales sont à vérifier chaque année. Aucun calendrier légal automatique n’est imposé par l’application.</p></div></div><div class="panel"><div class="panel-body"><h3 class="red">Suppression de la SCI</h3><p class="sub" style="margin:8px 0 15px">Cette action supprime la société et toutes ses données liées. Exportez une sauvegarde complète auparavant.</p><button class="danger" data-action="delete-sci">${icon('trash')} Supprimer cette SCI</button></div></div></div></div>`;}
 function settingsGeneral(){return `<div class="settings-grid"><div class="stack"><section class="panel"><div class="panel-head"><h2>Apparence & préférences</h2>${icon('sun')}</div><div class="panel-body"><div class="setting-row"><div><h3>Thème de l’interface</h3><p>Le même soin, de jour comme de nuit.</p></div><div class="theme-choice"><button data-theme="dark" class="${S.settings.theme==='dark'?'active':''}">${icon('moon')} Sombre</button><button data-theme="light" class="${S.settings.theme==='light'?'active':''}">${icon('sun')} Clair</button></div></div><div class="setting-row"><div><h3>Navigation compacte</h3><p>Une barre latérale discrète, plus d’espace.</p></div><button class="toggle ${S.settings.collapsed?'on':''}" data-action="collapse" aria-label="Navigation compacte" aria-pressed="${!!S.settings.collapsed}"></button></div><div class="setting-row"><div><h3>Nom de votre espace</h3><p>Affiché dans la barre latérale.</p></div><button data-action="rename-space">${icon('edit')} Modifier</button></div><div class="setting-row"><div><h3>Sauvegarde à la fermeture</h3><p>Copie complète dans le dossier sauvegardes/.</p></div><button class="toggle ${S.settings.auto_backup?'on':''}" data-action="auto-backup" aria-label="Sauvegarde à la fermeture" aria-pressed="${!!S.settings.auto_backup}"></button></div><div class="setting-row"><div><h3>Sauvegarde hebdomadaire</h3><p>Copie de data.db au premier lancement de la semaine ; deux fichiers maximum dans auto-save/.</p></div><button class="toggle ${S.settings.weekly_auto_save?'on':''}" data-action="weekly-auto-save" aria-label="Sauvegarde hebdomadaire" aria-pressed="${!!S.settings.weekly_auto_save}"></button></div></div></section><section class="panel"><div class="panel-head"><h2>Ordre de navigation</h2>${icon('panel')}</div><div class="panel-body"><p class="sub">Déplacez les pages avec les flèches. Vos nouvelles SCI apparaissent automatiquement.</p><div class="order-item locked">${icon('grid')} Tableau de bord <span style="margin-left:auto">${icon('lock')}</span></div>${navOrder().map((id,i,a)=>`<div class="order-item">${navIcon(id)}${esc(navName(id))}<div class="actions"><button data-move="${id}" data-dir="-1" ${!i?'disabled':''} title="Monter">${icon('up')}</button><button data-move="${id}" data-dir="1" ${i===a.length-1?'disabled':''} title="Descendre">${icon('down')}</button></div></div>`).join('')}<div class="order-item locked">${icon('settings')} Paramètres <span style="margin-left:auto">${icon('lock')}</span></div><p class="compact-note">Tableau de bord reste en premier, Paramètres en dernier. Quitter est une action distincte.</p></div></section></div><div class="stack"><section class="panel"><div class="panel-head"><h2>Vos données vous appartiennent</h2>${icon('database')}</div><div class="panel-body"><div class="setting-row"><div><h3>Importer des données</h3><p>JSON Dominis, CSV ou Excel (.xlsx) de mouvements multi-SCI.<br>Aperçu et destinations avant validation.</p></div><button data-action="import">${icon('upload')} Importer</button></div><div class="setting-row"><div><h3>Exporter une sélection</h3><p>Choisissez les SCI, les données et le format.</p></div><button data-action="export">${icon('download')} Exporter</button></div><div class="setting-row"><div><h3>Sauvegarde complète</h3><p>Toutes les SCI, pièces jointes et préférences.<br>${S.settings.last_backup?'Dernière : '+new Date(S.settings.last_backup).toLocaleString('fr-FR'):'Aucune sauvegarde manuelle enregistrée.'}</p></div><button class="primary" data-action="backup">${icon('database')} Sauvegarder</button></div><div class="setting-row"><div><h3>Restaurer une sauvegarde</h3><p>Remplace l’ensemble de l’espace. Une copie<br>de sécurité est créée avant restauration.</p></div><button data-action="restore">${icon('clock')} Restaurer</button></div></div></section><section class="panel"><div class="panel-head"><h2>Stockage & confidentialité</h2>${icon('lock')}</div><div class="panel-body stack"><div class="row between"><span class="sub">Base locale</span><span class="pill green"><span class="status-dot"></span>data.db · ${num(S.db_size/1024/1024)} Mo</span></div><p class="sub">Aucune télémétrie. La gestion de vos données fonctionne hors ligne. Seule la vérification des versions contacte GitHub, sans transmettre vos données patrimoniales. Documents, réglages et historique sont stockés dans SQLite. La base n’est pas chiffrée : protégez votre session et vos sauvegardes.</p><p class="sub">Usage local, mono-utilisateur. Ne placez pas une base ouverte sur un partage réseau ou dans une synchronisation cloud.</p>${S.preview?'<div class="notice" style="margin:0">Aperçu hébergé : utilisez des données fictives uniquement. Le téléchargement et les lanceurs sont destinés à l’usage local.</div>':''}</div></section>${S.settings.demo?`<section class="panel"><div class="panel-body"><h3>Données de démonstration</h3><p class="sub" style="margin:8px 0 14px">Efface toutes les données de cet espace démo, y compris vos ajouts. Sauvegardez-les avant de repartir d’un espace vierge.</p><button class="danger" data-action="reset-demo">${icon('trash')} Vider l’espace de démonstration</button></div></section>`:''}</div><section class="panel" style="grid-column:1/-1"><div class="panel-head"><h2>Journal d’activité</h2><span class="sub">80 dernières actions</span></div><div class="panel-body audit-list">${S.audit.map(r=>`<div class="audit-line"><time>${esc(new Date(r.at).toLocaleString('fr-FR'))}</time><strong style="min-width:90px">${esc(r.action)}</strong><span class="muted">${esc(r.detail)}</span></div>`).join('')||'<p class="sub">Aucune action enregistrée.</p>'}</div></section></div>`;}
 function render(){if(!['dashboard','settings',...Object.keys(navs),...S.scis.map(s=>s.id)].includes(page))page='dashboard';renderShell();let content='';if(page==='dashboard'){content=head('Votre patrimoine, en perspective.','L’essentiel de vos sociétés, réuni au même endroit.',yearSelect()+exportBtn()+`<button class="primary" data-action="new-sci">${icon('plus')} Nouvelle SCI</button>`,'Tableau de bord général')+(S.scis.length?dashboard():empty('Bienvenue dans votre espace patrimonial','Créez votre première SCI. Son espace de gestion apparaîtra automatiquement dans la navigation.',`<button class="primary" data-action="new-sci">${icon('plus')} Créer ma première SCI</button>`));}
 else if(page==='settings')content=settingsPage();else if(navs[page])content=listPage({treasury:'entries',agenda:'tasks',documents:'documents'}[page]);else{let s=currentSCI();content=head(s.name,(s.city||s.address||'Société civile immobilière')+' · Régime '+(s.regime||'IR'),yearSelect()+`<button data-action="edit-sci">${icon('edit')} Société</button>`+`<button class="primary" data-action="quick">${icon('plus')} Ajouter</button>`,'Espace société')+`<nav class="tabs" aria-label="Gestion de la SCI">${tabs.map(([t,n])=>`<button class="tab ${tab===t?'active':''}" data-tab="${t}">${n}</button>`).join('')}</nav>`+(tab==='overview'?dashboard(s.id):tab==='identity'?identity(s):listPage(tab,s.id));}
-const recoveryNotice=S.primary_db_missing?`<div class="notice" role="alert" style="border-left-color:var(--red)"><strong>La base principale data.db était absente.</strong> Dominis a créé une base vide ; les fichiers de auto-save/ ne sont pas utilisés comme base. Avant toute nouvelle saisie, restaurez une copie dans data.db.<div style="margin-top:10px"><button class="danger" data-action="restore">${icon('clock')} Restaurer une sauvegarde</button></div></div>`:'';$('#main').innerHTML=recoveryNotice+content+`<div class="footer"><span>DOMINIS <span style="opacity:.5;margin:0 7px">/</span> Votre patrimoine, en toute clarté.</span><span class="row gap8">${icon('lock')} Enregistrement local · Outil de gestion, hors comptabilité certifiée</span></div>`;updateCount();}
-function updateCount(){let el=$('#list-count');if(el){let k=navs[page]?{treasury:'entries',agenda:'tasks',documents:'documents'}[page]:tab;el.textContent=filtered(k,currentSCI()?.id).length+' éléments';}}
+const recoveryNotice=S.primary_db_missing?`<div class="notice" role="alert" style="border-left-color:var(--red)"><strong>La base principale data.db était absente.</strong> Dominis a créé une base vide ; les fichiers de auto-save/ ne sont pas utilisés comme base. Avant toute nouvelle saisie, restaurez une copie dans data.db.<div style="margin-top:10px"><button class="danger" data-action="restore">${icon('clock')} Restaurer une sauvegarde</button></div></div>`:'';$('#main').innerHTML=recoveryNotice+content+`<div class="footer"><span>DOMINIS <span style="opacity:.5;margin:0 7px">/</span> Votre patrimoine, en toute clarté.</span><span class="row gap8">${icon('lock')} Enregistrement local · Outil de gestion, hors comptabilité certifiée</span></div>`;updateCount();checkTaskNotifications();}
+function currentListKind(){return navs[page]?{treasury:'entries',agenda:'tasks',documents:'documents'}[page]:tab;}
+function visibleCount(kind,id){let list=filtered(kind,id);if(kind==='documents'&&docFolder!=='')list=docFolder==='none'?list.filter(r=>!resolveDocFolder(r)):list.filter(r=>resolveDocFolder(r)===docFolder);return list.length}
+function updateCount(){let el=$('#list-count');if(el){let k=currentListKind();el.textContent=visibleCount(k,currentSCI()?.id)+' éléments';}}
 function renderListing(){let k=navs[page]?{treasury:'entries',agenda:'tasks',documents:'documents'}[page]:tab;if($('#listing')){$('#listing').innerHTML=listing(k,currentSCI()?.id);updateCount();}}
 function openModal(title,body,footer='',wide=false){previousFocus=document.activeElement;modalDirty=false;$('#modal').innerHTML=`<div class="modal-backdrop"><div class="modal ${wide?'wide':''}" role="dialog" aria-modal="true" aria-label="${esc(title)}"><div class="modal-head"><h2>${esc(title)}</h2><button class="ghost icon-only" data-action="close-modal" aria-label="Fermer">${icon('close')}</button></div><div class="modal-content">${body}<div id="modal-error"></div></div>${footer?`<div class="modal-footer">${footer}</div>`:''}</div></div>`;setTimeout(()=>$('#modal input:not([type=hidden]),#modal select,#modal button')?.focus(),30);}
 function closeModal(force=false){if(updateInstalling&&!force)return;if(!force&&$('#update-offer')){updateInfo.dismissed=true;api('update/later',{}).catch(()=>{});}if(!force&&modalDirty&&!confirm('Abandonner les modifications non enregistrées ?'))return;$('#modal').innerHTML='';modalDirty=false;previousFocus?.focus?.();}
 function modalError(e){let el=$('#modal-error');if(el){el.className='error';el.textContent=e.message||e;}else notify(e.message||e,true);}
 function field(name,label,type='text',value='',opts=null,required=false,full=false){return `<div class="field ${full?'full':''}"><label for="f-${name}">${esc(label)}${required?' <span class="gold">*</span>':''}</label>${type==='select'?`<select id="f-${name}" name="${name}" ${required?'required':''}>${(opts||[]).map(o=>{let v=Array.isArray(o)?o[0]:o,t=Array.isArray(o)?o[1]:o;return `<option value="${esc(v)}" ${String(v)===String(value)?'selected':''}>${esc(t)}</option>`}).join('')}</select>`:type==='textarea'?`<textarea id="f-${name}" name="${name}">${esc(value)}</textarea>`:`<input id="f-${name}" name="${name}" type="${type}" value="${type==='file'?'':esc(value)}" ${required?'required':''} ${type==='number'?'step="0.01" '+(['opening','cca'].includes(name)?'':'min="0"'):''} ${type==='file'?'accept=".pdf,.jpg,.jpeg,.png,.webp,.docx,.xlsx,.txt,.csv"':''} ${name==='siren'?'pattern="[0-9]{9}" maxlength="9"':''} ${name==='name'?'maxlength="160"':''}>`}</div>`;}
+function renderReminderDateInputs(count,dates,defaultDate){
+    return Array.from({length:count},(_,i)=>`<div class="field"><label for="f-reminder-date-${i}">${count===1?'Date du rappel':'Date du rappel n°'+(i+1)} <span class="gold">*</span></label><input id="f-reminder-date-${i}" name="reminder_date_${i}" type="date" value="${esc(dates[i]||defaultDate||today())}" required></div>`).join('');
+}
 function editForm(kind,r=null,defaults={}){let d={...(r||{}),...defaults}, id=r?.id||'',sid=d.sci||currentSCI()?.id||scope||S.scis[0]?.id;
 if(kind!=='sci'&&!S.scis.length){notify('Créez d’abord une SCI.');return editForm('sci');}
+if(kind==='tasks'){
+    if(r?.id&&taskUnreadReachedDates(r).length>0)markTaskRemindersRead(r.id);
+    taskEditSnapshot={id,wasImportant:!!r?.important,wasRemindersEnabled:!!r?.reminders_enabled,prevReminders:[...(Array.isArray(r?.reminders)?r.reminders:[])],prevReadReminders:[...(Array.isArray(r?.read_reminders)?r.read_reminders:[])]};
+}else{taskEditSnapshot=null;}
 let f=(n,l,t='text',def='',o=null,req=false,full=false)=>field(n,l,t,d[n]??def,o,req,full),body='';
 if(kind!=='sci')body+=field('sci','Société concernée','select',sid,S.scis.map(s=>[s.id,s.name]),true,true);
 if(kind==='sci')body+=f('name','Nom de la SCI','text','',null,true,true)+f('siren','SIREN (9 chiffres)')+f('regime','Régime fiscal','select','IR',['IR','IS'])+f('manager','Gérant')+f('capital','Capital social (€)','number',0)+f('address','Adresse du siège','text','',null,false,true)+f('city','Ville')+f('closing','Clôture (jour/mois)','text','31/12')+f('opening','Solde de trésorerie initial (€)','number',0)+f('opening_date','Date du solde initial','date',today(),null,true)+f('color','Couleur de la société','color','#c7ad77');
-if(kind==='properties')body+=f('name','Nom du bien','text','',null,true,true)+f('address','Adresse complète','text','',null,true,true)+f('type','Type','select','Appartement',['Appartement','Immeuble','Maison','Local professionnel','Terrain','Autre'])+f('status','Occupation déclarée','select','Vacant',['Vacant','Loué','Usage des associés','Travaux'])+f('value','Valeur estimée (€)','number',0)+f('purchase','Prix d’acquisition (€)','number',0)+f('surface','Surface (m²)','number',0)+f('acquired','Date d’acquisition','date')+f('dpe','Classe DPE','select','Non renseigné',['Non renseigné','A','B','C','D','E','F','G','Non concerné'])+f('dpe_date','Validité du DPE / à vérifier','date');
+if(kind==='properties')body+=f('name','Nom du bien','text','',null,true,true)+f('address','Adresse complète','text','',null,true,true)+f('type','Type','select','Appartement',['Appartement','Immeuble','Maison','Local professionnel','Terrain','Autre'])+f('status','Occupation déclarée','select','Vacant',['Vacant','Loué','Usage des associés','Travaux'])+f('value','Valeur estimée (€)','number',0)+f('purchase','Prix d’acquisition (€)','number',0)+f('surface','Surface (m²)','number',0)+f('acquired','Date d’acquisition','date')+f('dpe','Classe DPE','select','Non renseigné',['Non renseigné','A','B','C','D','E','F','G','Non concerné'])+f('dpe_date','Validité du DPE / à vérifier','date')
++`<div class="prop-crop-box"><div class="row between wrap"><div><h4 style="margin:0;font-size:12px">Photo du bien</h4><p class="sub" style="margin-top:3px">Image affichée dans l’encadré de la carte. Recadrez-la librement : le format pris en compte est <strong>16:5</strong> (bannière large), enregistrée en 1600 × 500 px. Sans photo, la carte garde exactement son apparence actuelle.</p></div><span class="pill gold">Format 16:5 · 1600 × 500 px</span></div><div class="prop-crop-stage-wrap" id="prop-crop-box" tabindex="0" role="img" aria-label="Zone de recadrage de la photo (utilisez les flèches du clavier ou la souris)"><div class="prop-crop-placeholder" id="prop-crop-placeholder">${icon('building')}<span class="sub">Aucune photo pour l’instant</span></div><div class="prop-crop-grid"></div><span class="prop-crop-badge" id="prop-crop-badge" style="display:none">Format enregistré : 1600 × 500 px · 16:5</span></div><div class="prop-crop-controls"><input id="f-photo-file" type="file" accept="image/png,image/jpeg,image/webp,image/gif" aria-label="Choisir une photo"><button type="button" id="prop-crop-remove" disabled title="Retirer la photo">${icon('trash')} Retirer</button><button type="button" id="prop-crop-reset" disabled title="Recentrer la photo">${icon('refresh')} Recentrer</button></div><div class="prop-crop-controls"><span class="sub" style="min-width:78px">Zoom <span id="prop-crop-zoom-label">×1.00</span></span><input id="prop-crop-zoom" type="range" min="100" max="400" step="5" value="100" disabled aria-label="Zoom du recadrage"></div><p class="sub">Glissez la photo dans le cadre pour choisir la partie visible, puis ajustez le zoom au besoin. Seul le rectangle doré est conservé sur la carte.</p><input type="hidden" id="f-photo-existing" name="photo_existing" value="${esc(d.photo||'')}"><input type="hidden" id="f-photo-x" name="photo_x" value="50"><input type="hidden" id="f-photo-y" name="photo_y" value="50"><input type="hidden" id="f-photo-zoom" name="photo_zoom" value="1"></div>`;
 if(kind==='leases')body+=f('tenant','Locataire / raison sociale','text','',null,true,true)+f('property_id','Bien loué','select','', [['','Sélectionner un bien'],...rows('properties',sid).map(p=>[p.id,p.name])],true,true)+f('email','E-mail','email')+f('phone','Téléphone')+f('type','Type de bail','select','Habitation nue',['Habitation nue','Habitation meublée','Professionnel','Commercial','Autre'])+f('status','Statut','select','Actif',['Actif','Terminé','À venir'])+f('start','Début du bail','date',today(),null,true)+f('end','Fin du bail','date')+f('rent','Loyer mensuel hors charges (€)','number',0)+f('charges','Provisions pour charges (€)','number',0)+f('deposit','Dépôt de garantie (€)','number',0)+f('revision','Indice / date de révision');
 if(kind==='partners')body+=f('name','Nom de l’associé','text','',null,true,true)+f('email','E-mail','email')+f('role','Fonction','select','Associé',['Associé','Gérant associé','Personne morale'])+f('shares','Nombre de parts sociales','number',0)+f('cca','Solde déclaré du compte courant (€)','number',0)+f('address','Adresse','text','',null,false,true);
 if(kind==='loans')body+=f('name','Nom du financement','text','',null,true,true)+f('bank','Établissement prêteur')+f('principal','Capital initial (€)','number',0)+f('balance','Capital restant dû (€)','number',0)+f('balance_date','Date du capital restant dû','date',today())+f('rate','Taux nominal annuel (%)','number',0)+f('monthly','Mensualité totale (€)','number',0)+f('start','Début','date')+f('end','Fin','date');
 if(kind==='calls')body+=f('lease_id','Bail / locataire','select','',[['','Sélectionner un bail'],...rows('leases',sid).map(l=>[l.id,l.tenant+' · '+label(rec(l.property_id))])],true,true)+f('period','Mois concerné','month',today().slice(0,7),null,true)+f('due','Date d’exigibilité','date',today(),null,true)+f('rent','Loyer appelé hors charges (€)','number',0)+f('charges','Charges appelées (€)','number',0);
 if(kind==='entries')body+=f('label','Libellé de l’opération','text','',null,true,true)+f('date','Date du mouvement','date',today(),null,true)+f('direction','Sens','select','Recette',['Recette','Dépense'],true)+f('amount','Montant (€)','number',0,null,true)+f('category','Catégorie','select','Autre',['Loyers','Provisions de charges','Entretien','Travaux','Assurance','Taxe foncière','Frais de gestion','Intérêts','Emprunt (capital + intérêts)','Apport associé','Remboursement associé','Dépôt de garantie','Autre'])+f('call_id','Rattacher à un appel de loyer (facultatif)','select','',[['','Sans rattachement'],...rows('calls',sid).map(c=>[c.id,label(rec(c.lease_id))+' · '+c.period+' · restant '+money(due(c),2)])],false,true);
-if(kind==='tasks')body+=f('name','Objet de l’échéance','text','',null,true,true)+f('due','Date prévue','date',today(),null,true)+f('category','Catégorie','select','Juridique',['Juridique','Fiscalité','Assurance','Bail','DPE / diagnostics','Travaux','Autre'])+f('status','Statut','select','À faire',['À faire','En cours','Terminé']);
-if(kind==='documents')body+=f('name','Nom du document','text','',null,true,true)+f('category','Catégorie','select','Autre',['Statuts','Assemblée / rapport','Bail','Diagnostic','Assurance','Facture','Fiscalité','Autre'])+f('date','Date du document','date',today())+f('file','Pièce jointe (12 Mo maximum)','file','',null,false,true);
+if(kind==='tasks'){
+    let isImp=!!d.important,remOn=!!d.reminders_enabled,remDates=Array.isArray(d.reminders)&&d.reminders.length?d.reminders:[d.due||today()],remCount=remOn?Math.max(1,Math.min(30,Number(d.reminder_count)||remDates.length||1)):1;
+    body+=f('name','Objet de l’échéance','text','',null,true,true)+f('due','Date prévue','date',today(),null,true)+f('category','Catégorie','select','Juridique',['Juridique','Fiscalité','Assurance','Bail','DPE / diagnostics','Travaux','Autre'])+f('status','Statut','select','À faire',['À faire','En cours','Terminé']);
+    body+=`<div class="task-params-box"><div class="task-param-row"><div><h4>Paramètre important</h4><p>Affiche une notification style macOS pendant 10 secondes et une pastille sur la cloche lorsque le rappel est atteint. Jusqu’à 30 rappels datés par échéance.</p></div><button type="button" class="toggle ${isImp?'on':''}" id="f-task-important" role="switch" aria-checked="${isImp}" aria-label="Paramètre important"></button><input type="hidden" id="f-important-val" name="important" value="${isImp?'1':''}"></div><div class="task-param-row"><div><h4>Activer des rappels</h4><p>Définir le nombre de rappels et régler la date de chaque rappel pour cette échéance.</p></div><button type="button" class="toggle ${remOn?'on':''}" id="f-task-reminders-toggle" role="switch" aria-checked="${remOn}" aria-label="Activer des rappels"></button><input type="hidden" id="f-reminders-enabled-val" name="reminders_enabled" value="${remOn?'1':''}"></div><div id="task-reminders-area" class="task-reminders-area" style="${remOn?'':'display:none'}"><div class="field" style="max-width:220px"><label for="f-reminder-count">Nombre de rappels <span class="gold">*</span></label><input id="f-reminder-count" name="reminder_count" type="number" min="1" max="30" step="1" value="${remCount}"></div><div id="task-reminder-dates" class="task-reminders-grid">${renderReminderDateInputs(remCount,remDates,d.due||today())}</div></div></div>`;
+}
+if(kind==='documents')body+=f('name','Nom du document','text','',null,true,true)+f('category','Catégorie','select','Autre',['Statuts','Assemblée / rapport','Bail','Diagnostic','Assurance','Facture','Fiscalité','Autre'])+f('folder_id','Dossier de classement','select','',[['',docCategoryFolder(d.category)?'Classement automatique · '+docFolderName(docCategoryFolder(d.category)):'Aucun dossier (classement automatique)'],...docFolders().map(fo=>[fo.id,fo.name])])+f('date','Date du document','date',today())+f('file','Pièce jointe (500 Mo maximum)','file','',null,false,true);
 body+=f('notes','Notes','textarea','',null,false,true);
 let intro=kind!=='sci'?`<div class="notice">${id?'Modification d’un élément enregistré.':'Nouvel élément.'} Affectation explicite à une seule SCI.</div>`:'<div class="notice">La SCI et son raccourci seront enregistrés immédiatement. Le solde initial doit précéder les mouvements saisis pour éviter les doubles comptes.</div>';
 openModal(id?'Modifier '+(kind==='sci'?'la SCI':'l’élément'):kind==='sci'?'Une nouvelle société':`Ajouter · ${kindNames[kind]}`,intro+`<form id="edit-form" data-kind="${kind}" data-id="${id}"><div class="form-grid">${body}</div></form>`+`${kind==='documents'&&r?.filename?`<p class="compact-note">Fichier actuel : ${esc(r.filename)}. Sans nouveau fichier, la pièce est conservée.</p>`:''}`,`<button data-action="close-modal">Annuler</button><button type="submit" form="edit-form" class="primary">${icon('check')} Enregistrer</button>`);
 if(id&&$('#f-sci'))$('#f-sci').disabled=true;
+if(kind==='properties')initPhotoCropEditor(r);
 $('#f-sci')?.addEventListener('change',()=>{let sid=$('#f-sci').value;[['property_id','properties'],['lease_id','leases'],['call_id','calls']].forEach(([f,k])=>{let el=$('#f-'+f);if(el)el.innerHTML='<option value="">'+(f==='call_id'?'Sans rattachement':'Sélectionner')+'</option>'+rows(k,sid).map(r=>`<option value="${r.id}">${esc(label(r))}</option>`).join('')});});
 $('#f-lease_id')?.addEventListener('change',()=>{let l=rec($('#f-lease_id').value);if(l){$('#f-rent').value=l.rent||0;$('#f-charges').value=l.charges||0;}});
+if(kind==='tasks'){
+    $('#f-task-important')?.addEventListener('click',()=>{let btn=$('#f-task-important'),on=!btn.classList.contains('on');btn.classList.toggle('on',on);btn.setAttribute('aria-checked',String(on));$('#f-important-val').value=on?'1':'';modalDirty=true;});
+    $('#f-task-reminders-toggle')?.addEventListener('click',()=>{let btn=$('#f-task-reminders-toggle'),on=!btn.classList.contains('on');btn.classList.toggle('on',on);btn.setAttribute('aria-checked',String(on));$('#f-reminders-enabled-val').value=on?'1':'';$('#task-reminders-area').style.display=on?'':'none';modalDirty=true;});
+    $('#f-reminder-count')?.addEventListener('input',()=>{let raw=parseInt($('#f-reminder-count').value,10);if(isNaN(raw))return;let c=Math.max(1,Math.min(30,raw));let cur=$$('#task-reminder-dates input[type="date"]').map(el=>el.value);$('#task-reminder-dates').innerHTML=renderReminderDateInputs(c,cur,$('#f-due')?.value||today());modalDirty=true;});
+}
 }
 async function fileBase64(file){return new Promise((resolve,reject)=>{let r=new FileReader();r.onload=()=>resolve(r.result.split(',')[1]);r.onerror=()=>reject(new Error('Impossible de lire le fichier.'));r.readAsDataURL(file);});}
-async function submitForm(form){let btn=$('button[form="edit-form"]');btn.disabled=true;try{let d=Object.fromEntries(new FormData(form)),kind=form.dataset.kind,id=form.dataset.id, sid=$('#f-sci')?.value;delete d.sci;let f=d.file;delete d.file;if(f?.size){if(f.size>12*1024*1024)throw new Error('Pièce jointe limitée à 12 Mo.');d.blob=await fileBase64(f);d.filename=f.name;d.mime=f.type;}let result=await (await api('save',{kind,id,sci:sid,data:d})).json();closeModal(true);await load();if(kind==='sci'&&!id)navigate(result.id);else render();notify('Enregistré dans data.db.');}catch(e){modalError(e);btn.disabled=false;}}
-function deletion(kind,id){let r=kind==='sci'?sci(id):rec(id);if(!r)return;let isSci=kind==='sci';openModal(isSci?'Supprimer cette société ?':'Supprimer cet élément ?',`<p>Vous allez supprimer <strong>${esc(label(r))}</strong>.</p><p class="sub" style="margin:12px 0">${isSci?'Tous les biens, baux, paiements, documents et autres données de cette SCI seront supprimés. Cette action est irréversible sans sauvegarde.':'Les éléments utilisés par un bail, un appel ou un paiement sont protégés contre la suppression.'}</p>${isSci?field('confirmation','Pour confirmer, saisissez le nom exact de la SCI','text','',null,true,true):''}`,`<button data-action="close-modal">Annuler</button><button class="danger" id="confirm-delete">${icon('trash')} Supprimer définitivement</button>`);$('#confirm-delete').onclick=async()=>{let btn=$('#confirm-delete');btn.disabled=true;try{await api('delete',{kind,id,confirmation:$('#f-confirmation')?.value});closeModal(true);if(isSci)page='dashboard';await refresh();notify('Élément supprimé.');}catch(e){modalError(e);btn.disabled=false;}};}
+async function submitForm(form){let btn=$('button[form="edit-form"]');btn.disabled=true;try{let d=Object.fromEntries(new FormData(form)),kind=form.dataset.kind,id=form.dataset.id, sid=$('#f-sci')?.value;delete d.sci;let f=d.file;delete d.file;if(f?.size){if(f.size>500*1024*1024)throw new Error('Pièce jointe limitée à 500 Mo.');d.blob=await fileBase64(f);d.filename=f.name;d.mime=f.type;}
+if(kind==='properties'){
+    let keep=typeof d.photo_existing==='string'?d.photo_existing:'';
+    delete d.photo_existing;
+    let baked=(!photoCrop.removed&&photoCrop.img&&(photoCrop.dirty||!keep))?photoCropBake():'';
+    let out=photoCrop.removed?'':(baked||keep);
+    if(out){d.photo=out;d.photo_x=Math.round(photoCrop.x);d.photo_y=Math.round(photoCrop.y);d.photo_zoom=Number(photoCrop.zoom.toFixed(2));}
+    else{delete d.photo;delete d.photo_x;delete d.photo_y;delete d.photo_zoom;}
+}
+if(kind==='tasks'){
+    d.important=($('#f-important-val')?.value==='1');
+    d.reminders_enabled=($('#f-reminders-enabled-val')?.value==='1');
+    Object.keys(d).forEach(k=>{if(k.startsWith('reminder_date_'))delete d[k];});
+    if(d.reminders_enabled){
+        let c=Math.max(1,Math.min(30,parseInt($('#f-reminder-count')?.value,10)||1));
+        d.reminders=Array.from({length:c},(_,i)=>$('#f-reminder-date-'+i)?.value||d.due||today());
+        d.reminder_count=d.reminders.length;
+    }else{
+        d.reminders=[];d.reminder_count=0;
+    }
+    if(!id){
+        d.read_reminders=[];
+    }else if(taskEditSnapshot&&taskEditSnapshot.id===id){
+        let newlyImp=d.important&&!taskEditSnapshot.wasImportant;
+        let newlyRem=d.reminders_enabled&&!taskEditSnapshot.wasRemindersEnabled;
+        let remChanged=JSON.stringify(d.reminders)!==JSON.stringify(taskEditSnapshot.prevReminders);
+        if(newlyImp||newlyRem){
+            d.read_reminders=[];
+        }else if(remChanged){
+            let prevRead=new Set(taskEditSnapshot.prevReadReminders);
+            d.read_reminders=d.reminders.filter((dt,idx)=>taskEditSnapshot.prevReminders[idx]===dt&&prevRead.has(dt));
+        }else{
+            d.read_reminders=rec(id)?.read_reminders||taskEditSnapshot.prevReadReminders||[];
+        }
+        if(newlyImp||newlyRem||remChanged){
+            [...shownMacNotifs].forEach(k=>{if(k.startsWith(id+':'))shownMacNotifs.delete(k);});
+        }
+    }
+}
+let result=await (await api('save',{kind,id,sci:sid,data:d})).json();closeModal(true);await load();if(kind==='sci'&&!id)navigate(result.id);else render();notify('Enregistré dans data.db.');}catch(e){modalError(e);btn.disabled=false;}}
+function deletion(kind,id){let r=kind==='sci'?sci(id):rec(id);if(!r)return;let isSci=kind==='sci';openModal(isSci?'Supprimer cette société ?':'Supprimer cet élément ?',`<p>Vous allez supprimer <strong>${esc(label(r))}</strong>.</p><p class="sub" style="margin:12px 0">${isSci?'Tous les biens, baux, paiements, documents et autres données de cette SCI seront supprimés. Cette action est irréversible sans sauvegarde.':'Les éléments utilisés par un bail, un appel ou un paiement sont protégés contre la suppression.'}</p>${isSci?field('confirmation','Pour confirmer, saisissez le nom exact de la SCI','text','',null,true,true):''}`,`<button data-action="close-modal">Annuler</button><button class="danger" id="confirm-delete">${icon('trash')} Supprimer définitivement</button>`);$('#confirm-delete').onclick=async()=>{let btn=$('#confirm-delete');btn.disabled=true;try{await api('delete',{kind,id,confirmation:$('#f-confirmation')?.value});if(kind==='tasks')dismissMacNotification(id);closeModal(true);if(isSci)page='dashboard';await refresh();notify('Élément supprimé.');}catch(e){modalError(e);btn.disabled=false;}};}
 function exportModal(){openModal('Exporter vos données',`<div class="notice">JSON : export réimportable, pièces jointes incluses. CSV : mouvements uniquement, destiné aux tableurs. Les réglages sont inclus uniquement dans la sauvegarde complète.</div><h3>1. Sociétés à inclure</h3><div class="checks">${S.scis.map(s=>`<label class="check"><input type="checkbox" name="export-sci" value="${s.id}" ${!currentSCI()||s.id===page?'checked':''}>${esc(s.name)}</label>`).join('')}</div><h3>2. Données à exporter</h3><div class="checks" id="export-kinds">${Object.entries(kindNames).map(([k,n])=>`<label class="check"><input type="checkbox" name="export-kind" value="${k}" checked>${n}</label>`).join('')}</div>${field('format','3. Format','select','json',[['json','JSON Dominis — réimportable'],['csv','CSV — mouvements de trésorerie']])}<p class="compact-note">Les fiches SCI sont toujours incluses en JSON. Les dépendances sont ajoutées automatiquement (ex. paiements → appels → baux → biens). Toutes les dates sont exportées, sans filtre d’exercice.</p><div id="export-summary" class="notice" style="margin:15px 0 0"></div>`,`<button data-action="close-modal">Annuler</button><button class="primary" id="do-export">${icon('download')} Télécharger l’export</button>`,true);
 let summary=()=>{let ids=$$('input[name=export-sci]:checked').map(e=>e.value),k=$$('input[name=export-kind]:checked').map(e=>e.value);$('#export-summary').textContent=ids.length+' SCI · '+rowsAllSelected(ids,k)+' éléments sélectionnés, hors dépendances.';};function rowsAllSelected(ids,k){return S.records.filter(r=>ids.includes(r.sci)&&k.includes(r.kind)).length;}
 $('#f-format').onchange=()=>{let csv=$('#f-format').value==='csv';$$('input[name=export-kind]').forEach(e=>{e.disabled=csv;e.checked=csv?e.value==='entries':true});summary();};$$('input[name=export-sci],input[name=export-kind]').forEach(e=>e.onchange=summary);summary();
@@ -6432,27 +7371,56 @@ $('#do-export').onclick=async()=>{let btn=$('#do-export');btn.disabled=true;try{
 }
 async function download(res,name){let blob=await res.blob();if(S.native){await api('native-save',{filename:name,blob:await fileBase64(blob)});return;}let url=URL.createObjectURL(blob);let a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),2000);}
 function downloadText(text,name,type='text/html;charset=utf-8'){if(S.native){fileBase64(new Blob([text],{type})).then(blob=>api('native-save',{filename:name,blob})).catch(e=>notify(e.message,true));return;}let a=document.createElement('a'),u=URL.createObjectURL(new Blob([text],{type}));a.href=u;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(u),3000);}
-function importModal(){importData=null;openModal('Importer, en toute maîtrise',`<div class="notice">Aucune donnée existante n’est écrasée. L’import ajoute de nouveaux éléments ; vérifiez les doublons si vous importez plusieurs exports qui se recouvrent.</div>${field('import-format','Format du fichier','select','json',[['json','JSON — export Dominis'],['csv','CSV — mouvements de trésorerie'],['xlsx','Excel — tableaux de trésorerie (.xlsx)']])}<div class="file-drop">Sélectionnez le fichier à analyser<input id="import-file" type="file" accept=".json,.csv,.xlsx" aria-label="Fichier à importer"></div><p class="sub">CSV UTF-8 : <code>date;label;direction;category;amount</code><br>Dates AAAA-MM-JJ · direction Recette ou Dépense · montants positifs.<br>Colonne facultative « sci » : les lignes sont regroupées par société. Vous choisissez une destination existante pour chaque groupe avant l’import.<br><br>Excel .xlsx : un ou plusieurs tableaux <code>Date · Libellé · Débit · Crédit · Solde</code>,<br>sur une ou plusieurs feuilles. Titres, soldes et totaux sont reconnus ; les lignes<br>de solde servent de contrôle de cohérence et ne sont pas importées.</p><button class="text-link" id="csv-template" style="margin-top:10px">Télécharger un modèle CSV →</button><div id="import-preview"></div>`,`<button data-action="close-modal">Annuler</button><button class="primary" id="analyze-import">${icon('search')} Analyser le fichier</button>`,true);
+async function detectAndReadImportFile(file,chosenFmt){
+    let buf=await file.arrayBuffer(),u8=new Uint8Array(buf);
+    let isZip=u8.length>=4&&u8[0]===0x50&&u8[1]===0x4b&&u8[2]===0x03&&u8[3]===0x04;
+    if(isZip)return {format:'xlsx',text:await fileBase64(file)};
+    if(chosenFmt==='xlsx')return {format:'xlsx',text:await fileBase64(file)};
+    let txt;
+    try{txt=new TextDecoder('utf-8',{fatal:true}).decode(buf);}
+    catch(e){txt=new TextDecoder('windows-1252').decode(buf);}
+    let trimmed=txt.replace(/^\ufeff/,'').trimStart();
+    let fname=(file.name||'').toLowerCase();
+    if(chosenFmt==='json'&&!trimmed.startsWith('{')&&!trimmed.startsWith('[')&&(fname.endsWith('.csv')||trimmed.includes(';')))return {format:'csv',text:txt};
+    if(chosenFmt==='csv'&&trimmed.startsWith('{')&&fname.endsWith('.json'))return {format:'json',text:txt};
+    return {format:chosenFmt,text:txt};
+}
+function importModal(){importData=null;openModal('Importer, en toute maîtrise',`<div class="notice">Aucune donnée existante n’est écrasée. L’import ajoute de nouveaux éléments ; vérifiez les doublons si vous importez plusieurs exports qui se recouvrent.</div>${field('import-format','Format du fichier','select','json',[['json','JSON — export Dominis'],['csv','CSV — mouvements de trésorerie'],['xlsx','Excel — tableaux de trésorerie (.xlsx)']])}<div class="file-drop">Sélectionnez le fichier à analyser<input id="import-file" type="file" accept=".json,.csv,.xlsx" aria-label="Fichier à importer"></div><p class="sub">CSV UTF-8 : <code>date;label;direction;category;amount</code> (ou tableau exporté avec colonnes <code>Date · Libellé · Débit · Crédit · Solde</code>)<br>Dates AAAA-MM-JJ ou JJ/MM/AAAA · direction Recette ou Dépense · montants positifs.<br>Colonne facultative « sci » : les lignes sont regroupées par société. Vous choisissez une destination existante pour chaque groupe avant l’import.<br><br>Excel .xlsx : un ou plusieurs tableaux <code>Date · Libellé · Débit · Crédit · Solde</code>,<br>sur une ou plusieurs feuilles (y compris une feuille par année). Titres, soldes de début/fin de mois et totaux sont reconnus ; les lignes de solde servent de contrôle de cohérence et ne sont pas importées comme opérations.</p><button class="text-link" id="csv-template" style="margin-top:10px">Télécharger un modèle CSV →</button><div id="import-preview"></div>`,`<button data-action="close-modal">Annuler</button><button class="primary" id="analyze-import">${icon('search')} Analyser le fichier</button>`,true);
 $('#csv-template').onclick=()=>downloadText('date;label;direction;category;amount\n2026-10-01;Exemple de loyer;Recette;Loyers;850.00\n','modele-mouvements.csv','text/csv;charset=utf-8');
 $('#analyze-import').onclick=analyzeImport;
-$('#import-file').onchange=$('#f-import-format').onchange=()=>{importData=null;$('#import-preview').innerHTML='';$('#csv-template').style.display=$('#f-import-format').value==='csv'?'':'none';$('#analyze-import').innerHTML=icon('search')+' Analyser le fichier';$('#analyze-import').onclick=analyzeImport;};
+const resetImportUi=()=>{importData=null;$('#import-preview').innerHTML='';let err=$('#modal-error');if(err){err.className='';err.textContent='';}$('#csv-template').style.display=$('#f-import-format').value==='csv'?'':'none';$('#analyze-import').innerHTML=icon('search')+' Analyser le fichier';$('#analyze-import').onclick=analyzeImport;};
+$('#f-import-format').onchange=resetImportUi;
+$('#import-file').onchange=async()=>{
+    let f=$('#import-file').files[0];
+    if(f){
+        try{
+            let head=new Uint8Array(await f.slice(0,4).arrayBuffer());
+            let isZip=head.length>=4&&head[0]===0x50&&head[1]===0x4b&&head[2]===0x03&&head[3]===0x04;
+            let nm=(f.name||'').toLowerCase();
+            if(isZip||nm.endsWith('.xlsx'))$('#f-import-format').value='xlsx';
+            else if(nm.endsWith('.csv'))$('#f-import-format').value='csv';
+            else if(nm.endsWith('.json'))$('#f-import-format').value='json';
+        }catch(e){}
+    }
+    resetImportUi();
+};
 $('#csv-template').style.display=$('#f-import-format').value==='csv'?'':'none';}
-async function analyzeImport(){let btn=$('#analyze-import');btn.disabled=true;try{let file=$('#import-file').files[0];if(!file)throw new Error('Sélectionnez un fichier.');if(file.size>60*1024*1024)throw new Error('Import limité à 60 Mo.');let fmt=$('#f-import-format').value;importData={format:fmt,text:fmt==='xlsx'?await fileBase64(file):await file.text()};let b=await (await api('import-preview',importData)).json();$('#import-preview').innerHTML=`<h3 style="margin:25px 0 12px">Vérifiez les sources et choisissez les destinations</h3>${b.scis.map(s=>`<div class="panel" style="margin-bottom:10px;padding:15px"><label class="row"><input type="checkbox" name="import-source" value="${esc(s.id)}" checked><strong>${esc(s.name)}</strong></label><p class="sub" style="margin:9px 0">${Object.entries(b.counts[s.id]).filter(([k,n])=>n).map(([k,n])=>n+' '+kindNames[k].toLowerCase()).join(' · ')||'Fiche SCI seule'}${s.opening!=null&&s.opening_date?` · solde d’ouverture au ${date(s.opening_date)} : ${money(s.opening,2)}`:''}</p><select data-target="${esc(s.id)}" aria-label="Destination de ${esc(s.name)}">${importData.format==='csv'?'<option value="">Choisir la SCI de destination</option>':importData.format==='xlsx'?'<option value="new">Créer la nouvelle SCI (titre du tableau)</option>':'<option value="new">Créer une nouvelle SCI (copie)</option>'}${S.scis.map(t=>`<option value="${t.id}">Ajouter à ${esc(t.name)}</option>`).join('')}</select></div>`).join('')}${b.rows.length?`<h3>Aperçu des 5 premières lignes</h3><div class="table-wrap"><table><tbody>${b.rows.map(r=>`<tr><td>${date(r.date)}</td><td>${esc(r.label)}</td><td>${esc(r.direction)}</td><td>${money(r.amount,2)}</td></tr>`).join('')}</tbody></table></div>`:''}${b.warnings&&b.warnings.length?`<div class="notice" style="margin-top:15px"><strong>Contrôles de cohérence · ${b.warnings.length} avertissement${b.warnings.length>1?'s':''}</strong><ul style="margin:9px 0 0;padding-left:18px;line-height:1.65">${b.warnings.map(w=>`<li>${esc(w)}</li>`).join('')}</ul></div>`:''}<p class="compact-note">Dans une SCI existante, la fiche société et les réglages sont conservés. Tous les éléments sélectionnés sont ajoutés, sans fusion automatique.</p>`;btn.innerHTML=icon('check')+' Confirmer l’import';btn.onclick=async()=>{btn.disabled=true;try{let mapping={};$$('input[name=import-source]:checked').forEach(e=>{let target=$$('select[data-target]').find(t=>t.dataset.target===e.value);mapping[e.value]=target.value;});if(Object.values(mapping).some(v=>!v))throw new Error('Choisissez une SCI de destination.');let r=await (await api('import',{...importData,mapping})).json();closeModal(true);await refresh();notify(r.count+' éléments importés.');}catch(e){modalError(e);btn.disabled=false;}};}catch(e){modalError(e)}finally{btn.disabled=false;}}
-function restoreModal(){openModal('Restaurer tout l’espace',`<div class="notice">Cette action remplace toutes les SCI, documents, réglages et préférences. Une copie automatique de la base actuelle sera créée dans sauvegardes/ avant la restauration.</div>${field('restore-file','Sauvegarde Dominis .db (100 Mo maximum)','file','',null,true,true)}<div style="margin-top:18px">${field('confirm-restore','Saisissez RESTAURER pour confirmer','text','',null,true,true)}</div>`,`<button data-action="close-modal">Annuler</button><button class="danger" id="do-restore">${icon('clock')} Restaurer la sauvegarde</button>`);$('#f-restore-file').accept='.db';$('#do-restore').onclick=async()=>{let b=$('#do-restore');b.disabled=true;try{if($('#f-confirm-restore').value!=='RESTAURER')throw new Error('Saisissez RESTAURER pour confirmer.');let f=$('#f-restore-file').files[0];if(!f)throw new Error('Choisissez la sauvegarde.');if(f.size>100*1024*1024)throw new Error('Maximum 100 Mo.');await settingsQueue;await api('restore',{blob:await fileBase64(f)});closeModal(true);await load();page='dashboard';tab='overview';render();notify('Sauvegarde restaurée.');}catch(e){modalError(e);b.disabled=false;}};}
+async function analyzeImport(){let btn=$('#analyze-import');btn.disabled=true;let err=$('#modal-error');if(err){err.className='';err.textContent='';}try{let file=$('#import-file').files[0];if(!file)throw new Error('Sélectionnez un fichier.');if(file.size>500*1024*1024)throw new Error('Import limité à 500 Mo.');let fmt=$('#f-import-format').value;importData=await detectAndReadImportFile(file,fmt);if($('#f-import-format')&&$('#f-import-format').value!==importData.format){$('#f-import-format').value=importData.format;$('#csv-template').style.display=importData.format==='csv'?'':'none';}let b=await (await api('import-preview',importData)).json();$('#import-preview').innerHTML=`<h3 style="margin:25px 0 12px">Vérifiez les sources et choisissez les destinations</h3>${b.scis.map(s=>{let isTableSrc=importData.format==='xlsx'||String(s.id||'').startsWith('xlsx_');let hasOpening=s.opening!=null&&Number(s.opening)!==0&&s.opening_date;return `<div class="panel" style="margin-bottom:10px;padding:15px"><label class="row"><input type="checkbox" name="import-source" value="${esc(s.id)}" checked><strong>${esc(s.name)}</strong></label><p class="sub" style="margin:9px 0">${Object.entries(b.counts[s.id]).filter(([k,n])=>n).map(([k,n])=>n+' '+kindNames[k].toLowerCase()).join(' · ')||'Fiche SCI seule'}${hasOpening?` · solde d’ouverture au ${date(s.opening_date)} : ${money(s.opening,2)}`:''}</p><select data-target="${esc(s.id)}" aria-label="Destination de ${esc(s.name)}">${(importData.format==='csv'&&!isTableSrc)?'<option value="">Choisir la SCI de destination</option>':isTableSrc?'<option value="new">Créer la nouvelle SCI (titre du tableau)</option>':'<option value="new">Créer une nouvelle SCI (copie)</option>'}${S.scis.map(t=>`<option value="${t.id}">Ajouter à ${esc(t.name)}</option>`).join('')}</select></div>`;}).join('')}${b.rows.length?`<h3>Aperçu des 5 premières lignes</h3><div class="table-wrap"><table><tbody>${b.rows.map(r=>`<tr><td>${date(r.date)}</td><td>${esc(r.label)}</td><td>${esc(r.direction)}</td><td class="align-right"><span class="${r.direction==='Recette'?'green':'red'}">${r.direction==='Recette'?'+':'−'} ${money(r.amount,2)}</span></td></tr>`).join('')}</tbody></table></div>`:''}${b.warnings&&b.warnings.length?`<div class="notice" style="margin-top:15px"><strong>Contrôles de cohérence · ${b.warnings.length} avertissement${b.warnings.length>1?'s':''}</strong><ul style="margin:9px 0 0;padding-left:18px;line-height:1.65">${b.warnings.map(w=>`<li>${esc(w)}</li>`).join('')}</ul></div>`:''}<p class="compact-note">Dans une SCI existante, la fiche société et les réglages sont conservés. Tous les éléments sélectionnés sont ajoutés, sans fusion automatique.</p>`;btn.innerHTML=icon('check')+' Confirmer l’import';btn.onclick=async()=>{btn.disabled=true;try{let mapping={};$$('input[name=import-source]:checked').forEach(e=>{let target=$$('select[data-target]').find(t=>t.dataset.target===e.value);mapping[e.value]=target.value;});if(!Object.keys(mapping).length)throw new Error('Sélectionnez au moins une source à importer.');if(Object.values(mapping).some(v=>!v))throw new Error('Choisissez une SCI de destination.');let r=await (await api('import',{...importData,mapping})).json();if(Array.isArray(b.years)&&b.years.length&&!b.years.includes(activeYear()))await setPref({year:b.years[b.years.length-1]});closeModal(true);await refresh();notify(r.count+' éléments importés.');}catch(e){modalError(e);btn.disabled=false;}};}catch(e){modalError(e)}finally{btn.disabled=false;}}
+function restoreModal(){openModal('Restaurer tout l’espace',`<div class="notice">Cette action remplace toutes les SCI, documents, réglages et préférences. Une copie automatique de la base actuelle sera créée dans sauvegardes/ avant la restauration.</div>${field('restore-file','Sauvegarde Dominis .db (500 Mo maximum)','file','',null,true,true)}<div style="margin-top:18px">${field('confirm-restore','Saisissez RESTAURER pour confirmer','text','',null,true,true)}</div>`,`<button data-action="close-modal">Annuler</button><button class="danger" id="do-restore">${icon('clock')} Restaurer la sauvegarde</button>`);$('#f-restore-file').accept='.db';$('#do-restore').onclick=async()=>{let b=$('#do-restore');b.disabled=true;try{if($('#f-confirm-restore').value!=='RESTAURER')throw new Error('Saisissez RESTAURER pour confirmer.');let f=$('#f-restore-file').files[0];if(!f)throw new Error('Choisissez la sauvegarde.');if(f.size>500*1024*1024)throw new Error('Maximum 500 Mo.');await settingsQueue;await api('restore',{blob:await fileBase64(f)});closeModal(true);await load();page='dashboard';tab='overview';render();notify('Sauvegarde restaurée.');}catch(e){modalError(e);b.disabled=false;}};}
 function callsModal(){if(!currentSCI())return;openModal('Appeler les loyers du mois',`<div class="notice">SCI destinataire : <strong>${esc(currentSCI().name)}</strong>.<br>Un appel est créé pour chaque bail actif du mois. Les doublons bail/mois sont ignorés. Vérifiez les proratas et les dates d’exigibilité : la date par défaut est le 5.</div>${field('period','Mois à appeler','month',today().slice(0,7),null,true)}`,`<button data-action="close-modal">Annuler</button><button class="primary" id="generate-confirm">Générer les appels</button>`);$('#generate-confirm').onclick=async()=>{let b=$('#generate-confirm');b.disabled=true;try{let r=await (await api('generate-calls',{sci:page,period:$('#f-period').value})).json();closeModal(true);await refresh();notify(r.count+' appels créés. Vérifiez les proratas.');}catch(e){modalError(e);b.disabled=false;}};}
 function receipt(id){let c=rec(id),l=rec(c.lease_id),s=sci(c.sci),p=rec(l?.property_id);if(due(c)>.005)return notify('La quittance nécessite le règlement intégral.',true);let total=Number(c.rent||0)+Number(c.charges||0);let doc=`<!doctype html><html lang="fr"><meta charset="utf-8"><title>Quittance de loyer</title><style>body{font:15px Arial;color:#263028;max-width:760px;margin:60px auto;padding:35px}h1{font:36px Georgia}header{border-bottom:2px solid #b49c67;padding-bottom:25px}p{line-height:1.8}table{width:100%;margin:30px 0;border-collapse:collapse}td{padding:15px;border-bottom:1px solid #ddd}small{color:#666}.right{text-align:right}@media print{body{margin:0}button{display:none}}</style><header><small>DOMINIS · GESTION PATRIMONIALE</small><h1>Quittance de loyer</h1><p>Période : <strong>${esc(c.period)}</strong></p></header><p><strong>Bailleur :</strong> ${esc(s.name)}<br>${esc(s.address)}<br><strong>Locataire :</strong> ${esc(l?.tenant)}<br><strong>Bien loué :</strong> ${esc(p?.address)}</p><p>Le bailleur reconnaît avoir reçu le règlement intégral des sommes indiquées ci-dessous pour la période précisée et en donne quittance, sous réserve des droits du bailleur et des sommes pouvant rester dues pour d’autres périodes.</p><table><tr><td>Loyer hors charges</td><td class="right">${money(c.rent,2)}</td></tr><tr><td>Charges</td><td class="right">${money(c.charges,2)}</td></tr><tr><td><strong>Total payé</strong></td><td class="right"><strong>${money(total,2)}</strong></td></tr></table><p>Établie le ${date(today())}<br>Le bailleur : ${esc(s.manager||s.name)}</p><p><small>Document généré à partir des paiements enregistrés. À vérifier et à signer par le bailleur. La quittance ne vaut pas renonciation à d’autres sommes éventuellement dues.</small></p><button onclick="window.print()">Imprimer / enregistrer en PDF</button></html>`;downloadText(doc,'quittance-'+c.period+'.html');notify('Quittance HTML téléchargée. Ouvrez-la pour imprimer en PDF.');}
 function searchModal(){openModal('Retrouver l’essentiel',`<input id="global-search" type="search" placeholder="Une SCI, un locataire, un bien, un document…" aria-label="Recherche globale"><div id="search-results" class="search-results" style="margin-top:15px"></div>`);let search=()=>{let q=$('#global-search').value.toLowerCase().trim();let list=[...S.scis.map(s=>({...s,kind:'sci'})),...S.records].filter(r=>q&&Object.values(r).some(v=>typeof v==='string'&&v.toLowerCase().includes(q))).slice(0,30);$('#search-results').innerHTML=list.map(r=>`<button class="search-result" data-search-go="${r.id}" data-search-kind="${r.kind}">${icon(r.kind==='sci'?'building':'file')}<span>${esc(label(r))}<small>${r.kind==='sci'?'Société':esc(sciname(r.sci))+' · '+kindNames[r.kind]}</small></span></button>`).join('')||`<p class="sub">${q?'Aucun résultat.':'La recherche porte sur toutes les SCI et les métadonnées des documents.'}</p>`;};$('#global-search').oninput=search;search();}
 async function quit(){if(closing||updateInstalling)return;if($('#modal').innerHTML&&modalDirty&&!confirm('Des modifications de formulaire ne sont pas enregistrées. Les abandonner et quitter ?'))return;openModal('Quitter en toute sérénité',`<p>Les écritures enregistrées et les réglages seront synchronisés, puis l’intégrité de la base sera vérifiée.</p><p class="sub" style="margin-top:12px">${S.settings.auto_backup?'Une sauvegarde complète sera créée dans sauvegardes/. ':''}${S.preview?'Mode aperçu : le service de démonstration restera disponible.':S.native?'La fenêtre et le processus local seront fermés.':'En mode navigateur, la fermeture automatique de l’onglet peut être bloquée ; le serveur sera bien arrêté.'}</p>`,`<button data-action="close-modal">Rester dans Dominis</button><button class="primary" id="confirm-quit">${icon('exit')} Enregistrer et quitter</button>`);$('#confirm-quit').onclick=async()=>{closing=true;$('#confirm-quit').disabled=true;try{await settingsQueue;await api('quit',{});closeModal(true);if(S.preview){notify('Intégrité vérifiée, données sauvegardées. Le service reste actif dans cet aperçu.');await refresh();}else{$('#main').innerHTML=empty('Votre espace est fermé.','Toutes les données enregistrées ont été sauvegardées. Vous pouvez fermer cet onglet.');setTimeout(()=>window.close(),400);}}catch(e){modalError(e);$('#confirm-quit')&&($('#confirm-quit').disabled=false);}finally{closing=false;}};}
 function quickModal(){openModal('Une action, sans détour',`<div class="checks">${Object.entries(kindNames).map(([k,n])=>`<button data-add="${k}" style="justify-content:flex-start">${icon('plus')}${n}</button>`).join('')}</div>`);}
-async function handleAction(a){switch(a){case'collapse':await setPref({collapsed:!S.settings.collapsed});document.body.classList.toggle('collapsed',!!S.settings.collapsed);if(page==='settings')render();break;case'new-sci':editForm('sci');break;case'edit-sci':editForm('sci',currentSCI());break;case'delete-sci':deletion('sci',page);break;case'close-modal':closeModal();break;case'export':exportModal();break;case'import':importModal();break;case'backup':await settingsQueue;await download(await api('backup',{}),'dominis-sauvegarde-'+today()+'.db');await refresh();notify('Sauvegarde complète téléchargée. Conservez-la sur un support sûr.');break;case'restore':restoreModal();break;case'generate-calls':callsModal();break;case'search':searchModal();break;case'quick':quickModal();break;case'annual-report':annualReport();break;case'quit':await quit();break;case'auto-backup':await setPref({auto_backup:!S.settings.auto_backup});render();break;case'weekly-auto-save':await setPref({weekly_auto_save:!S.settings.weekly_auto_save});render();break;case'rename-space':openModal('Nom de votre espace',field('owner','Nom affiché','text',S.settings.owner),`<button data-action="close-modal">Annuler</button><button class="primary" id="save-owner">Enregistrer</button>`);$('#save-owner').onclick=async()=>{try{let v=$('#f-owner').value.trim();if(!v||v.length>45)throw new Error('Choisissez un nom de 1 à 45 caractères.');await setPref({owner:v});closeModal(true);render();}catch(e){modalError(e)}};break;case'reset-demo':openModal('Repartir d’un espace vierge',`<p class="sub">Toutes les SCI et données de cette démonstration seront supprimées, y compris vos ajouts. Vos préférences d’apparence sont conservées. Créez une sauvegarde avant de continuer.</p><div style="margin-top:15px">${field('confirm-demo','Saisissez EFFACER pour confirmer')}</div>`,`<button data-action="close-modal">Annuler</button><button class="danger" id="reset-confirm">Vider la démonstration</button>`);$('#reset-confirm').onclick=async()=>{try{await api('reset-demo',{confirmation:$('#f-confirm-demo').value});closeModal(true);page='dashboard';await refresh();notify('Votre espace est maintenant vierge.');}catch(e){modalError(e)}};break;}}
-document.addEventListener('click',async ev=>{let el=ev.target.closest('button,[data-nav]');if(!el)return;try{if(updateInstalling)return;if(el.dataset.settingsSection){settingsSection=el.dataset.settingsSection;render();return;}if(el.dataset.updateAction){let a=el.dataset.updateAction;if(a==='check'){updateInfo=await (await api('update/check',{})).json();render();}else if(a==='offer')showUpdateOffer();else if(a==='install')await beginUpdate();return;}if(el.dataset.nav){navigate(el.dataset.nav,el.dataset.tab||'overview');return;}if(el.dataset.tab){tab=el.dataset.tab;query='';filter='';setPref({last_tab:tab});render();return;}if(el.dataset.action){await handleAction(el.dataset.action);return;}if(el.dataset.add){editForm(el.dataset.add);return;}if(el.dataset.edit){let r=rec(el.dataset.edit);editForm(r.kind,r);return;}if(el.dataset.delete){let r=rec(el.dataset.delete);deletion(r.kind,r.id);return;}if(el.dataset.pay){let c=rec(el.dataset.pay);editForm('entries',null,{sci:c.sci,label:'Loyer '+label(rec(c.lease_id))+' · '+c.period,call_id:c.id,amount:due(c),direction:'Recette',category:'Loyers'});$('#f-sci').value=c.sci;$('#f-sci').disabled=true;return;}if(el.dataset.receipt){receipt(el.dataset.receipt);return;}if(el.dataset.document){let r=rec(el.dataset.document);await download(await api('document?id='+r.id),r.filename||'document');return;}if(el.dataset.complete){let r=rec(el.dataset.complete);await api('save',{kind:r.kind,id:r.id,sci:r.sci,data:{...r,status:'Terminé'}});await refresh();notify('Échéance terminée.');return;}if(el.dataset.theme){await setPref({theme:el.dataset.theme});render();return;}if(el.dataset.move){let o=navOrder(),i=o.indexOf(el.dataset.move),j=i+Number(el.dataset.dir);if(j>=0&&j<o.length){[o[i],o[j]]=[o[j],o[i]];await setPref({order:o});render();}return;}if(el.dataset.searchGo){let id=el.dataset.searchGo,kind=el.dataset.searchKind;closeModal(true);if(kind==='sci')navigate(id);else{let r=rec(id);navigate(r.sci,kind);editForm(kind,r);}return;}}catch(e){notify(e.message,true);}});
-document.addEventListener('change',async ev=>{let el=ev.target;try{if(el.id==='year'){await setPref({year:Number(el.value)});render();}if(el.id==='scope'){scope=el.value;render();}if(el.id==='status-filter'){filter=el.value;renderListing();}}catch(e){notify(e.message,true)}});
-document.addEventListener('input',ev=>{if(ev.target.id==='filter-search'){query=ev.target.value;renderListing();}if(ev.target.closest('#modal')&&!['global-search'].includes(ev.target.id))modalDirty=true;});
+async function handleAction(a){switch(a){case'collapse':await setPref({collapsed:!S.settings.collapsed});document.body.classList.toggle('collapsed',!!S.settings.collapsed);if(page==='settings')render();break;case'bell':openBellModal();break;case'new-sci':editForm('sci');break;case'edit-sci':editForm('sci',currentSCI());break;case'delete-sci':deletion('sci',page);break;case'close-modal':closeModal();break;case'export':exportModal();break;case'import':importModal();break;case'backup':await settingsQueue;await download(await api('backup',{}),'dominis-sauvegarde-'+today()+'.db');await refresh();notify('Sauvegarde complète téléchargée. Conservez-la sur un support sûr.');break;case'restore':restoreModal();break;case'generate-calls':callsModal();break;case'search':searchModal();break;case'quick':quickModal();break;case'annual-report':annualReport();break;case'doc-folder-new':newDocFolderModal();break;case'quit':await quit();break;case'auto-backup':await setPref({auto_backup:!S.settings.auto_backup});render();break;case'weekly-auto-save':await setPref({weekly_auto_save:!S.settings.weekly_auto_save});render();break;case'rename-space':openModal('Nom de votre espace',field('owner','Nom affiché','text',S.settings.owner),`<button data-action="close-modal">Annuler</button><button class="primary" id="save-owner">Enregistrer</button>`);$('#save-owner').onclick=async()=>{try{let v=$('#f-owner').value.trim();if(!v||v.length>45)throw new Error('Choisissez un nom de 1 à 45 caractères.');await setPref({owner:v});closeModal(true);render();}catch(e){modalError(e)}};break;case'reset-demo':openModal('Repartir d’un espace vierge',`<p class="sub">Toutes les SCI et données de cette démonstration seront supprimées, y compris vos ajouts. Vos préférences d’apparence sont conservées. Créez une sauvegarde avant de continuer.</p><div style="margin-top:15px">${field('confirm-demo','Saisissez EFFACER pour confirmer')}</div>`,`<button data-action="close-modal">Annuler</button><button class="danger" id="reset-confirm">Vider la démonstration</button>`);$('#reset-confirm').onclick=async()=>{try{await api('reset-demo',{confirmation:$('#f-confirm-demo').value});closeModal(true);page='dashboard';await refresh();notify('Votre espace est maintenant vierge.');}catch(e){modalError(e)}};break;}}
+document.addEventListener('click',async ev=>{let el=ev.target.closest('button,[data-nav],[data-doc-open],[data-doc-folder]');if(!el)return;try{if(updateInstalling)return;if(el.dataset.folderNew){newDocFolderModal();return;}if(el.dataset.folderRename){renameDocFolderModal(el.dataset.folderRename);return;}if(el.dataset.folderDelete){deleteDocFolder(el.dataset.folderDelete);return;}if(el.dataset.docFolder!==undefined&&el.dataset.docFolder!==null&&el.dataset.docOpen===undefined){docFolder=el.dataset.docFolder;renderListing();return;}if(el.dataset.docOpen){await documentPreview(el.dataset.docOpen);return;}if(el.dataset.documentPreview){await documentPreview(el.dataset.documentPreview);return;}if(el.dataset.docZoom){let v=el.dataset.docZoom;if(v==='in')docPreviewStageZoom(docPreviewZoom+0.25);else if(v==='out')docPreviewStageZoom(docPreviewZoom-0.25);else docPreviewStageZoom(Number(v)/100);return;}if(el.dataset.docSheet!==undefined&&el.dataset.docSheet!==null){docPreviewSheetSelect(Number(el.dataset.docSheet));return;}if(el.dataset.macClose){dismissMacNotification(el.dataset.macClose);return;}if(el.dataset.macView){let id=el.dataset.macView,r=rec(id);await markTaskRemindersRead(id);if(r){closeModal(true);navigate(r.sci,'tasks');editForm('tasks',r);}return;}if(el.dataset.bellView){let id=el.dataset.bellView,r=rec(id);await markTaskRemindersRead(id);closeModal(true);if(r){navigate(r.sci,'tasks');editForm('tasks',r);}return;}if(el.dataset.bellRead){await markTaskRemindersRead(el.dataset.bellRead);if($('#bell-modal-body'))openBellModal();return;}if(el.dataset.bellReadAll){for(let r of unreadReminderTasks())await markTaskRemindersRead(r.id);if($('#bell-modal-body'))openBellModal();return;}if(el.dataset.bellAgenda){closeModal(true);navigate('agenda');return;}if(el.dataset.tableConfig){openTableColumnsModal(el.dataset.tableConfig);return;}if(el.dataset.colToggle){let k=el.dataset.colKind,cid=el.dataset.colToggle,cols=getTableColumns(k),c=cols.find(x=>x.id===cid);if(c){if(c.visible&&cols.filter(x=>x.visible).length<=1)return;c.visible=!c.visible;await saveTableColumns(k,cols);if(k==='entries_preview')render();else renderListing();if($('#col-config-wrap'))$('#col-config-wrap').innerHTML=renderTableColumnsList(k);}return;}if(el.dataset.colMove){let k=el.dataset.colKind,cid=el.dataset.colMove,dir=Number(el.dataset.dir),cols=getTableColumns(k),i=cols.findIndex(x=>x.id===cid),j=i+dir;if(i>=0&&j>=0&&j<cols.length){[cols[i],cols[j]]=[cols[j],cols[i]];await saveTableColumns(k,cols);if(k==='entries_preview')render();else renderListing();if($('#col-config-wrap'))$('#col-config-wrap').innerHTML=renderTableColumnsList(k);}return;}if(el.dataset.colReset){let k=el.dataset.colReset,all={...(S.settings.table_columns||{})};delete all[k];await setPref({table_columns:all});if(k==='entries_preview')render();else renderListing();if($('#col-config-wrap'))$('#col-config-wrap').innerHTML=renderTableColumnsList(k);return;}if(el.dataset.settingsSection){settingsSection=el.dataset.settingsSection;render();return;}if(el.dataset.updateAction){let a=el.dataset.updateAction;if(a==='check'){updateInfo=await (await api('update/check',{})).json();render();}else if(a==='offer')showUpdateOffer();else if(a==='install')await beginUpdate();return;}if(el.dataset.nav){navigate(el.dataset.nav,el.dataset.tab||'overview');return;}if(el.dataset.tab){tab=el.dataset.tab;query='';filter='';setPref({last_tab:tab});render();return;}if(el.dataset.action){await handleAction(el.dataset.action);return;}if(el.dataset.add){editForm(el.dataset.add);return;}if(el.dataset.edit){let r=rec(el.dataset.edit);editForm(r.kind,r);return;}if(el.dataset.delete){let r=rec(el.dataset.delete);deletion(r.kind,r.id);return;}if(el.dataset.pay){let c=rec(el.dataset.pay);editForm('entries',null,{sci:c.sci,label:'Loyer '+label(rec(c.lease_id))+' · '+c.period,call_id:c.id,amount:due(c),direction:'Recette',category:'Loyers'});$('#f-sci').value=c.sci;$('#f-sci').disabled=true;return;}if(el.dataset.receipt){receipt(el.dataset.receipt);return;}if(el.dataset.document){let r=rec(el.dataset.document);await download(await api('document?id='+r.id),r.filename||'document');return;}if(el.dataset.complete){let r=rec(el.dataset.complete);dismissMacNotification(r.id);let reached=taskReminderDates(r).filter(d=>d&&d<=today());let read=[...new Set([...(Array.isArray(r.read_reminders)?r.read_reminders:[]),...reached])];await api('save',{kind:r.kind,id:r.id,sci:r.sci,data:{...r,status:'Terminé',read_reminders:read}});await refresh();notify('Échéance terminée.');return;}if(el.dataset.theme){await setPref({theme:el.dataset.theme});render();return;}if(el.dataset.move){let o=navOrder(),i=o.indexOf(el.dataset.move),j=i+Number(el.dataset.dir);if(j>=0&&j<o.length){[o[i],o[j]]=[o[j],o[i]];await setPref({order:o});render();}return;}if(el.dataset.searchGo){let id=el.dataset.searchGo,kind=el.dataset.searchKind;closeModal(true);if(kind==='sci')navigate(id);else{let r=rec(id);navigate(r.sci,kind);editForm(kind,r);}return;}}catch(e){notify(e.message,true);}});
+document.addEventListener('change',async ev=>{let el=ev.target;try{if(el.id==='year'){await setPref({year:Number(el.value)});render();}if(el.id==='scope'){scope=el.value;render();}if(el.id==='status-filter'){filter=el.value;renderListing();}if(el.id==='doc-preview-folder'){moveDocToFolder(docPreviewId,el.value);}}catch(e){notify(e.message,true)}});
+document.addEventListener('input',ev=>{if(ev.target.id==='filter-search'){query=ev.target.value;renderListing();}if(ev.target.id==='doc-zoom-range'){docPreviewStageZoom((Number(ev.target.value)||100)/100);}if(ev.target.closest('#modal')&&!['global-search'].includes(ev.target.id)&&!ev.target.closest('#col-config-wrap')&&!ev.target.closest('#bell-modal-body')&&!ev.target.closest('#doc-preview-body'))modalDirty=true;});
 document.addEventListener('submit',ev=>{if(ev.target.id==='edit-form'){ev.preventDefault();submitForm(ev.target);}});
 document.addEventListener('keydown',ev=>{if((ev.ctrlKey||ev.metaKey)&&ev.key.toLowerCase()==='k'){ev.preventDefault();if(!modalDirty)searchModal();}if(ev.key==='Escape'&&$('#modal').innerHTML)closeModal();if(ev.key==='Enter'&&ev.target.matches('article[data-nav]'))navigate(ev.target.dataset.nav);if(ev.key==='Tab'&&$('#modal').innerHTML){let items=$$('#modal button:not(:disabled),#modal input:not(:disabled),#modal select:not(:disabled),#modal textarea');let first=items[0],last=items[items.length-1];if(ev.shiftKey&&document.activeElement===first){ev.preventDefault();last?.focus();}else if(!ev.shiftKey&&document.activeElement===last){ev.preventDefault();first?.focus();}}});
 window.addEventListener('beforeunload',e=>{if(modalDirty||updateInstalling){e.preventDefault();e.returnValue='';}});
 window.dominisCanClose=async()=>{if(updateInstalling)return false;if(modalDirty&&!confirm('Abandonner les modifications de formulaire non enregistrées et fermer Dominis ?'))return false;try{await settingsQueue;return true;}catch(e){notify('Fermeture annulée : un réglage n’a pas pu être enregistré.',true);return false;}};
-(async()=>{try{await load();page='dashboard';tab='overview';scope='';render();if(S.auto_save_notice?.message&&!S.primary_db_missing)notify(S.auto_save_notice.message,!!S.auto_save_notice.error);pollUpdates();}catch(e){$('#main').innerHTML=empty('Impossible d’ouvrir votre espace',esc(e.message),'<button onclick="location.reload()">Réessayer</button>');}})();
+(async()=>{try{await load();page='dashboard';tab='overview';scope='';render();setInterval(checkTaskNotifications,15000);if(S.auto_save_notice?.message&&!S.primary_db_missing)notify(S.auto_save_notice.message,!!S.auto_save_notice.error);pollUpdates();}catch(e){$('#main').innerHTML=empty('Impossible d’ouvrir votre espace',esc(e.message),'<button onclick="location.reload()">Réessayer</button>');}})();
 </script></body></html>'''
 
 def on_native_closing():
