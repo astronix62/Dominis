@@ -80,6 +80,49 @@ compatibles. Le numéro de format de données n’est pas un numéro de version 
 l’application. Aucun changement de schéma ni remplacement de `data.db` n’est
 nécessaire pour le changement de nom.
 
+## Import de données
+
+Paramètres → **Importer** accepte trois formats, avec aperçu des sources, des
+destinations et des contrôles avant toute écriture :
+
+- **JSON Dominis** (ou ancien export Auréa v1) : fiches SCI et enregistrements
+  complets, réimportables à l’identique.
+- **CSV** : mouvements de trésorerie `date;label;direction;category;amount`,
+  colonne facultative « sci » pour le regroupement multi-sociétés.
+- **Excel (.xlsx)** : lecture native du format, sans dépendance supplémentaire.
+
+### Tableaux Excel pris en charge
+
+Un même classeur peut contenir **plusieurs tableaux**, sur une ou plusieurs
+feuilles, volumineux ou non, au format :
+
+```
+Date | Libellé | Débit | Crédit | Solde
+```
+
+- Les titres placés au-dessus de chaque en-tête (nom de la SCI, banque, année)
+  regroupent les mouvements par source ; un tableau sans titre rejoint le groupe
+  précédent de la même feuille, sinon il reçoit un nom dédié.
+- Les lignes **avec libellé** deviennent des opérations : la colonne **Débit**
+  est une **Dépense**, la colonne **Crédit** est une **Recette** ; un montant
+  négatif est inversé et signalé.
+- Les lignes **sans libellé** (solde d’ouverture, clôtures mensuelles, lignes de
+  totaux) ne sont pas importées : elles servent de **contrôles de cohérence**.
+  Chaque écart entre le solde attendu et le solde trouvé, ou entre les totaux
+  annoncés et les mouvements calculés, est listé dans l’aperçu avant validation.
+- Dates françaises JJ/MM/AA(A) et ISO, séries et formats de date Excel natives ;
+  montants français (`32 155,66 €`, espaces insécables, virgule décimale,
+  parenthèses négatives) et cellules numériques.
+- En-têtes reconnus même avec variantes (casse, accents, « Débit (€) »,
+  colonnes supplémentaires ignorées ; en-tête répété au milieu d’un tableau
+  accepté). Une ligne de données sans en-tête, une date ou un montant illisible
+  provoquent une erreur explicite indiquant la feuille et la ligne : aucune
+  donnée n’est perdue silencieusement.
+- À la création d’une nouvelle SCI depuis un titre de tableau, le premier solde
+  du fichier devient le solde d’ouverture. Vers une SCI existante, rien n’est
+  écrasé. Limite : 40 000 opérations par import ; un même fichier vers les
+  mêmes destinations est refusé.
+
 ## Vérifications
 
 ```sh
@@ -99,9 +142,9 @@ Le mode aperçu accepte les hôtes du proxy et doit rester limité aux environne
 de démonstration avec des données fictives. En usage personnel, conserver l’écoute
 locale par défaut.
 
-## Mises à jour intégrées — v0.0.2
+## Mises à jour intégrées — v0.0.3
 
-La version est déclarée dans `Dominis.py` par `APP_VERSION = 'v0.0.2'` et affichée
+La version est déclarée dans `Dominis.py` par `APP_VERSION = 'v0.0.3'` et affichée
 sous **Paramètres → Version**, avec les mêmes panneaux et thèmes que le reste de
 l’application. Chaque ouverture affiche le **tableau de bord général de toutes
 les SCI**, indépendamment de la dernière page consultée.
@@ -170,7 +213,7 @@ nécessitant un changement de schéma SQLite, de dépendances ou de lanceurs dev
 prévoir une procédure adaptée. Les marqueurs à conserver dans le script sont :
 
 ```python
-APP_VERSION = 'v0.0.2'  # À incrémenter pour chaque nouvelle Release.
+APP_VERSION = 'v0.0.3'  # À incrémenter pour chaque nouvelle Release.
 UPDATE_PROTOCOL = 1
 DB_SCHEMA_VERSION = 1
 MIN_PYTHON = (3, 10)
@@ -181,26 +224,26 @@ L’empreinte GitHub n’est pas une signature indépendante de l’éditeur. Pr
 l’accès au compte et au dépôt qui publient le code. Les Releases doivent être
 publiquement accessibles ; aucun secret GitHub n’est embarqué.
 
-### Préparer un scénario de mise à jour vers v0.0.2
+### Préparer un scénario de mise à jour vers v0.0.3
 
-Le fichier principal `Dominis/Dominis.py` est déclaré en **v0.0.2**. L’outil de
+Le fichier principal `Dominis/Dominis.py` est déclaré en **v0.0.3**. L’outil de
 test copie le code actuel en ne changeant que `APP_VERSION`, pour obtenir une
 copie isolée en v0.0.0. Le fichier principal, `data.db` et les sauvegardes restent
 inchangés ; aucune donnée personnelle n’est copiée.
 
-#### 1. Publier et vérifier la Release v0.0.2 avant un test réel
+#### 1. Publier et vérifier la Release v0.0.3 avant un test réel
 
 Une pull request fusionnée ne met pas à jour les pièces jointes d’une Release.
-Avant un test réel, la dernière Release stable doit donc être **v0.0.2** et
+Avant un test réel, la dernière Release stable doit donc être **v0.0.3** et
 contenir exactement le fichier corrigé `Dominis.py` correspondant au tag.
 
-1. Publier la Release stable **v0.0.2** sur le dépôt officiel, sans brouillon ni
+1. Publier la Release stable **v0.0.3** sur le dépôt officiel, sans brouillon ni
    préversion, et la définir comme « latest ».
 2. Joindre `Dominis/Dominis.py` avec le nom exact `Dominis.py`. Ne pas joindre la
    copie de test v0.0.0, `data.db`, les dossiers `auto-save/` ou `sauvegardes/`,
    ni un ZIP à la place de cet asset.
 3. Exécuter le contrôle `--check-release` ci-dessous. Il vérifie que les octets
-   réellement publiés correspondent au script local et à la version v0.0.2.
+   réellement publiés correspondent au script local et à la version v0.0.3.
 
 L’outil de préparation ne publie rien et ne modifie pas les Releases. Pour toute
 version ultérieure, incrémenter `APP_VERSION`, créer une Release portant le même
@@ -258,12 +301,12 @@ installer pywebview). Aucun paquet supplémentaire n'est nécessaire au correcti
 
 1. Fermer toute autre instance Dominis pour libérer le port 8765.
 2. Ouvrir le lanceur du **dossier de test** : `.command` sur Mac, `.bat` sur Windows.
-3. Vérifier que la version installée est v0.0.0 et que **v0.0.2 est proposée**.
+3. Vérifier que la version installée est v0.0.0 et que **v0.0.3 est proposée**.
 4. Choisir « Plus tard », créer quelques sociétés/documents fictifs, puis quitter.
 5. Rouvrir : la proposition doit revenir. Choisir « Mettre à jour ».
 6. Attendre le redémarrage automatique et le message de réussite. Vérifier la
-   version v0.0.2, les données, les préférences, les sauvegardes et l'icône du Dock.
-7. Quitter et rouvrir : aucune nouvelle proposition si v0.0.2 reste la dernière
+   version v0.0.3, les données, les préférences, les sauvegardes et l'icône du Dock.
+7. Quitter et rouvrir : aucune nouvelle proposition si v0.0.3 reste la dernière
    Release ; « Vérifier maintenant » doit afficher « À jour » sans erreur SSL.
 
 Ne pas utiliser la seule copie de ses données réelles pour un test de mise à jour.
@@ -318,7 +361,7 @@ Les captures de contrôle sont enregistrées dans `.cache/`, ignoré par Git.
 La matrice `.github/workflows/tests.yml` exécute les tests sous **Windows, macOS
 et Linux**, avec Python **3.10 et 3.13**, à chaque push et pull request. Elle
 compile le script et teste notamment les sauvegardes, TLS, remplacements,
-redémarrages et restaurations. Avant de publier v0.0.2, les six jobs de la matrice
+redémarrages et restaurations. Avant de publier v0.0.3, les six jobs de la matrice
 doivent être verts. Ils ne remplacent pas la validation visuelle de la fenêtre et
 du Dock sur macOS ; le scénario de mise à jour native doit aussi être vérifié sur
 une machine Mac cible.
