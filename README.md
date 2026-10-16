@@ -120,8 +120,27 @@ Date | Libellé | Débit | Crédit | Solde
   donnée n’est perdue silencieusement.
 - À la création d’une nouvelle SCI depuis un titre de tableau, le premier solde
   du fichier devient le solde d’ouverture. Vers une SCI existante, rien n’est
-  écrasé. Limite : 40 000 opérations par import ; un même fichier vers les
+  écrasé. Limite : 200 000 opérations par import ; un même fichier vers les
   mêmes destinations est refusé.
+
+## Photos des biens, dossiers et aperçu des documents
+
+- **Photo d’un bien** : dans la fiche d’un bien, une image peut être importée et
+  **recadrée librement** (glisser, zoom, recentrer, flèches du clavier). Le format
+  pris en compte est affiché et appliqué à l’enregistrement : **16:5, 1600 × 500 px**.
+  La carte du bien reprend exactement ce cadrage. **Sans photo, la carte garde
+  son apparence d’origine** ; retirer la photo y revient.
+- **Dossiers de documents** : les documents se classent dans des dossiers
+  (créer, renommer, supprimer, filtrer). Un document sans dossier est rangé
+  automatiquement selon sa catégorie (statuts, baux, comptabilité, assurances,
+  diagnostics). Supprimer un dossier ne supprime aucun document.
+- **Aperçu d’un document** : un clic sur la ligne ouvre l’aperçu avec un **zoom
+  réglable, par défaut ×1** (document entier visible) : images, PDF, classeurs
+  Excel (un onglet par feuille), CSV, texte et Word. Un document sans pièce
+  jointe l’indique explicitement.
+- **Limites larges** : pièce jointe jusqu’à **500 Mo**, import jusqu’à **500 Mo**,
+  restauration jusqu’à **500 Mo**, jusqu’à **30 rappels** datés par échéance
+  (365 acceptés par la base).
 
 ## Vérifications
 
