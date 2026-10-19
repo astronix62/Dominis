@@ -213,7 +213,11 @@ class RealForcedDowngradeTest(unittest.TestCase):
     def test_forcing_an_older_release_replaces_the_script_and_restarts(self):
         installed, forced = app.APP_VERSION, 'v0.0.2'
         self.assertLess(app.version_tuple(forced), app.version_tuple(installed))
-        with tempfile.TemporaryDirectory(prefix='Dominis forçage ') as temp:
+        # Préfixe ASCII et nettoyage tolérant : sous Windows, un dossier
+        # temporaire dont un fichier est encore verrouillé par l'enfant ferait
+        # échouer le test alors que le parcours vérifié est correct.
+        with tempfile.TemporaryDirectory(prefix='Dominis forcage ',
+                                         ignore_cleanup_errors=True) as temp:
             folder = Path(temp)
             payload = APP.read_text(encoding='utf-8').replace(
                 f"APP_VERSION = '{installed}'", f"APP_VERSION = '{forced}'", 1)
@@ -241,7 +245,6 @@ class RealForcedDowngradeTest(unittest.TestCase):
             url = f'http://127.0.0.1:{port}'
             command = [sys.executable, '-u', str(folder / 'Dominis.py'), '--no-browser', '--port', str(port)]
             log = open(folder / 'test.log', 'w', encoding='utf-8', buffering=1)
-            self.addCleanup(log.close)
             processes = []
             env = {**os.environ, 'PYTHONUNBUFFERED': '1', 'PYTHONFAULTHANDLER': '1',
                    'NO_PROXY': 'localhost,127.0.0.1', 'no_proxy': 'localhost,127.0.0.1'}
@@ -253,14 +256,21 @@ class RealForcedDowngradeTest(unittest.TestCase):
                 with LOCAL_OPENER.open(req, timeout=3) as r:
                     return r.read()
 
+            def read_log():
+                # Sous Windows, l'enfant hérite du descripteur : une lecture peut
+                # échouer transitoirement (WinError 32) sans que le test soit en cause.
+                try:
+                    log.flush()
+                    return (folder / 'test.log').read_text(encoding='utf-8', errors='replace')
+                except OSError as exc:
+                    return f'(journal illisible : {exc})'
+
             def wait(fn, timeout=40, label='condition'):
                 deadline = time.monotonic() + timeout
                 while time.monotonic() < deadline:
                     if processes and processes[-1].poll() is not None:
-                        log.flush()
                         raise AssertionError(f'Processus arrêté pendant {label} '
-                                             f'({processes[-1].returncode}); log: '
-                                             + (folder / 'test.log').read_text(encoding='utf-8'))
+                                             f'({processes[-1].returncode}); log: ' + read_log())
                     try:
                         result = fn()
                         if result:
@@ -268,8 +278,7 @@ class RealForcedDowngradeTest(unittest.TestCase):
                     except (OSError, ValueError):
                         pass
                     time.sleep(.1)
-                log.flush()
-                tail = ' | '.join((folder / 'test.log').read_text(encoding='utf-8').splitlines()[-8:])
+                tail = ' | '.join(read_log().splitlines()[-8:])
                 raise AssertionError(f'Timeout pendant {label}; log: {tail}')
 
             def token():
@@ -325,13 +334,26 @@ class RealForcedDowngradeTest(unittest.TestCase):
                 # finale est donc attendue directement ici.
                 self.assertEqual(processes[-1].wait(timeout=20), 0)
             finally:
+                # Comme dans tests/test_updates.py : demander l'arrêt à l'enfant
+                # avant le superviseur, attendre réellement sa fin, puis seulement
+                # fermer le journal. Sous Windows, un descripteur encore hérité par
+                # un enfant verrouille test.log et fait échouer le nettoyage du
+                # dossier temporaire (WinError 32 / 267).
+                try:
+                    get('/api/quit', token(), {})
+                except Exception:
+                    pass
                 for proc in processes:
                     if proc.poll() is None:
-                        proc.terminate()
                         try:
-                            proc.wait(timeout=10)
+                            proc.wait(timeout=6)
                         except subprocess.TimeoutExpired:
-                            proc.kill(); proc.wait()
+                            proc.terminate()
+                            try:
+                                proc.wait(timeout=6)
+                            except subprocess.TimeoutExpired:
+                                proc.kill(); proc.wait()
+                log.close()
 
 
 class ForcedUpdateUiTests(unittest.TestCase):
