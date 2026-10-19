@@ -123,21 +123,50 @@ Date | Libellé | Débit | Crédit | Solde
   écrasé. Limite : 200 000 opérations par import ; un même fichier vers les
   mêmes destinations est refusé.
 
-## Photos des biens, dossiers et aperçu des documents
+## Filtres, dossiers et aperçu des documents
 
 - **Photo d’un bien** : dans la fiche d’un bien, une image peut être importée et
   **recadrée librement** (glisser, zoom, recentrer, flèches du clavier). Le format
   pris en compte est affiché et appliqué à l’enregistrement : **16:5, 1600 × 500 px**.
   La carte du bien reprend exactement ce cadrage. **Sans photo, la carte garde
   son apparence d’origine** ; retirer la photo y revient.
-- **Dossiers de documents** : les documents se classent dans des dossiers
-  (créer, renommer, supprimer, filtrer). Un document sans dossier est rangé
-  automatiquement selon sa catégorie (statuts, baux, comptabilité, assurances,
-  diagnostics). Supprimer un dossier ne supprime aucun document.
+- **Dossiers de documents propres à chaque SCI** : chaque société possède sa
+  propre liste de dossiers. **Créer, renommer, supprimer ou réordonner** un
+  dossier ne modifie jamais une autre SCI. Les six dossiers proposés par défaut
+  peuvent être renommés ou supprimés société par société ; le bouton
+  **« Dossiers par défaut »** de la page Documents rétablit ceux qui manquent.
+  Les dossiers se rangent avec les flèches de chaque carte (ou dans la fenêtre
+  « Modifier le dossier », qui propose aussi la suppression). La carte
+  **« Tous les documents » reste toujours à droite**. Un document sans dossier
+  est rangé automatiquement selon sa catégorie (statuts, baux, comptabilité,
+  assurances, diagnostics) ; supprimer un dossier ne supprime aucun document.
+  Sur la page Documents de toutes les SCI, la barre affiche l’union des dossiers
+  et les compteurs suivent le filtre **Société**.
 - **Aperçu d’un document** : un clic sur la ligne ouvre l’aperçu avec un **zoom
   réglable, par défaut ×1** (document entier visible) : images, PDF, classeurs
   Excel (un onglet par feuille), CSV, texte et Word. Un document sans pièce
-  jointe l’indique explicitement.
+  jointe l’indique explicitement. L’aperçu est servi par `/api/document-view`
+  avec le **MIME exact** et `Content-Disposition: inline`, ce qui affiche le
+  document au lieu de le télécharger (page blanche et téléchargement forcé sur
+  macOS corrigés). Le bouton **Télécharger** passe toujours par
+  `/api/document`, qui reste en `attachment`. L’HTML et le SVG ne sont jamais
+  rendus en ligne : un fichier importé ne peut pas exécuter de script dans
+  l’origine qui porte le jeton de session.
+- **Filtre d’année global** : un seul état d’année pour toute l’application,
+  avec l’option **« Toutes les années »** plus chaque année disponible. Il
+  filtre réellement la liste de trésorerie (et les appels de loyers), pas
+  seulement les indicateurs : la vue d’ensemble et le tableau affichent donc les
+  mêmes mouvements. Quand plusieurs filtres d’année sont visibles sur une même
+  page (en-tête de SCI + barre d’outils de la trésorerie), **modifier l’un met
+  l’autre à jour immédiatement**. Après un import couvrant plusieurs exercices,
+  le filtre bascule sur « Toutes les années » pour que les données importées
+  soient visibles partout. Les échéances ne sont pas filtrées par année : une
+  tâche en retard d’un exercice précédent reste visible.
+- **Synchronisation après chaque écriture** : ajout, modification, suppression,
+  classement d’un document, changement de dossier, appel de loyers, import,
+  restauration et réglages rechargent l’état complet depuis `data.db`
+  (`/api/state`) avant de réafficher l’interface. Aucune vue ne peut rester
+  décalée de la base, y compris après un redémarrage.
 - **Limites larges** : pièce jointe jusqu’à **500 Mo**, import jusqu’à **500 Mo**,
   restauration jusqu’à **500 Mo**, jusqu’à **30 rappels** datés par échéance
   (365 acceptés par la base).
@@ -161,9 +190,9 @@ Le mode aperçu accepte les hôtes du proxy et doit rester limité aux environne
 de démonstration avec des données fictives. En usage personnel, conserver l’écoute
 locale par défaut.
 
-## Mises à jour intégrées — v0.0.3
+## Mises à jour intégrées — v0.0.5
 
-La version est déclarée dans `Dominis.py` par `APP_VERSION = 'v0.0.3'` et affichée
+La version est déclarée dans `Dominis.py` par `APP_VERSION = 'v0.0.5'` et affichée
 sous **Paramètres → Version**, avec les mêmes panneaux et thèmes que le reste de
 l’application. Chaque ouverture affiche le **tableau de bord général de toutes
 les SCI**, indépendamment de la dernière page consultée.
@@ -232,7 +261,7 @@ nécessitant un changement de schéma SQLite, de dépendances ou de lanceurs dev
 prévoir une procédure adaptée. Les marqueurs à conserver dans le script sont :
 
 ```python
-APP_VERSION = 'v0.0.3'  # À incrémenter pour chaque nouvelle Release.
+APP_VERSION = 'v0.0.5'  # À incrémenter pour chaque nouvelle Release.
 UPDATE_PROTOCOL = 1
 DB_SCHEMA_VERSION = 1
 MIN_PYTHON = (3, 10)
@@ -243,26 +272,26 @@ L’empreinte GitHub n’est pas une signature indépendante de l’éditeur. Pr
 l’accès au compte et au dépôt qui publient le code. Les Releases doivent être
 publiquement accessibles ; aucun secret GitHub n’est embarqué.
 
-### Préparer un scénario de mise à jour vers v0.0.3
+### Préparer un scénario de mise à jour vers v0.0.5
 
-Le fichier principal `Dominis/Dominis.py` est déclaré en **v0.0.3**. L’outil de
+Le fichier principal `Dominis/Dominis.py` est déclaré en **v0.0.5**. L’outil de
 test copie le code actuel en ne changeant que `APP_VERSION`, pour obtenir une
 copie isolée en v0.0.0. Le fichier principal, `data.db` et les sauvegardes restent
 inchangés ; aucune donnée personnelle n’est copiée.
 
-#### 1. Publier et vérifier la Release v0.0.3 avant un test réel
+#### 1. Publier et vérifier la Release v0.0.5 avant un test réel
 
 Une pull request fusionnée ne met pas à jour les pièces jointes d’une Release.
-Avant un test réel, la dernière Release stable doit donc être **v0.0.3** et
+Avant un test réel, la dernière Release stable doit donc être **v0.0.5** et
 contenir exactement le fichier corrigé `Dominis.py` correspondant au tag.
 
-1. Publier la Release stable **v0.0.3** sur le dépôt officiel, sans brouillon ni
+1. Publier la Release stable **v0.0.5** sur le dépôt officiel, sans brouillon ni
    préversion, et la définir comme « latest ».
 2. Joindre `Dominis/Dominis.py` avec le nom exact `Dominis.py`. Ne pas joindre la
    copie de test v0.0.0, `data.db`, les dossiers `auto-save/` ou `sauvegardes/`,
    ni un ZIP à la place de cet asset.
 3. Exécuter le contrôle `--check-release` ci-dessous. Il vérifie que les octets
-   réellement publiés correspondent au script local et à la version v0.0.3.
+   réellement publiés correspondent au script local et à la version v0.0.5.
 
 L’outil de préparation ne publie rien et ne modifie pas les Releases. Pour toute
 version ultérieure, incrémenter `APP_VERSION`, créer une Release portant le même
@@ -320,12 +349,12 @@ installer pywebview). Aucun paquet supplémentaire n'est nécessaire au correcti
 
 1. Fermer toute autre instance Dominis pour libérer le port 8765.
 2. Ouvrir le lanceur du **dossier de test** : `.command` sur Mac, `.bat` sur Windows.
-3. Vérifier que la version installée est v0.0.0 et que **v0.0.3 est proposée**.
+3. Vérifier que la version installée est v0.0.0 et que **v0.0.5 est proposée**.
 4. Choisir « Plus tard », créer quelques sociétés/documents fictifs, puis quitter.
 5. Rouvrir : la proposition doit revenir. Choisir « Mettre à jour ».
 6. Attendre le redémarrage automatique et le message de réussite. Vérifier la
-   version v0.0.3, les données, les préférences, les sauvegardes et l'icône du Dock.
-7. Quitter et rouvrir : aucune nouvelle proposition si v0.0.3 reste la dernière
+   version v0.0.5, les données, les préférences, les sauvegardes et l'icône du Dock.
+7. Quitter et rouvrir : aucune nouvelle proposition si v0.0.5 reste la dernière
    Release ; « Vérifier maintenant » doit afficher « À jour » sans erreur SSL.
 
 Ne pas utiliser la seule copie de ses données réelles pour un test de mise à jour.
@@ -380,7 +409,7 @@ Les captures de contrôle sont enregistrées dans `.cache/`, ignoré par Git.
 La matrice `.github/workflows/tests.yml` exécute les tests sous **Windows, macOS
 et Linux**, avec Python **3.10 et 3.13**, à chaque push et pull request. Elle
 compile le script et teste notamment les sauvegardes, TLS, remplacements,
-redémarrages et restaurations. Avant de publier v0.0.3, les six jobs de la matrice
+redémarrages et restaurations. Avant de publier v0.0.5, les six jobs de la matrice
 doivent être verts. Ils ne remplacent pas la validation visuelle de la fenêtre et
 du Dock sur macOS ; le scénario de mise à jour native doit aussi être vérifié sur
 une machine Mac cible.

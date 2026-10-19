@@ -32,7 +32,7 @@ class PrepareUpdateTestTests(unittest.TestCase):
         self.addCleanup(stdout_patch.stop)
 
     def test_source_version_for_requested_scenario(self):
-        self.assertEqual(self.version, 'v0.0.3')
+        self.assertEqual(self.version, 'v0.0.5')
 
     def assert_copy(self, target):
         self.assertEqual({p.name for p in target.iterdir()}, set(prepare.APP_FILES))
