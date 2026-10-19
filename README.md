@@ -170,6 +170,12 @@ Date | Libellé | Débit | Crédit | Solde
 - **Limites larges** : pièce jointe jusqu’à **500 Mo**, import jusqu’à **500 Mo**,
   restauration jusqu’à **500 Mo**, jusqu’à **30 rappels** datés par échéance
   (365 acceptés par la base).
+- **Interrupteurs identiques quelle que soit la longueur du texte** : un
+  interrupteur (notifications style macOS, rappels, réglages) ne peut plus être
+  écrasé par sa propre description. Le texte absorbe la largeur disponible et
+  l’interrupteur conserve exactement ses **41 × 23 px** ; auparavant, une
+  description longue comprimait le bouton jusqu’à environ 17 px de large alors
+  qu’une description courte l’affichait correctement.
 
 ## Vérifications
 
@@ -205,13 +211,35 @@ les SCI**, indépendamment de la dernière page consultée.
   « Plus tard »**. Le report dure jusqu’à la fin du processus, pas au-delà : la
   proposition revient au prochain lancement. Fermer la proposition avec la croix
   ou Échap a le même effet que « Plus tard ».
-- Si la version est identique ou plus ancienne : aucune notification.
+- Si la version est identique ou plus ancienne : aucune notification spontanée.
 - Sans réseau, en cas de limite GitHub, de Release invalide ou inaccessible :
   aucune fenêtre intempestive. L’état « Vérification impossible » et son motif
   apparaissent dans l’onglet Version. Ne pas confondre cet état avec « À jour ».
 - « Vérifier maintenant » permet une nouvelle vérification ; une mise à jour
   reportée peut toujours être lancée depuis l’onglet Version.
-- Les installations sont désactivées en mode `--preview`.
+- Les installations sont désactivées en mode `--preview`, y compris forcées.
+
+### Forcer la mise à jour
+
+Le bouton **« Forcer la mise à jour »** de l’onglet Version installe la dernière
+Release stable **quelle que soit sa version**, y compris identique ou plus
+ancienne que celle installée. Il prépare la Release, puis ouvre toujours une
+fenêtre de confirmation avant d’écrire quoi que ce soit :
+
+| Release trouvée | Fenêtre ouverte | Libellé de confirmation |
+| --- | --- | --- |
+| plus récente | « Forcer la mise à jour » | « Installer maintenant » |
+| identique | « Réinstaller la même version ? » | « Réinstaller cette version » |
+| plus ancienne | **« Avertissement : retour à une version antérieure »**, encadré rouge et bouton en style danger | « Je comprends, forcer le retour arrière » |
+
+La ligne « Dernière Release vérifiée » affiche la relation détectée (plus
+récente, identique, plus ancienne) et teinte la pastille en conséquence. Les
+mêmes contrôles d’intégrité, la même sauvegarde obligatoire de `data.db` et le
+même retour arrière automatique en cas d’échec du démarrage s’appliquent ; le
+forçage ne contourne que la comparaison de version, jamais la validation du
+fichier. Sans Release préparée, l’installation forcée est refusée. Si une
+vérification est déjà en cours, la demande de forçage est mémorisée et rejouée
+par la vérification en cours plutôt que perdue.
 
 ### Installation et redémarrage
 
