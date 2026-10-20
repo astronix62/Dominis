@@ -265,7 +265,11 @@ class DocFoldersPerSciTests(FilterAndFolderTestCase):
         self.assertNotIn("function folderDocCount(id){return rows('documents')", app.HTML)
         # Renommer un dossier propose aussi sa suppression, et l'ordre est réglable.
         self.assertIn("$('#manage-folder-delete').onclick=()=>deleteDocFolder(id)", app.HTML)
-        self.assertIn('data-folder-move', app.HTML)
+        # L'ordre se règle par appui maintenu : plus de flèches ni de corbeille
+        # sur chaque carte, la suppression reste dans « Modifier le dossier ».
+        self.assertIn('data-folder-drag', app.HTML)
+        self.assertNotIn('data-folder-move', app.HTML)
+        self.assertNotIn('data-folder-delete', app.HTML)
         self.assertIn('doc-folder-all', app.HTML)
         self.assertIn('restoreDefaultDocFolders', app.HTML)
 

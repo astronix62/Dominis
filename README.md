@@ -135,16 +135,23 @@ Date | Libellé | Débit | Crédit | Solde
   dossier ne modifie jamais une autre SCI. Les six dossiers proposés par défaut
   peuvent être renommés ou supprimés société par société ; le bouton
   **« Dossiers par défaut »** de la page Documents rétablit ceux qui manquent.
-  Les dossiers se rangent avec les flèches de chaque carte (ou dans la fenêtre
-  « Modifier le dossier », qui propose aussi la suppression). La carte
-  **« Tous les documents » reste toujours à droite**. Un document sans dossier
+  L’ordre des dossiers se règle **en maintenant l’appui sur une carte puis en
+  la faisant glisser** : les autres dossiers s’écartent pour laisser la place
+  et le nouvel ordre est enregistré au dépôt. La fenêtre **« Modifier le
+  dossier »** reste disponible pour renommer, ranger ou supprimer un dossier
+  (avec confirmation) ; aucune corbeille ni flèche ne surcharge les cartes.
+  La carte **« Tous les documents » reste toujours à droite**. Un document sans dossier
   est rangé automatiquement selon sa catégorie (statuts, baux, comptabilité,
   assurances, diagnostics) ; supprimer un dossier ne supprime aucun document.
   Sur la page Documents de toutes les SCI, la barre affiche l’union des dossiers
-  et les compteurs suivent le filtre **Société**.
+  et les compteurs suivent le filtre **Société** ; choisissez une société dans
+  ce filtre pour déplacer ses dossiers.
 - **Aperçu d’un document** : un clic sur la ligne ouvre l’aperçu avec un **zoom
   réglable, par défaut ×1** (document entier visible) : images, PDF, classeurs
-  Excel (un onglet par feuille), CSV, texte et Word. Un document sans pièce
+  Excel (un onglet par feuille), CSV, texte et Word. **Le zoom reste centré** :
+  le point du document situé au centre de la zone d’aperçu y reste après chaque
+  changement de niveau, donc le document ne dérive plus vers la droite et ne
+  sort plus de la zone. Un document sans pièce
   jointe l’indique explicitement. L’aperçu est servi par `/api/document-view`
   avec le **MIME exact** et `Content-Disposition: inline`, ce qui affiche le
   document au lieu de le télécharger (page blanche et téléchargement forcé sur
@@ -167,6 +174,20 @@ Date | Libellé | Débit | Crédit | Solde
   restauration et réglages rechargent l’état complet depuis `data.db`
   (`/api/state`) avant de réafficher l’interface. Aucune vue ne peut rester
   décalée de la base, y compris après un redémarrage.
+- **Calculs de la vue d’ensemble** : le **patrimoine immobilier** additionne les
+  valeurs estimées des biens ; les **recettes encaissées** et le **flux net**
+  portent sur l’année civile choisie (« Toutes les années » additionne les
+  exercices) ; le **taux d’occupation** compare les biens « Loué » au nombre de
+  biens ; la **répartition du patrimoine** ventile la valeur par société ou par
+  bien. La **trésorerie disponible** part du solde d’ouverture de chaque SCI et
+  ajoute ses mouvements jusqu’à aujourd’hui. Lorsque le solde d’ouverture est
+  nul, **tous les mouvements enregistrés comptent**, même s’ils précèdent la
+  date du solde initial : un historique importé n’est plus ignoré et le solde
+  ne reste plus bloqué à 0 €. Les sommes sont arrondies au centime.
+- **Colonne Société dans la trésorerie** : la liste des mouvements de toutes les
+  sociétés commence par une **pastille de couleur** propre à chaque SCI (nom en
+  infobulle), pour distinguer les mouvements d’un coup d’œil. La colonne reste
+  réglable avec les autres dans « Réglages des colonnes ».
 - **Limites larges** : pièce jointe jusqu’à **500 Mo**, import jusqu’à **500 Mo**,
   restauration jusqu’à **500 Mo**, jusqu’à **30 rappels** datés par échéance
   (365 acceptés par la base).

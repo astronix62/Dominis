@@ -413,6 +413,12 @@ class DominisTests(unittest.TestCase):
         self.assertIn('documentPreview', app.HTML)
         self.assertIn('doc-preview-stage', app.HTML)
         self.assertIn('docPreviewStageZoom', app.HTML)
+        # Zoom recentré : le point central est conservé après redimensionnement.
+        self.assertIn("vp.scrollLeft=Math.max(0,cx*stage.offsetWidth-vp.clientWidth/2)", app.HTML)
+        # Colonne « Société » avec pastille de couleur dans la trésorerie.
+        self.assertIn("id:'society',label:'Société'", app.HTML)
+        self.assertIn('class="sci-dot"', app.HTML)
+        self.assertIn('col-society', app.HTML)
         self.assertIn('doc-preview-modal', app.HTML)
         self.assertIn(".empty button{", app.HTML)
         self.assertIn('user-lock', app.HTML)
