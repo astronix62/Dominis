@@ -3,7 +3,7 @@
 Usage: python Dominis.py [--desktop] [--demo] [--preview] [--port 8765] [--db data.db]
 Seule dépendance facultative : pywebview (fenêtre native).
 """
-import ast, re, shutil, subprocess, gzip, ssl, zipfile
+import ast, math, re, shutil, subprocess, gzip, ssl, zipfile
 import xml.etree.ElementTree as ET
 import argparse, base64, csv, datetime as dt, hashlib, html, io, json, mimetypes
 import os, secrets, sqlite3, sys, tempfile, threading, time, uuid, webbrowser, warnings
@@ -4777,7 +4777,7 @@ PREVIEW = False
 AUTO_SAVE_NOTICE = None
 PRIMARY_DB_MISSING = False
 KINDS = ['properties','leases','partners','loans','calls','entries','tasks','documents']
-DEFAULTS = {'theme':'dark','collapsed':False,'order':[], 'year':dt.date.today().year, 'last_page':'dashboard','last_tab':'overview','last_backup':'','owner':'Mon espace patrimonial','auto_backup':True,'weekly_auto_save':True,'last_auto_save_week':'','table_columns':{},'doc_folders':[],'doc_folders_by_sci':{}}
+DEFAULTS = {'theme':'dark','collapsed':False,'order':[], 'year':dt.date.today().year, 'last_page':'dashboard','last_tab':'overview','last_backup':'','owner':'Mon espace patrimonial','auto_backup':True,'weekly_auto_save':True,'last_auto_save_week':'','table_columns':{},'table_view':{},'doc_folders':[],'doc_folders_by_sci':{}}
 YEAR_ALL = 'all'  # Valeur du filtre d'année « Toutes les années ».
 
 # Dossiers de classement proposés à la création d'une SCI. Chaque société possède
@@ -4813,17 +4813,45 @@ def normalize_doc_folders(value):
         if any(x['id']==fid for x in out): continue
         item={'id':fid,'name':name}
         if f.get('builtin'): item['builtin']=True
+        parent=str(f.get('parent_id') or '').strip()[:60]
+        if parent and parent!=fid: item['parent_id']=parent
         out.append(item)
+    # Sous-dossiers : on conserve le lien de parenté uniquement s'il reste
+    # cohérent (parent existant, aucune boucle, trois niveaux au maximum).
+    by={x['id']:x for x in out}
+    for item in out:
+        if item.get('parent_id') and item['parent_id'] not in by: item.pop('parent_id',None)
+    for item in out:
+        if not item.get('parent_id'): continue
+        seen={item['id']}; cur=item; depth=1; broken=False
+        while cur.get('parent_id'):
+            pid=cur['parent_id']; parent=by.get(pid)
+            if not parent or pid in seen: broken=True; break
+            seen.add(pid); depth+=1; cur=parent
+        if broken or depth>3: item.pop('parent_id',None)
     return out
 
 def merge_doc_folders(base, extra):
     """Applique les renommages existants sur les dossiers par défaut, puis ajoute les dossiers personnels."""
     out=[dict(f) for f in normalize_doc_folders(base)]
-    for f in normalize_doc_folders(extra):
-        found=next((x for x in out if x['id']==f['id']), None)
-        if found: found['name']=f['name']
-        else: out.append(dict(f))
-    return out
+    for f in (extra or []):
+        if not isinstance(f,dict): continue
+        fid=str(f.get('id','')).strip()[:60]; name=str(f.get('name','')).strip()[:80]
+        if not fid or not name: continue
+        parent=str(f.get('parent_id') or '').strip()[:60]
+        found=next((x for x in out if x['id']==fid), None)
+        if found:
+            found['name']=name
+            if parent and parent!=fid: found['parent_id']=parent
+            else: found.pop('parent_id',None)
+        else:
+            item={'id':fid,'name':name}
+            if f.get('builtin'): item['builtin']=True
+            if parent and parent!=fid: item['parent_id']=parent
+            out.append(item)
+    # La validation vient après la fusion : un sous-dossier personnel peut
+    # désigner un dossier par défaut qui n'existait pas dans sa propre liste.
+    return normalize_doc_folders(out)
 
 def doc_folders_by_sci(c, persist=True):
     """Dossiers propres à chaque SCI. Migre une seule fois l'ancienne liste globale."""
@@ -5410,6 +5438,7 @@ def clean(kind,data):
             d['reminder_count']=len(d['reminders'])
     for k,v in list(d.items()):
         if kind=='tasks' and k in ('reminders','read_reminders'): continue
+        if kind=='sci' and k=='balances': continue
         if not isinstance(v,(str,int,float,bool,type(None))): raise ValueError('Valeur non prise en charge : '+k)
         if isinstance(v,str) and k!='blob' and len(v)>50*1024*1024: raise ValueError('Texte trop long.')
     if kind=='properties':
@@ -5430,6 +5459,23 @@ def clean(kind,data):
             except (ValueError,TypeError): raise ValueError('Date invalide : '+f)
     if d.get('end') and d.get('start') and d['end']<d['start']: raise ValueError('La fin précède le début du bail.')
     if kind=='sci':
+        # Ancres du relevé bancaire (soldes de début et de fin de mois) : elles
+        # servent au contrôle de la colonne Solde et ne sont jamais des mouvements.
+        raw_balances=d.get('balances')
+        if raw_balances is not None:
+            kept=[]
+            if isinstance(raw_balances,list):
+                for item in raw_balances[:1200]:
+                    if not isinstance(item,dict): continue
+                    try: day=dt.date.fromisoformat(str(item.get('date',''))[:10]).isoformat()
+                    except (ValueError,TypeError): continue
+                    try: value=round(float(item.get('value')),2)
+                    except (ValueError,TypeError): continue
+                    kept.append({'date':day,'value':value,'kind':str(item.get('kind') or 'releve')[:16]})
+            kept.sort(key=lambda b:(b['date'],b['value']))
+            d['balances']=kept
+        d['opening_derived']=bool(d.get('opening_derived'))
+        if not d['opening_derived']: d.pop('opening_derived',None)
         if d.get('regime','IR') not in ['IR','IS']: raise ValueError('Régime fiscal invalide.')
         if d.get('siren') and (not d['siren'].isdigit() or len(d['siren'])!=9): raise ValueError('Le SIREN doit comporter 9 chiffres.')
         if not d.get('opening_date'): d['opening_date']='2000-01-01'
@@ -5449,6 +5495,58 @@ def clean(kind,data):
     return d
 
 REFS={'property_id':'properties','lease_id':'leases','call_id':'calls'}
+PURGE_TABS = {
+    'properties': 'Biens immobiliers',
+    'leases': 'Baux & locataires',
+    'calls': 'Loyers',
+    'entries': 'Trésorerie',
+    'partners': 'Associés',
+    'loans': 'Emprunts',
+    'tasks': 'Échéances',
+    'documents': 'Documents',
+}
+
+
+def purge_tab(c, sci_id, tab):
+    """Vide une page pour une seule SCI, avec les dépendances nécessaires.
+
+    Supprimer les biens d'une SCI sans ses baux laisserait des baux orphelins :
+    les éléments dépendants (baux, appels, encaissements rattachés) partent avec
+    la page demandée, et le détail est renvoyé à l'interface pour confirmation.
+    """
+    if tab not in PURGE_TABS: raise ValueError('Page inconnue.')
+    if not c.execute('SELECT 1 FROM scis WHERE id=?',(sci_id,)).fetchone():
+        raise ValueError('SCI introuvable.')
+    recs=[]
+    for r in c.execute('SELECT id,kind,data FROM records WHERE sci=?',(sci_id,)):
+        item=json.loads(r['data']); item['id']=r['id']; item['kind']=r['kind']; recs.append(item)
+    by={k:[r for r in recs if r['kind']==k] for k in KINDS}
+    if tab=='properties':
+        props={r['id'] for r in by['properties']}
+        leases={r['id'] for r in by['leases'] if r.get('property_id') in props}
+        calls={r['id'] for r in by['calls'] if r.get('lease_id') in leases}
+        entries={r['id'] for r in by['entries'] if r.get('call_id') in calls}
+        targets=props|leases|calls|entries
+    elif tab=='leases':
+        leases={r['id'] for r in by['leases']}
+        calls={r['id'] for r in by['calls'] if r.get('lease_id') in leases}
+        entries={r['id'] for r in by['entries'] if r.get('call_id') in calls}
+        targets=leases|calls|entries
+    elif tab=='calls':
+        calls={r['id'] for r in by['calls']}
+        entries={r['id'] for r in by['entries'] if r.get('call_id') in calls}
+        targets=calls|entries
+    else:
+        targets={r['id'] for r in by.get(tab,[])}
+    detail={}
+    for r in recs:
+        if r['id'] in targets: detail[r['kind']]=detail.get(r['kind'],0)+1
+    if targets:
+        c.execute('DELETE FROM records WHERE id IN (%s)' % ','.join('?'*len(targets)), tuple(targets))
+    audit(c,'Suppression','Purge '+PURGE_TABS[tab]+' · '+sci_id+' · '+str(len(targets))+' élément(s)')
+    return {'deleted':len(targets),'detail':detail}
+
+
 def validate_refs(c,sci,d,ident=''):
     for f,k in REFS.items():
         if d.get(f):
@@ -5697,6 +5795,67 @@ def _x_is_debit_balance_label(value):
     if not _x_is_balance_label(value): return False
     s = _x_norm(value)
     return 'debiteur' in s or 'negatif' in s
+
+# Mots qui n'apportent pas d'information métier dans un intitulé de contrôle :
+# « Solde créditeur au 30/06/2026 » ne contient que des mots de contrôle, alors
+# que « Total travaux salle de bain » est une véritable opération.
+_XL_BALANCE_QUALIFIERS = re.compile(
+    r'\b(?:crediteur|cred|crediteurs|debiteur|deb|debiteurs|negatif|negative|general|generale|'
+    r'cumule|cumulee|cumules|report|nouveau|ancien|ancienne|solde|soldes|totaux|total|'
+    r'sous|bilan|cumul|au|a|du|de|des|le|la|les|en|et|fin|debut|mois|jour|operation|operations|'
+    r'mouvement|mouvements|compte|banque|annee|exercice|aujourd|hui|arret|arrete|arretes|'
+    r'present|precedent|reporte|a\s+nouveau)\b'
+)
+_XL_MONTH_WORDS = re.compile(
+    r'\b(?:janvier|fevrier|mars|avril|mai|juin|juillet|aout|septembre|octobre|novembre|decembre)\b'
+)
+_XL_DATE_FRAGMENT = re.compile(r'\d{1,4}\s*[/.\-]\s*\d{1,2}(?:\s*[/.\-]\s*\d{1,4})?')
+
+
+def _x_balance_label_kind(value):
+    """Classe un intitulé de contrôle : None (pas un contrôle) ou 'solde'.
+
+    Un intitulé n'est un contrôle que s'il ne reste, une fois retirés les mots
+    de contrôle et les dates, aucun mot métier. « Solde créditeur au 31/01 »
+    est un contrôle ; « Total travaux » ou « Report charges » sont des
+    opérations et ne doivent jamais être supprimées à l'import.
+    """
+    if not isinstance(value, str): return None
+    text = _x_norm(value)
+    if not text or not _XL_BALANCE_RE.match(text): return None
+    rest = _XL_DATE_FRAGMENT.sub(' ', text)
+    rest = _XL_MONTH_WORDS.sub(' ', rest)
+    rest = re.sub(r'\b\d+\b', ' ', rest)
+    rest = _XL_BALANCE_QUALIFIERS.sub(' ', rest)
+    rest = re.sub(r'[^a-z]+', ' ', rest).strip()
+    return None if rest else 'solde'
+
+
+# Proposition de catégorie à partir du libellé d'une opération. Le classeur
+# importé ne contient presque jamais de colonne « Catégorie » : sans cette
+# étape, ni l'analyse ni les graphiques par catégorie ne peuvent fonctionner.
+_XL_CATEGORY_RULES = [
+    (re.compile(r'\b(?:depot\s+de\s+garantie|caution|garantie\s+locative)\b'), 'Dépôt de garantie'),
+    (re.compile(r'\b(?:remboursement\s+(?:associe|associes|compte\s+courant))\b'), 'Remboursement associé'),
+    (re.compile(r'\b(?:apport|associe|associes|capital\s+social)\b'), 'Apport associé'),
+    (re.compile(r'\b(?:taxe\s+fonciere|impot|impots|fiscal|tva|cfp|taxe)\b'), 'Taxe foncière'),
+    (re.compile(r'\b(?:assurance|pno|axa|maif|mma|generali|aviva|allianz|swisslife)\b'), 'Assurance'),
+    (re.compile(r'\b(?:honoraire|honoraires|frais\s+de\s+gestion|agence|syndic\s+honoraires)\b'), 'Frais de gestion'),
+    (re.compile(r'\b(?:echeance|emprunt|pret|credit|interet|interets|banque|frais\s+bancaire)\b'), 'Emprunt (capital + intérêts)'),
+    (re.compile(r'\b(?:travaux|renovation|reparation|plombier|electricien|peinture|toiture|chaufferie|ravalement|menuiserie)\b'), 'Travaux'),
+    (re.compile(r'\b(?:entretien|jardin|nettoyage|menage|ascenseur|chauffage)\b'), 'Entretien'),
+    (re.compile(r'\b(?:charges?\s+(?:de\s+)?copro|charges|copropriete|copro|provision)\b'), 'Provisions de charges'),
+    (re.compile(r'\b(?:loyer|loyers|location|locatif|bail|quittance|virement\s+(?:mle|mlle|mr|mme|sci|sarl))\b'), 'Loyers'),
+]
+
+
+def _x_guess_category(label):
+    """Catégorie probable d'une opération, ou None si le libellé ne dit rien."""
+    text = _x_norm(label)
+    if not text: return None
+    for pattern, category in _XL_CATEGORY_RULES:
+        if pattern.search(text): return category
+    return None
 
 
 def _x_find_year(value):
@@ -6245,22 +6404,28 @@ def _x_scan_sheet(sheet_name, rows, sources, records, warn, epoch, state):
                 debit = None
             elif credit == 0.0 and debit is not None and debit != 0.0:
                 credit = None
-            elif debit == 0.0 and credit == 0.0 and solde is None and not _x_is_balance_label(label):
+            elif debit == 0.0 and credit == 0.0 and solde is None and not _x_balance_label_kind(label):
                 debit = credit = None
 
+            # Une ligne n'est un contrôle que si son intitulé est un intitulé de
+            # contrôle « pur » (« Solde au 31/01 », « Total débit »…) ou si elle
+            # ne porte qu'un solde. « Total travaux », « Report charges » ou
+            # « Solde notaire » restent des opérations : elles ne doivent plus
+            # disparaître de l'import.
+            balance_kind = _x_balance_label_kind(label)
+            has_one_amount = (debit is not None) != (credit is not None)
+            looks_like_operation = bool(label) and date_probe is not None and solde is None and has_one_amount
             is_balance_row = (
-                _x_is_balance_label(label)
+                (balance_kind is not None and not looks_like_operation)
                 or (debit is None and credit is None and solde is not None)
-                or (not label and (debit is not None or credit is not None) and (
-                    date_probe is not None or solde is not None or (debit is not None and credit is not None)
-                ))
+                or (not label and debit is not None and credit is not None)
             )
 
             if is_balance_row:
                 if debit is None and credit is None and solde is None:
                     continue
                 is_tot_keyword = bool(re.match(r'^(?:totaux|total|sous[\s\-]*total|cumul)\b', _x_norm(label)))
-                if _x_is_balance_label(label) and not is_tot_keyword and solde is None:
+                if balance_kind and not is_tot_keyword and solde is None:
                     if credit is not None and debit is None:
                         solde = credit
                         credit = None
@@ -6311,6 +6476,12 @@ def _x_scan_sheet(sheet_name, rows, sources, records, warn, epoch, state):
                         if src is not None and 'opening' not in src and round(solde, 2) != 0:
                             src['opening'] = round(solde, 2)
                             src['opening_date'] = date_val.isoformat()
+                    # Toutes les ancres du relevé (début et fin de mois) sont
+                    # conservées : elles servent au contrôle de la colonne
+                    # Solde et à la déduction du solde d'ouverture.
+                    state.setdefault('balances', {}).setdefault(group, []).append(
+                        (date_val.isoformat(), round(solde, 2))
+                    )
                     anchor = solde
                     run_debit = run_credit = 0.0
                 seg_debit = seg_credit = 0.0
@@ -6330,6 +6501,10 @@ def _x_scan_sheet(sheet_name, rows, sources, records, warn, epoch, state):
             if context_year is None: context_year = date_val.year
             has_amount = debit is not None or credit is not None
 
+            if not label and has_amount:
+                # Date + montant sans libellé : c'est une opération, pas un
+                # contrôle. Elle était auparavant ignorée silencieusement.
+                label = 'Opération sans libellé'
             if label and has_amount:
                 if debit is not None and credit is not None:
                     raise ValueError(loc(rn, 'montant à la fois en débit et en crédit (' + _x_eur(debit)
@@ -6341,8 +6516,18 @@ def _x_scan_sheet(sheet_name, rows, sources, records, warn, epoch, state):
                     warn(wloc(rn) + 'montant négatif (' + _x_eur(raw) + ') : sens inversé en ' + direction + '.')
                 d = {'date': date_val.isoformat(), 'label': label, 'direction': direction, 'amount': abs(raw)}
                 category = as_text(cell(cells, 'category'))
-                if category: d['category'] = category
+                if category:
+                    d['category'] = category
+                else:
+                    guessed = _x_guess_category(label)
+                    if guessed:
+                        d['category'] = guessed
+                        state.setdefault('guessed_categories', {})[guessed] = \
+                            state.setdefault('guessed_categories', {}).get(guessed, 0) + 1
                 records.append({**clean('entries', d), 'id': uid(), 'sci': group, 'kind': 'entries'})
+                state.setdefault('movements_signed', {}).setdefault(group, []).append(
+                    (date_val.isoformat(), round(abs(raw) * (1 if direction == 'Recette' else -1), 2))
+                )
                 state['movements'].add(group)
                 prev_min = state.setdefault('first_move_date', {}).get(group)
                 if prev_min is None or d['date'] < prev_min:
@@ -6381,23 +6566,57 @@ def _x_scan_sheet(sheet_name, rows, sources, records, warn, epoch, state):
 
 
 def _x_finalize_openings(sources, state):
-    """Dans un classeur multi-feuilles (ex. une feuille par année), retient le solde d'ouverture le plus ancien."""
+    """Détermine le solde d'ouverture et conserve toutes les ancres du relevé.
+
+    Trois cas :
+    1. un solde de début de mois précède les mouvements : il est retenu ;
+    2. le classeur ne contient que des soldes de fin de mois : l'ouverture est
+       déduite (solde de clôture − mouvements de la période) au lieu d'être
+       perdue, ce qui sous-évaluait le solde de la SCI ;
+    3. aucun solde : la SCI démarre sans solde d'ouverture, tous les mouvements
+       comptent (règle de la vue d'ensemble).
+    """
     openings_by_group = state.get('openings', {})
     first_moves = state.get('first_move_date', {})
+    balances_by_group = state.get('balances', {})
+    moves_by_group = state.get('movements_signed', {})
     for gid, src in sources.items():
+        anchors = []
+        seen = set()
+        for day, value in sorted(balances_by_group.get(gid, [])):
+            key = (day, round(value, 2))
+            if key in seen: continue
+            seen.add(key)
+            anchors.append((day, round(value, 2)))
+        if anchors:
+            src['balances'] = [{'date': day, 'value': value, 'kind': 'releve'} for day, value in anchors]
         cands = openings_by_group.get(gid) or []
-        if not cands: continue
-        earliest_date, earliest_solde, _explicit = min(cands, key=lambda x: x[0])
         first_move = first_moves.get(gid)
-        if first_move and earliest_date > first_move:
+        keep = None
+        if cands:
+            earliest_date, earliest_solde = min(cands, key=lambda x: x[0])[:2]
+            if not (first_move and earliest_date > first_move):
+                if round(earliest_solde, 2) != 0:
+                    keep = (earliest_date, round(earliest_solde, 2), False)
+        if keep is None and anchors and first_move:
+            # Ouverture déduite du premier solde de clôture connu.
+            for day, value in anchors:
+                if day < first_move: continue
+                total = round(sum(amount for date_, amount in moves_by_group.get(gid, []) if date_ <= day), 2)
+                derived = round(value - total, 2)
+                if derived:
+                    day_before = (dt.date.fromisoformat(first_move) - dt.timedelta(days=1)).isoformat()
+                    keep = (day_before, derived, True)
+                break
+        if keep is None:
             src.pop('opening', None)
             src.pop('opening_date', None)
-        elif round(earliest_solde, 2) == 0:
-            src.pop('opening', None)
-            src.pop('opening_date', None)
+            src.pop('opening_derived', None)
         else:
-            src['opening'] = round(earliest_solde, 2)
-            src['opening_date'] = earliest_date
+            src['opening'] = keep[1]
+            src['opening_date'] = keep[0]
+            if keep[2]: src['opening_derived'] = True
+            else: src.pop('opening_derived', None)
 
 
 def parse_xlsx(text):
@@ -6549,6 +6768,7 @@ def import_bundle(c,p):
     fp=hashlib.sha256((p['text']+json.dumps(mapping,sort_keys=True)).encode()).hexdigest()
     if c.execute('SELECT 1 FROM imports WHERE fingerprint=?',(fp,)).fetchone(): raise ValueError('Ce fichier a déjà été importé vers ces destinations.')
     sci_map={}; new_scis=[]
+    apply_openings=p.get('openings') if isinstance(p.get('openings'),dict) else {}
     for s in selected:
         dest=mapping[s['id']]
         if dest=='new':
@@ -6556,8 +6776,29 @@ def import_bundle(c,p):
             d['name']=d['name']+('' if is_table_src else ' (import)'); new=uid()
             c.execute('INSERT INTO scis VALUES(?,?)',(new,json.dumps(d))); sci_map[s['id']]=new; new_scis.append(new)
         else:
-            if not c.execute('SELECT 1 FROM scis WHERE id=?',(dest,)).fetchone(): raise ValueError('SCI de destination introuvable.')
+            row=c.execute('SELECT * FROM scis WHERE id=?',(dest,)).fetchone()
+            if not row: raise ValueError('SCI de destination introuvable.')
             sci_map[s['id']]=dest
+            current=json.loads(row['data']); changed=False
+            if s.get('balances'):
+                merged={}
+                # Attention : ne jamais réutiliser « b », qui porte le bundle importé.
+                for anchor in (current.get('balances') or []):
+                    if isinstance(anchor,dict) and anchor.get('date'):
+                        merged[(str(anchor['date'])[:10],round(float(anchor.get('value') or 0),2))]=anchor
+                for anchor in s['balances']:
+                    merged[(str(anchor['date'])[:10],round(float(anchor['value']),2))]={
+                        'date':str(anchor['date'])[:10],'value':round(float(anchor['value']),2),
+                        'kind':str(anchor.get('kind') or 'releve')[:16]}
+                current['balances']=[merged[k] for k in sorted(merged)]
+                changed=True
+            if apply_openings.get(s['id']) and s.get('opening') is not None:
+                current['opening']=round(float(s['opening']),2)
+                current['opening_date']=s.get('opening_date') or current.get('opening_date') or '2000-01-01'
+                if s.get('opening_derived'): current['opening_derived']=True
+                changed=True
+            if changed:
+                c.execute('UPDATE scis SET data=? WHERE id=?',(json.dumps(clean('sci',current)),dest))
     rows=[r for r in b['records'] if r['sci'] in sci_map]
     idmap={r['id']:uid() for r in rows}
     for r in rows:
@@ -6634,6 +6875,506 @@ def demo():
             save_record(c,{'kind':'loans','sci':s,'data':{'name':'Financement immobilier','bank':'Banque patrimoniale','principal':280000,'balance':215000+ix*15000,'balance_date':'2026-10-01','rate':2.4,'monthly':820+ix*170,'start':'2020-06-01','end':'2040-06-01'}})
             save_record(c,{'kind':'tasks','sci':s,'data':{'name':['Taxe foncière','Renouveler l’assurance PNO','Préparer le rapport de gestion'][ix],'due':['2026-10-20','2026-10-28','2026-11-12'][ix],'category':['Fiscalité','Assurance','Juridique'][ix],'status':'À faire','notes':'Échéance fictive à adapter à votre situation.'}})
         st=settings(c); st['demo']=True; c.execute("UPDATE meta SET value=? WHERE key='settings'",(json.dumps(st),)); c.execute('DELETE FROM audit'); audit(c,'Démonstration','Jeu fictif — 3 SCI, 6 biens, 5 baux.')
+
+# ---------------------------------------------------------------------------
+# Synthèse annuelle : PDF vectoriel produit sans dépendance externe.
+# L'interface prépare le modèle (libellés et montants déjà formatés) ; ce module
+# se charge uniquement de la mise en page, ce qui garde les chiffres identiques
+# à l'écran et dans le document.
+# ---------------------------------------------------------------------------
+PDF_PAGE_W, PDF_PAGE_H = 595.28, 841.89
+PDF_MARGIN = 46.0
+PDF_INK = '#252c25'
+PDF_MUTED = '#717969'
+PDF_LINE = '#dfdfd4'
+PDF_GOLD = '#876b35'
+PDF_GREEN = '#367858'
+PDF_RED = '#b45043'
+PDF_SOFT = '#f6f4ec'
+PDF_HEAD = '#efe9db'
+PDF_ZEBRA = '#faf9f4'
+
+
+def _pdf_rgb(h):
+    h = str(h or '#252c25').lstrip('#')
+    if len(h) != 6:
+        h = '252c25'
+    try:
+        return ' '.join('%.3f' % (int(h[i:i + 2], 16) / 255.0) for i in (0, 2, 4))
+    except ValueError:
+        return '0.145 0.173 0.145'
+
+
+PDF_CHAR_MAP = {
+    '\u202f': ' ', '\u00a0': ' ', '\u2009': ' ', '\u2007': ' ', '\u2060': '',
+    '\u2011': '-', '\u2212': '-', '\u2010': '-', '\u2013': '\u2013', '\u2014': '\u2014',
+    '\u2018': "'", '\u2019': '\u2019', '\u201c': '"', '\u201d': '"',
+    '\u2026': '\u2026', '\u20ac': '\u20ac',
+}
+
+
+def _pdf_esc(text):
+    out = []
+    raw = str(text if text is not None else '')
+    for ch in ''.join(PDF_CHAR_MAP.get(c, c) for c in raw):
+        if ch in '()\\':
+            out.append('\\' + ch)
+        elif ch in '\r\n\t':
+            out.append(' ')
+        else:
+            out.append(ch)
+    return ''.join(out)
+
+
+def _pdf_width(text, size, bold=False):
+    narrow = set("il.,:;'!|")
+    wide = set('mwMW@')
+    total = 0.0
+    for ch in str(text or ''):
+        if ch == ' ':
+            total += 0.278
+        elif ch in narrow:
+            total += 0.255
+        elif ch in wide:
+            total += 0.84
+        elif ch.isdigit():
+            total += 0.556
+        elif ch.isupper():
+            total += 0.68
+        elif ch in '()[]{}':
+            total += 0.333
+        elif ch in '-–—':
+            total += 0.333
+        else:
+            total += 0.52
+    return total * size * (1.03 if bold else 1.0)
+
+
+def _pdf_wrap(text, size, width, bold=False):
+    text = str(text or '').replace('\n', ' ')
+    words = text.split(' ')
+    lines, cur = [], ''
+    for word in words:
+        if not word:
+            continue
+        candidate = (cur + ' ' + word).strip()
+        if _pdf_width(candidate, size, bold) <= width or not cur:
+            if not cur and _pdf_width(candidate, size, bold) > width:
+                part = ''
+                for ch in candidate:
+                    if _pdf_width(part + ch, size, bold) > width and part:
+                        break
+                    part += ch
+                lines.append(part)
+                cur = candidate[len(part):].strip()
+            else:
+                cur = candidate
+        else:
+            lines.append(cur)
+            cur = word
+    if cur:
+        lines.append(cur)
+    return lines or ['']
+
+
+def _pdf_clip(text, size, width, bold=False):
+    text = str(text or '')
+    if _pdf_width(text, size, bold) <= width:
+        return text
+    out = ''
+    for ch in text:
+        if _pdf_width(out + ch + '…', size, bold) > width:
+            break
+        out += ch
+    return (out.rstrip() + '…') if out else '…'
+
+
+def _pdf_money_short(v):
+    v = float(v or 0)
+    sign = '−' if v < 0 else ''
+    v = abs(v)
+    if v >= 1000:
+        txt = ('%.1f' % (v / 1000.0)).rstrip('0').rstrip('.').replace('.', ',')
+        return sign + txt + ' k€'
+    return sign + ('%.0f' % v) + ' €'
+
+
+class PdfAnnualReport:
+    def __init__(self, model):
+        self.model = model if isinstance(model, dict) else {}
+        self.pages = []
+        self.ops = []
+        self.y = PDF_PAGE_H - PDF_MARGIN
+        self.continuation = self._continuation_label()
+
+    def _continuation_label(self):
+        title = str(self.model.get('title') or '')
+        sub = str(self.model.get('subtitle') or '')
+        return (title + ' · ' + sub).strip(' ·')
+
+    @property
+    def width(self):
+        return PDF_PAGE_W - 2 * PDF_MARGIN
+
+    def new_page(self):
+        if self.ops:
+            self.pages.append(self.ops)
+            self.ops = []
+        self.y = PDF_PAGE_H - PDF_MARGIN
+        if self.pages:
+            self.text(PDF_MARGIN, self.y - 7, 'DOMINIS · SYNTHÈSE ANNUELLE', 7.5, 'F2', PDF_GOLD)
+            self.text(PDF_PAGE_W - PDF_MARGIN, self.y - 7, _pdf_clip(self.continuation, 7.5, 400), 7.5, 'F1', PDF_MUTED, align='right')
+            self.y -= 16
+            self.rule(PDF_LINE)
+            self.y -= 12
+
+    def need(self, height):
+        if self.y - height < PDF_MARGIN + 30:
+            self.new_page()
+            return True
+        return False
+
+    def rect(self, x, y, w, h, fill=None, stroke=None, lw=0.6):
+        if fill:
+            self.ops.append('%s rg' % _pdf_rgb(fill))
+        if stroke:
+            self.ops.append('%s RG %.2f w' % (_pdf_rgb(stroke), lw))
+        self.ops.append('%.2f %.2f %.2f %.2f re' % (x, y, w, h))
+        self.ops.append('B' if (fill and stroke) else ('f' if fill else 'S'))
+
+    def line(self, x1, y1, x2, y2, color=PDF_LINE, lw=0.6):
+        self.ops.append('%s RG %.2f w' % (_pdf_rgb(color), lw))
+        self.ops.append('%.2f %.2f m %.2f %.2f l S' % (x1, y1, x2, y2))
+
+    def rule(self, color=PDF_LINE, lw=0.7):
+        self.line(PDF_MARGIN, self.y, PDF_PAGE_W - PDF_MARGIN, self.y, color, lw)
+
+    def text(self, x, y, txt, size=9, font='F1', color=PDF_INK, align='left'):
+        txt = str(txt if txt is not None else '')
+        if align != 'left':
+            w = _pdf_width(txt, size, font == 'F2')
+            x = x - w if align == 'right' else x - w / 2.0
+        self.ops.append('BT /%s %.2f Tf %s rg 1 0 0 1 %.2f %.2f Tm (%s) Tj ET' % (
+            font, size, _pdf_rgb(color), x, y, _pdf_esc(txt)))
+
+    def paragraph(self, txt, size=8.9, color=PDF_MUTED, indent=0.0, leading=11.8):
+        for line in _pdf_wrap(txt, size, self.width - indent):
+            self.need(leading + 2)
+            self.text(PDF_MARGIN + indent, self.y - leading + 3, line, size, 'F1', color)
+            self.y -= leading
+        self.y -= 3
+
+    def heading(self, title):
+        # Un titre ne doit jamais rester seul en bas de page : on exige la place
+        # du titre et du premier bloc de contenu avant de le poser.
+        self.need(96)
+        self.y -= 4
+        self.rect(PDF_MARGIN, self.y - 12, 3, 12, fill=PDF_GOLD)
+        self.text(PDF_MARGIN + 10, self.y - 10, title, 12.5, 'F2', PDF_INK)
+        self.y -= 17
+        self.rule(PDF_LINE)
+        self.y -= 11
+
+    def notice(self, txt, size=8.2):
+        if not txt:
+            return
+        lines = _pdf_wrap(txt, size, self.width - 26)
+        h = len(lines) * 11.4 + 18
+        self.need(h + 8)
+        top = self.y
+        self.rect(PDF_MARGIN, top - h, self.width, h, fill=PDF_SOFT, stroke=PDF_LINE)
+        self.rect(PDF_MARGIN, top - h, 3, h, fill=PDF_GOLD)
+        for i, line in enumerate(lines):
+            self.text(PDF_MARGIN + 13, top - 14 - i * 11.4, line, size, 'F1', '#5c6459')
+        self.y = top - h - 10
+
+    def kpi_cards(self, items):
+        items = [it for it in (items or []) if isinstance(it, dict)][:4]
+        if not items:
+            return
+        gap = 8.0
+        w = (self.width - gap * (len(items) - 1)) / len(items)
+        h = 54.0
+        self.need(h + 10)
+        top = self.y
+        tones = {'green': PDF_GREEN, 'red': PDF_RED, 'gold': PDF_GOLD}
+        for i, item in enumerate(items):
+            x = PDF_MARGIN + i * (w + gap)
+            self.rect(x, top - h, w, h, fill=PDF_SOFT, stroke=PDF_LINE)
+            self.text(x + 10, top - 16, _pdf_clip(item.get('label', ''), 7.2, w - 16), 7.2, 'F2', PDF_MUTED)
+            value = str(item.get('value') or '—')
+            size = 13.5 if _pdf_width(value, 13.5, True) <= w - 18 else (11.5 if _pdf_width(value, 11.5, True) <= w - 18 else 9.6)
+            self.text(x + 10, top - 39, value, size, 'F2', tones.get(str(item.get('tone')), PDF_INK))
+        self.y = top - h - 12
+
+    def bar_chart(self, chart):
+        labels = [str(x) for x in (chart.get('labels') or [])]
+        series = [s for s in (chart.get('series') or []) if isinstance(s, dict)]
+        if not labels or not series:
+            return
+        height = 158.0
+        self.need(height + 52)
+        top = self.y - 4
+        plot_left = PDF_MARGIN + 44
+        plot_right = PDF_PAGE_W - PDF_MARGIN
+        plot_width = plot_right - plot_left
+        bottom = top - height + 26
+        plot_h = top - bottom
+        values = []
+        for s in series:
+            for v in (s.get('values') or []):
+                try:
+                    values.append(max(0.0, float(v)))
+                except (TypeError, ValueError):
+                    values.append(0.0)
+        maxv = max(values) if values else 0.0
+        maxv = maxv or 1.0
+        # Graduation lisible (0 · 1 k€ · 2 k€ …) plutôt qu'un maximum brut.
+        raw = maxv / 4.0
+        mag = 10 ** math.floor(math.log10(raw)) if raw > 0 else 1
+        step = mag * 10
+        for mult in (1, 2, 2.5, 5, 10):
+            if mag * mult * 4 >= maxv:
+                step = mag * mult
+                break
+        maxv = step * 4
+        for g in range(5):
+            y = bottom + plot_h * g / 4.0
+            self.line(plot_left, y, plot_right, y, PDF_LINE, 0.4)
+            self.text(plot_left - 6, y - 3, _pdf_money_short(maxv * g / 4.0), 6.8, 'F1', PDF_MUTED, align='right')
+        group = plot_width / len(labels)
+        bar_w = max(3.0, min(11.0, group * 0.26))
+        for i, label in enumerate(labels):
+            center = plot_left + group * (i + 0.5)
+            start = center - (len(series) * bar_w + (len(series) - 1) * 2) / 2.0
+            for j, s in enumerate(series):
+                try:
+                    v = max(0.0, float((s.get('values') or [])[i]))
+                except (TypeError, ValueError, IndexError):
+                    v = 0.0
+                if v <= 0:
+                    continue
+                bh = max(1.0, plot_h * v / maxv)
+                self.rect(start + j * (bar_w + 2), bottom, bar_w, bh, fill=str(s.get('color') or PDF_GOLD))
+            self.text(center, bottom - 12, label, 7.2, 'F1', PDF_MUTED, align='center')
+        legend_y = bottom - 27
+        lx = plot_left
+        for s in series:
+            self.rect(lx, legend_y, 7, 7, fill=str(s.get('color') or PDF_GOLD))
+            self.text(lx + 11, legend_y + 0.5, str(s.get('label') or ''), 7.6, 'F1', PDF_INK)
+            lx += 22 + _pdf_width(str(s.get('label') or ''), 7.6)
+        self.y = legend_y - 14
+
+    def hbar_chart(self, chart):
+        items = [it for it in (chart.get('items') or []) if isinstance(it, dict)]
+        if not items:
+            self.paragraph('Aucune dépense enregistrée sur l’exercice.')
+            return
+        row_h = 21.0
+        self.need(len(items) * row_h + 12)
+        label_w = 132.0
+        bar_x = PDF_MARGIN + label_w
+        value_w = 74.0
+        bar_w = PDF_PAGE_W - PDF_MARGIN - bar_x - value_w - 8
+        maxv = max([float(it.get('value') or 0) for it in items] + [1.0])
+        top = self.y
+        for i, item in enumerate(items):
+            y = top - (i + 1) * row_h
+            self.text(PDF_MARGIN, y + 6, _pdf_clip(item.get('label', ''), 8.4, label_w - 8), 8.4, 'F1', PDF_INK)
+            self.rect(bar_x, y + 2, bar_w, 9, fill='#eeece3')
+            w = max(2.0, bar_w * float(item.get('value') or 0) / maxv)
+            self.rect(bar_x, y + 2, w, 9, fill=str(item.get('color') or PDF_RED))
+            self.text(PDF_PAGE_W - PDF_MARGIN, y + 4, str(item.get('value_label') or _pdf_money_short(item.get('value'))), 8.2, 'F2', PDF_INK, align='right')
+        self.y = top - len(items) * row_h - 10
+
+    def table(self, table):
+        if not isinstance(table, dict):
+            return
+        headers = [str(h) for h in (table.get('headers') or [])]
+        rows = [[str(c) for c in row] for row in (table.get('rows') or [])]
+        if not headers:
+            return
+        weights = table.get('weights') or [1.0] * len(headers)
+        aligns = table.get('aligns') or ['left'] * len(headers)
+        total = sum(float(w) for w in weights) or float(len(weights))
+        widths = [self.width * float(w) / total for w in weights]
+        xpos = []
+        x = PDF_MARGIN
+        for w in widths:
+            xpos.append(x)
+            x += w
+
+        def header():
+            self.need(26)
+            top = self.y
+            self.rect(PDF_MARGIN, top - 20, self.width, 20, fill=PDF_HEAD)
+            for i, head in enumerate(headers):
+                ax = xpos[i] + widths[i] - 6 if aligns[i] == 'right' else xpos[i] + 6
+                self.text(ax, top - 13.5, _pdf_clip(head, 7.8, widths[i] - 12), 7.8, 'F2', PDF_INK, align=aligns[i])
+            self.y = top - 20
+
+        header()
+        for ri, row in enumerate(rows):
+            cells = []
+            for i in range(len(headers)):
+                value = row[i] if i < len(row) else ''
+                cells.append(_pdf_wrap(value, 8.3, widths[i] - 12))
+            h = max(len(c) for c in cells) * 11.2 + 9
+            if self.y - h < PDF_MARGIN + 30:
+                self.new_page()
+                header()
+            top = self.y
+            if ri % 2 == 1:
+                self.rect(PDF_MARGIN, top - h, self.width, h, fill=PDF_ZEBRA)
+            for i, lines in enumerate(cells):
+                for li, line in enumerate(lines):
+                    ax = xpos[i] + widths[i] - 6 if aligns[i] == 'right' else xpos[i] + 6
+                    self.text(ax, top - 12.5 - li * 11.2, line, 8.3, 'F1', PDF_INK, align=aligns[i])
+            self.y = top - h
+            self.line(PDF_MARGIN, self.y, PDF_PAGE_W - PDF_MARGIN, self.y, PDF_LINE, 0.4)
+        self.y -= 9
+
+    def analysis_block(self, analysis):
+        for label, key, color in (('Points forts', 'strengths', PDF_GREEN), ('Points de vigilance', 'watch', PDF_RED)):
+            items = [str(x) for x in (analysis.get(key) or []) if str(x).strip()]
+            if not items:
+                continue
+            self.need(28)
+            self.text(PDF_MARGIN, self.y - 9, label, 8.8, 'F2', color)
+            self.y -= 16
+            for item in items:
+                lines = _pdf_wrap(item, 8.7, self.width - 16)
+                h = len(lines) * 11.6 + 3
+                self.need(h)
+                self.rect(PDF_MARGIN + 1, self.y - 7.5, 4, 4, fill=color)
+                for i, line in enumerate(lines):
+                    self.text(PDF_MARGIN + 12, self.y - 9 - i * 11.6, line, 8.7, 'F1', PDF_INK)
+                self.y -= h
+            self.y -= 4
+        conclusion = str(analysis.get('conclusion') or '').strip()
+        if conclusion:
+            lines = _pdf_wrap(conclusion, 8.8, self.width - 26)
+            h = len(lines) * 12.0 + 32
+            self.need(h)
+            top = self.y
+            self.rect(PDF_MARGIN, top - h, self.width, h, fill=PDF_SOFT, stroke=PDF_LINE)
+            self.rect(PDF_MARGIN, top - h, 3, h, fill=PDF_GOLD)
+            self.text(PDF_MARGIN + 13, top - 15, 'En résumé', 8.0, 'F2', PDF_GOLD)
+            for i, line in enumerate(lines):
+                self.text(PDF_MARGIN + 13, top - 29 - i * 12.0, line, 8.8, 'F1', PDF_INK)
+            self.y = top - h - 10
+
+    def draw_header(self):
+        model = self.model
+        self.text(PDF_MARGIN, self.y - 7, str(model.get('eyebrow') or 'DOMINIS · SYNTHÈSE ANNUELLE'), 8.0, 'F2', PDF_GOLD)
+        self.y -= 26
+        title = str(model.get('title') or '')
+        for line in _pdf_wrap(title, 21, self.width, True)[:2]:
+            self.text(PDF_MARGIN, self.y - 16, line, 21, 'F2', PDF_INK)
+            self.y -= 25
+        subtitle = str(model.get('subtitle') or '')
+        if subtitle:
+            self.text(PDF_MARGIN, self.y - 11, subtitle, 10.6, 'F1', PDF_GOLD)
+            self.y -= 19
+        meta = [str(x) for x in (model.get('meta') or []) if str(x).strip()]
+        if meta:
+            self.text(PDF_MARGIN, self.y - 8, ' · '.join(meta), 8.2, 'F1', PDF_MUTED)
+            self.y -= 18
+        self.rule(PDF_GOLD, 1.0)
+        self.y -= 12
+        self.notice(str(model.get('notice') or ''))
+
+    def section(self, sec):
+        if not isinstance(sec, dict):
+            return
+        self.heading(str(sec.get('title') or ''))
+        for para in (sec.get('paragraphs') or []):
+            if str(para).strip():
+                self.paragraph(str(para))
+        if sec.get('kpis'):
+            self.kpi_cards(sec.get('kpis'))
+        chart = sec.get('chart')
+        if isinstance(chart, dict):
+            if chart.get('type') == 'hbar':
+                self.hbar_chart(chart)
+            else:
+                self.bar_chart(chart)
+        if sec.get('table'):
+            self.table(sec.get('table'))
+        if isinstance(sec.get('analysis'), dict):
+            self.analysis_block(sec.get('analysis'))
+        if sec.get('note'):
+            self.notice(str(sec.get('note')), 7.9)
+
+    def render(self):
+        self.draw_header()
+        for sec in (self.model.get('sections') or []):
+            self.section(sec)
+
+    def build(self):
+        if self.ops:
+            self.pages.append(self.ops)
+            self.ops = []
+        if not self.pages:
+            self.pages = [[]]
+        total = len(self.pages)
+        footer_left = _pdf_clip('Dominis · Synthèse annuelle · ' + str(self.model.get('title') or ''), 7.0, 360)
+        for i, ops in enumerate(self.pages, 1):
+            ops.append('BT /F1 7.0 Tf %s rg 1 0 0 1 %.2f 24 Tm (%s) Tj ET' % (
+                _pdf_rgb(PDF_MUTED), PDF_MARGIN, _pdf_esc(footer_left)))
+            label = '%d / %d' % (i, total)
+            ops.append('BT /F1 7.0 Tf %s rg 1 0 0 1 %.2f 24 Tm (%s) Tj ET' % (
+                _pdf_rgb(PDF_MUTED), PDF_PAGE_W - PDF_MARGIN - _pdf_width(label, 7.0), _pdf_esc(label)))
+
+        objects = []
+
+        def add(data):
+            objects.append(data)
+            return len(objects)
+
+        catalog_id = add(b'')
+        pages_id = add(b'')
+        font_regular = add(b'<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>')
+        font_bold = add(b'<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>')
+        font_italic = add(b'<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Oblique /Encoding /WinAnsiEncoding >>')
+        page_ids = []
+        for ops in self.pages:
+            content = '\n'.join(ops).encode('cp1252', 'replace')
+            cid = add(b'<< /Length ' + str(len(content)).encode() + b' >>\nstream\n' + content + b'\nendstream')
+            resources = ('<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %.2f %.2f] '
+                         '/Resources << /Font << /F1 %d 0 R /F2 %d 0 R /F3 %d 0 R >> >> '
+                         '/Contents %d 0 R >>' % (
+                             pages_id, PDF_PAGE_W, PDF_PAGE_H, font_regular, font_bold, font_italic, cid))
+            page_ids.append(add(resources.encode('ascii')))
+        objects[catalog_id - 1] = ('<< /Type /Catalog /Pages %d 0 R >>' % pages_id).encode('ascii')
+        objects[pages_id - 1] = ('<< /Type /Pages /Count %d /Kids [%s] >>' % (
+            len(page_ids), ' '.join('%d 0 R' % p for p in page_ids))).encode('ascii')
+
+        out = bytearray(b'%PDF-1.4\n%\xe2\xe3\xcf\xd3\n')
+        offsets = []
+        for i, obj in enumerate(objects, 1):
+            offsets.append(len(out))
+            out += ('%d 0 obj\n' % i).encode('ascii') + obj + b'\nendobj\n'
+        xref = len(out)
+        out += ('xref\n0 %d\n' % (len(objects) + 1)).encode('ascii')
+        out += b'0000000000 65535 f \n'
+        for off in offsets:
+            out += ('%010d 00000 n \n' % off).encode('ascii')
+        out += ('trailer\n<< /Size %d /Root %d 0 R >>\nstartxref\n%d\n%%%%EOF\n' % (
+            len(objects) + 1, catalog_id, xref)).encode('ascii')
+        return bytes(out), len(self.pages)
+
+
+def build_annual_report_pdf(model):
+    """Construit le PDF de synthèse et renvoie (octets, nombre de pages)."""
+    if not isinstance(model, dict):
+        raise ValueError('Synthèse invalide.')
+    if not isinstance(model.get('sections'), list):
+        raise ValueError('Synthèse vide.')
+    doc = PdfAnnualReport(model)
+    doc.render()
+    return doc.build()
+
 
 def build_document_preview(r):
     d=json.loads(r['data'])
@@ -6810,6 +7551,35 @@ class Handler(BaseHTTPRequestHandler):
                     with connect() as c: raw=backup_bytes(c)
                     return self.reply(raw,mime='application/octet-stream',filename='dominis-sauvegarde-'+dt.date.today().isoformat()+'.db')
                 with connect() as c:
+                    if path=='/api/annual-report':
+                        # Synthèse annuelle : le PDF est produit ici puis archivé
+                        # comme un document ordinaire (aperçu, téléchargement,
+                        # sauvegarde complète et suppression inclus).
+                        import unicodedata
+                        sci_id=str(p.get('sci') or '')
+                        if not c.execute('SELECT 1 FROM scis WHERE id=?',(sci_id,)).fetchone():
+                            raise ValueError('SCI introuvable.')
+                        style=p.get('style') if p.get('style') in ('classique','graphique') else 'classique'
+                        year=str(p.get('year') or '')[:4]
+                        if not year.isdigit(): raise ValueError('Exercice invalide.')
+                        raw,pages=build_annual_report_pdf(p.get('model'))
+                        if len(raw)>30*1024*1024: raise ValueError('Synthèse trop volumineuse.')
+                        folders=doc_folders_by_sci(c).get(sci_id,[])
+                        valid={f['id'] for f in folders}
+                        folder_id=str(p.get('folder_id') or '')
+                        if folder_id not in valid: folder_id=''
+                        title=str((p.get('model') or {}).get('title') or 'SCI')
+                        base=unicodedata.normalize('NFKD','Synthese-%s-%s-%s' % (year,style,title)).encode('ascii','ignore').decode()
+                        base=re.sub(r'[^A-Za-z0-9._-]+','-',base).strip('-') or 'synthese-'+year
+                        filename=base+'.pdf'
+                        docname='Synthèse %s · %s · %s' % (year,'Graphique' if style=='graphique' else 'Classique',title)
+                        data={'name':docname,'category':'Synthèse','date':dt.date.today().isoformat(),
+                              'synthesis_year':year,'report_style':style,'filename':filename,
+                              'mime':'application/pdf','blob':base64.b64encode(raw).decode('ascii'),
+                              'folder_id':folder_id}
+                        ident=save_record(c,{'kind':'documents','sci':sci_id,'data':data})
+                        c.commit()
+                        return self.reply({'ok':True,'id':ident,'filename':filename,'size':len(raw),'pages':pages})
                     if path=='/api/save':
                         ident=save_record(c,p); c.commit(); return self.reply({'ok':True,'id':ident})
                     if path=='/api/settings':
@@ -6818,6 +7588,7 @@ class Handler(BaseHTTPRequestHandler):
                             if k in DEFAULTS or k=='demo': st[k]=v
                         if st['theme'] not in ['dark','light']: raise ValueError('Thème invalide.')
                         if not isinstance(st.get('table_columns',{}),dict): raise ValueError('Configuration des colonnes invalide.')
+                        if not isinstance(st.get('table_view',{}),dict): raise ValueError('Réglages de tableau invalides.')
                         if not isinstance(st.get('doc_folders',[]),list): raise ValueError('Configuration des dossiers invalide.')
                         if 'year' in p: st['year']=normalize_year_setting(p['year'])
                         by=st.get('doc_folders_by_sci',{})
@@ -6841,6 +7612,10 @@ class Handler(BaseHTTPRequestHandler):
                                 if any(json.loads(r['data']).get(f)==ident for f in REFS): raise ValueError('Cet élément est utilisé. Supprimez d’abord les éléments liés (baux, appels ou paiements).')
                             c.execute('DELETE FROM records WHERE id=? AND kind=?',(ident,kind))
                         audit(c,'Suppression',kind+' / '+ident); c.commit(); return self.reply({'ok':True})
+                    if path=='/api/purge':
+                        if p.get('confirm') is not True: raise ValueError('Confirmation requise.')
+                        result=purge_tab(c,str(p.get('sci') or ''),str(p.get('tab') or ''))
+                        c.commit(); return self.reply({'ok':True,**result})
                     if path=='/api/export':
                         b=export_bundle(c,p); fmt=p.get('format','json')
                         if fmt=='json': return self.reply(json.dumps(b,ensure_ascii=False,indent=2).encode(),mime='application/json',filename='dominis-export.json')
@@ -6891,7 +7666,43 @@ HTML = r'''<!doctype html>
 @media(max-width:950px){.kpis{grid-template-columns:repeat(2,1fr)}.charts-grid,.lower-grid,.settings-grid{grid-template-columns:1fr}.sci-grid{grid-template-columns:1fr}.donut-wrap{min-height:225px}.sci-stats{grid-template-columns:1fr 1fr}.chart{height:250px}.page-head{align-items:flex-start}.toolbar{flex-wrap:wrap;justify-content:flex-end}.search-btn{width:150px}.search-btn kbd{display:none}.sci-card-bottom{margin-top:14px}}
 @media(max-width:640px){#sidebar{width:76px}#shell{margin-left:76px}.brand{padding:25px 17px}.brand-text,.nav-text,.workspace,.nav-label,.user-details,.user-lock,.user-block svg,.local-status{display:none}.nav-scroll{padding:0 10px}.nav-bottom{padding:12px 10px}.nav-item{padding:12px 17px}.user-block{padding:18px 0;justify-content:center}.nav-divider{margin:18px 8px}header{padding:0 15px;height:60px}.breadcrumb{display:none}.search-btn{width:145px}main{padding:22px 14px}.page-head{flex-direction:column;gap:16px}h1{font-size:29px}.toolbar{justify-content:flex-start}.kpis{gap:10px}.kpi{padding:13px}.kpi-value{font-size:24px}.kpi-top{font-size:10px}.kpi-bottom{font-size:9px}.property-grid{grid-template-columns:1fr}.form-grid,.info-grid{grid-template-columns:1fr}.checks{grid-template-columns:1fr}.modal-backdrop{padding:10px}.modal-content{padding:18px}.modal-head{padding:17px}.footer{flex-direction:column}.legend{gap:7px;font-size:9px}.filters{flex-wrap:wrap}.panel-head{padding:18px 16px 0}.panel-body{padding:17px}.chart{padding:15px 10px}.demo-notice{align-items:flex-start} .setting-row{flex-wrap:wrap}.tabs{gap:17px}}
 .update-steps{padding-left:22px;margin:20px 0;line-height:2.2}.tabs button{white-space:nowrap}.tabs{overflow-x:auto}
-.prop-crop-box{grid-column:1/-1;border:1px solid var(--line);background:var(--panel2);border-radius:10px;padding:15px 16px;display:flex;flex-direction:column;gap:12px}.prop-crop-stage-wrap{position:relative;width:100%;aspect-ratio:16/5;background:linear-gradient(130deg,var(--goldbg),var(--panel));border:1px dashed var(--gold);border-radius:8px;overflow:hidden;cursor:grab;user-select:none;touch-action:none;display:flex;align-items:center;justify-content:center;color:var(--gold)}.prop-crop-stage-wrap:active{cursor:grabbing}.prop-crop-stage-wrap canvas{width:100%;height:100%;display:block}.prop-crop-placeholder{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:12px;text-align:center;pointer-events:none}.prop-crop-placeholder svg{width:46px;height:46px;opacity:.65}.prop-crop-grid{position:absolute;inset:0;pointer-events:none;background-image:linear-gradient(to right,rgba(199,173,119,.28) 1px,transparent 1px),linear-gradient(to bottom,rgba(199,173,119,.28) 1px,transparent 1px);background-size:33.333% 33.333%;border:1px solid rgba(199,173,119,.5);border-radius:8px}.prop-crop-badge{position:absolute;bottom:8px;left:10px;pointer-events:none;background:var(--panel);color:var(--text);opacity:.94;font-size:10px;padding:3px 8px;border-radius:5px;border:1px solid #c7ad7759}.prop-crop-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.prop-crop-controls input[type=range]{flex:1;min-width:130px;padding:0;accent-color:var(--gold)}.doc-folders-bar{display:flex;gap:10px;overflow-x:auto;padding-bottom:6px;margin-bottom:18px;align-items:stretch}.doc-folder-card{border:1px solid var(--line);background:var(--panel);border-radius:10px;padding:11px 14px;min-width:175px;display:flex;flex-direction:column;gap:7px;cursor:pointer;transition:border-color .18s,background .18s,transform .18s;flex:none;text-align:left}.doc-folder-card:hover{border-color:var(--gold);transform:translateY(-1px)}.doc-folder-card.active{border-color:var(--gold);background:var(--goldbg)}.doc-folder-top{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%}.doc-folder-name{font-weight:600;font-size:12px;color:var(--text);display:flex;align-items:center;gap:7px;overflow:hidden;text-overflow:ellipsis}.doc-folder-meta{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:10px;color:var(--muted);width:100%}.doc-folder-actions{display:flex;gap:2px;margin-left:auto}.doc-folder-actions button[disabled]{opacity:.3;cursor:default}.doc-folder-card.doc-folder-all{margin-left:auto;border-style:solid}.folder-order-box{grid-column:1/-1;border:1px solid var(--line);background:var(--panel2);border-radius:10px;padding:14px 15px;margin-top:4px}.folder-order-box h4{margin:0 0 10px;font-size:12px;color:var(--muted);font-weight:600}.folder-order-list{display:flex;flex-wrap:wrap;gap:6px}.doc-folder-actions button{padding:2px 4px;min-width:21px;height:21px;background:transparent;border:0;color:var(--muted);border-radius:4px}.doc-folder-actions button:hover{color:var(--gold);background:var(--panel2)}.doc-folder-actions button svg{width:12px;height:12px}.doc-folder-card{-webkit-touch-callout:none;user-select:none}.doc-folder-card.doc-folder-draggable{cursor:grab}body.doc-folder-dragging,body.doc-folder-dragging *{cursor:grabbing!important;user-select:none}.doc-folder-ghost{position:fixed;z-index:200;pointer-events:none;margin:0;opacity:.97;border-color:var(--gold);background:var(--panel);box-shadow:0 18px 40px rgba(0,0,0,.42);transform:rotate(-1.2deg) scale(1.02);transition:none!important}.doc-folder-placeholder{border:1px dashed var(--gold);background:var(--goldbg);border-radius:10px;flex:none;min-width:175px}.col-society{width:40px;text-align:center;padding-left:8px;padding-right:4px}.sci-dot{display:inline-block;width:11px;height:11px;border-radius:50%;background:var(--gold);border:2px solid var(--panel);box-shadow:0 0 0 1px var(--line);vertical-align:middle}tr.doc-row{cursor:pointer}.doc-preview-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:10px 14px;background:var(--panel2);border:1px solid var(--line);border-radius:9px;margin-bottom:14px}.doc-preview-zoom-bar{display:flex;align-items:center;gap:7px;flex-wrap:wrap}.doc-preview-zoom-bar input[type=range]{width:130px;padding:0;accent-color:var(--gold)}.doc-preview-viewport{height:64vh;min-height:390px;background:var(--bg);border:1px solid var(--line);border-radius:10px;overflow:auto;display:flex;position:relative;padding:0;overscroll-behavior:contain}.doc-preview-stage{margin:auto;width:calc(100% * var(--doc-zoom,1));height:calc(100% * var(--doc-zoom,1));min-width:120px;min-height:120px;display:flex;align-items:center;justify-content:center;flex:none;padding:16px;box-sizing:border-box}.doc-preview-img{max-width:100%;max-height:100%;width:100%;height:100%;object-fit:contain;display:block;border-radius:6px;box-shadow:0 8px 28px rgba(0,0,0,.28)}.doc-preview-frame{width:100%;height:100%;border:0;border-radius:6px;background:#fff}.doc-preview-sheet{width:100%;min-height:100%;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:22px 26px;color:var(--text);overflow:auto;box-shadow:0 8px 28px rgba(0,0,0,.2);font-size:calc(13px * var(--doc-zoom,1));line-height:1.6}
+.prop-crop-box{grid-column:1/-1;border:1px solid var(--line);background:var(--panel2);border-radius:10px;padding:15px 16px;display:flex;flex-direction:column;gap:12px}.prop-crop-stage-wrap{position:relative;width:100%;aspect-ratio:16/5;background:linear-gradient(130deg,var(--goldbg),var(--panel));border:1px dashed var(--gold);border-radius:8px;overflow:hidden;cursor:grab;user-select:none;touch-action:none;display:flex;align-items:center;justify-content:center;color:var(--gold)}.prop-crop-stage-wrap:active{cursor:grabbing}.prop-crop-stage-wrap canvas{width:100%;height:100%;display:block}.prop-crop-placeholder{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:12px;text-align:center;pointer-events:none}.prop-crop-placeholder svg{width:46px;height:46px;opacity:.65}.prop-crop-grid{position:absolute;inset:0;pointer-events:none;background-image:linear-gradient(to right,rgba(199,173,119,.28) 1px,transparent 1px),linear-gradient(to bottom,rgba(199,173,119,.28) 1px,transparent 1px);background-size:33.333% 33.333%;border:1px solid rgba(199,173,119,.5);border-radius:8px}.prop-crop-badge{position:absolute;bottom:8px;left:10px;pointer-events:none;background:var(--panel);color:var(--text);opacity:.94;font-size:10px;padding:3px 8px;border-radius:5px;border:1px solid #c7ad7759}.prop-crop-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.prop-crop-controls input[type=range]{flex:1;min-width:130px;padding:0;accent-color:var(--gold)}.doc-folders-bar{display:flex;gap:10px;overflow-x:auto;padding-bottom:6px;margin-bottom:18px;align-items:stretch}.doc-folder-card{border:1px solid var(--line);background:var(--panel);border-radius:10px;padding:11px 14px;min-width:175px;display:flex;flex-direction:column;gap:7px;cursor:pointer;transition:border-color .18s,background .18s,transform .18s;flex:none;text-align:left}.doc-folder-card:hover{border-color:var(--gold);transform:translateY(-1px)}.doc-folder-card.active{border-color:var(--gold);background:var(--goldbg)}.doc-folder-top{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%}.doc-folder-name{font-weight:600;font-size:12px;color:var(--text);display:flex;align-items:center;gap:7px;overflow:hidden;text-overflow:ellipsis}.doc-folder-meta{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:10px;color:var(--muted);width:100%}.doc-folder-actions{display:flex;gap:2px;margin-left:auto}.doc-folder-actions button[disabled]{opacity:.3;cursor:default}.doc-folder-card.doc-folder-all{margin-left:auto;border-style:solid}.folder-order-box{grid-column:1/-1;border:1px solid var(--line);background:var(--panel2);border-radius:10px;padding:14px 15px;margin-top:4px}.folder-order-box h4{margin:0 0 10px;font-size:12px;color:var(--muted);font-weight:600}.folder-order-list{display:flex;flex-wrap:wrap;gap:6px}.doc-folder-actions button{padding:2px 4px;min-width:21px;height:21px;background:transparent;border:0;color:var(--muted);border-radius:4px}.doc-folder-actions button:hover{color:var(--gold);background:var(--panel2)}.doc-folder-actions button svg{width:12px;height:12px}.doc-folder-card{-webkit-touch-callout:none;user-select:none;-webkit-user-drag:none}.doc-folder-card *{-webkit-user-drag:none}.doc-folder-card::selection,.doc-folder-card *::selection{background:transparent}.doc-breadcrumb{display:flex;align-items:center;gap:4px;font-size:11px;color:var(--muted);margin-bottom:10px;flex-wrap:wrap}
+.doc-breadcrumb button{padding:2px 6px;border:0;background:transparent;color:var(--gold);border-radius:5px;font-size:11px}
+.doc-breadcrumb button:hover{background:var(--panel2)}
+.doc-breadcrumb svg{width:12px;height:12px;opacity:.55}
+.doc-breadcrumb span{color:var(--text);font-weight:600}
+.doc-folder-new{min-height:74px}.doc-folder-draggable{cursor:grab;touch-action:none}.doc-folder-draggable:focus-visible{outline:2px solid var(--gold);outline-offset:3px}body.doc-folder-dragging,body.doc-folder-dragging *{cursor:grabbing!important;user-select:none}.doc-folder-ghost{position:fixed;z-index:200;pointer-events:none;margin:0;opacity:.97;border-color:var(--gold);background:var(--panel);box-shadow:0 18px 40px rgba(0,0,0,.42);transform:rotate(-1.2deg) scale(1.02);transition:none!important}.doc-folder-placeholder{border:1px dashed var(--gold);background:var(--goldbg);border-radius:10px;flex:none;min-width:175px}
+.tv-compact th{padding:7px 12px;font-size:8px}
+.tv-compact td{padding:7px 12px;font-size:11.5px}
+.tv-compact .cell-sub{font-size:9px;margin-top:1px}
+.tv-dense th{padding:4px 9px;font-size:8px;letter-spacing:.4px}
+.tv-dense td{padding:4px 9px;font-size:11px}
+.tv-dense .cell-sub{font-size:8.5px;margin-top:0;display:inline;margin-left:6px}
+.tv-dense .actions button{min-width:24px;padding:3px 4px}
+.tv-fit th,.tv-fit td{white-space:normal;overflow-wrap:anywhere}
+.tv-fit .doc-folder-name{white-space:nowrap;min-width:0}.doc-folder-name>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.doc-folder-name svg{flex:none}
+.tv-sticky thead th{position:sticky;top:0;background:var(--panel);z-index:2;box-shadow:inset 0 -1px 0 var(--line)}
+tfoot td{border-top:1px solid var(--line);border-bottom:0;background:var(--panel2);font-weight:600}
+.tv-density{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;padding:12px 0;border-bottom:1px solid var(--line)}
+.tv-density p,.tv-options .setting-row p{font-size:10px;color:var(--muted);margin-top:4px;max-width:340px}
+.tv-seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;flex:none}
+.tv-seg button{border:0;border-radius:0;padding:7px 11px;font-size:11px;background:var(--panel2);color:var(--text)}
+.tv-seg button+button{border-left:1px solid var(--line)}
+.tv-seg button.active{background:var(--goldbg);color:var(--gold);font-weight:600}
+.table-split{display:grid;grid-template-columns:minmax(0,1fr);gap:16px;align-items:start}
+@media(min-width:1560px){.table-split.has-rail{grid-template-columns:minmax(0,1fr) 300px}}
+.chart-rail{display:flex;flex-direction:column;gap:14px}
+.chart-rail .panel-head p{font-size:10px;color:var(--muted);margin-top:3px}
+.rail-chart{height:136px;padding:10px 14px 6px}
+.rail-chart svg{width:100%;height:100%}
+.rail-legend{display:flex;gap:12px;padding:8px 16px 0;font-size:9px;color:var(--muted)}
+.rail-legend i{width:9px;height:9px;border-radius:2px;display:inline-block;margin-right:5px}
+.rail-bars{display:flex;flex-direction:column;gap:9px}
+.rail-bar-row{display:grid;grid-template-columns:1fr auto;grid-template-areas:'label value' 'track track';gap:3px 8px;font-size:10px}
+.rail-bar-label{grid-area:label;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--muted)}
+.rail-bar-value{grid-area:value;font-variant-numeric:tabular-nums}
+.rail-bar-track{grid-area:track;height:5px;border-radius:3px;background:var(--line);overflow:hidden}
+.rail-bar-track i{display:block;height:100%;background:var(--red);border-radius:3px}.sci-cell{display:inline-flex;align-items:center;gap:7px;white-space:nowrap}.col-society{width:40px;text-align:center;padding-left:8px;padding-right:4px}.sci-dot{display:inline-block;width:11px;height:11px;border-radius:50%;background:var(--gold);border:2px solid var(--panel);box-shadow:0 0 0 1px var(--line);vertical-align:middle}tr.doc-row{cursor:pointer}.doc-preview-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:10px 14px;background:var(--panel2);border:1px solid var(--line);border-radius:9px;margin-bottom:14px}.doc-preview-zoom-bar{display:flex;align-items:center;gap:7px;flex-wrap:wrap}.doc-preview-zoom-bar input[type=range]{width:130px;padding:0;accent-color:var(--gold)}.doc-preview-viewport{height:64vh;min-height:390px;background:var(--bg);border:1px solid var(--line);border-radius:10px;overflow:auto;display:flex;position:relative;padding:0;overscroll-behavior:contain}.doc-preview-stage{margin:auto;width:calc(100% * var(--doc-zoom,1));height:calc(100% * var(--doc-zoom,1));min-width:120px;min-height:120px;display:flex;align-items:center;justify-content:center;flex:none;padding:16px;box-sizing:border-box}.doc-preview-img{max-width:100%;max-height:100%;width:100%;height:100%;object-fit:contain;display:block;border-radius:6px;box-shadow:0 8px 28px rgba(0,0,0,.28)}.doc-preview-frame{width:100%;height:100%;border:0;border-radius:6px;background:#fff}.doc-preview-sheet{width:100%;min-height:100%;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:22px 26px;color:var(--text);overflow:auto;box-shadow:0 8px 28px rgba(0,0,0,.2);font-size:calc(13px * var(--doc-zoom,1));line-height:1.6}
 th.col-settings-th{padding:6px 14px;width:44px;text-align:right;vertical-align:middle}.table-gear-btn{width:28px;height:28px;padding:5px;color:var(--muted);border-radius:6px;border-color:transparent;background:transparent;display:inline-flex;align-items:center;justify-content:center}.table-gear-btn svg{width:15px;height:15px;transition:transform .22s ease}.table-gear-btn:hover{color:var(--gold);background:var(--panel2);border-color:var(--line)}.table-gear-btn:hover svg{transform:rotate(30deg)}.col-config-item{padding:10px 12px;border:1px solid var(--line);border-radius:7px;margin-top:8px;display:flex;align-items:center;gap:10px;background:var(--panel2);font-size:12px;transition:opacity .18s,background .18s}.col-config-item.col-hidden{opacity:.65;background:transparent;border-style:dashed}.col-config-item .actions{margin-left:auto}.bell-btn{position:relative}.bell-badge{position:absolute;top:2px;right:2px;min-width:16px;height:16px;padding:0 4px;border-radius:999px;background:#e5484d;color:#fff;font-size:9px;font-weight:700;line-height:12px;display:inline-flex;align-items:center;justify-content:center;border:2px solid var(--bg);box-shadow:0 2px 6px rgba(229,72,77,.45);pointer-events:none;animation:badgePop .22s cubic-bezier(.22,1,.36,1)}@keyframes badgePop{from{transform:scale(0);opacity:0}to{transform:scale(1);opacity:1}}.bell-list{display:flex;flex-direction:column;gap:10px;max-height:400px;overflow:auto}.bell-item{border:1px solid var(--line);background:var(--panel2);border-radius:10px;padding:13px 15px;display:flex;align-items:center;justify-content:space-between;gap:14px;transition:border-color .18s}.bell-item:hover{border-color:var(--gold)}.bell-item.important{border-left:3px solid var(--red)}.task-params-box{grid-column:1/-1;border:1px solid var(--line);background:var(--panel2);border-radius:10px;padding:14px 16px;display:flex;flex-direction:column;gap:12px}.task-param-row{display:flex;align-items:center;justify-content:space-between;gap:14px}
 .task-param-row>div{flex:1 1 auto;min-width:0}.task-param-row+.task-param-row{border-top:1px solid var(--line);padding-top:12px}.task-param-row h4{margin:0;font-size:12px;font-weight:600;color:var(--text)}.task-param-row p{margin:3px 0 0;font-size:11px;color:var(--muted)}.task-reminders-area{border-top:1px solid var(--line);padding-top:12px;display:flex;flex-direction:column;gap:12px}.task-reminders-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(175px,1fr));gap:12px}.mac-notif-container{position:fixed;top:16px;right:18px;z-index:200;display:flex;flex-direction:column;gap:10px;pointer-events:none;max-width:calc(100vw - 32px)}.mac-notif{pointer-events:auto;width:376px;max-width:100%;background:rgba(30,34,30,.9);backdrop-filter:blur(24px) saturate(180%);-webkit-backdrop-filter:blur(24px) saturate(180%);border:1px solid rgba(255,255,255,.15);border-radius:16px;padding:13px 15px;box-shadow:0 20px 48px rgba(0,0,0,.52),0 3px 10px rgba(0,0,0,.25);color:var(--text);position:relative;animation:macNotifIn .45s cubic-bezier(.22,1,.36,1);transform-origin:top right}:root[data-theme=light] .mac-notif{background:rgba(252,251,247,.92);border-color:rgba(37,44,37,.13);box-shadow:0 18px 42px rgba(37,44,37,.18),0 3px 10px rgba(37,44,37,.08)}.mac-notif.closing{animation:macNotifOut .32s cubic-bezier(.4,0,1,1) forwards;pointer-events:none}@keyframes macNotifIn{0%{opacity:0;transform:translateX(calc(100% + 28px)) scale(.95)}70%{opacity:1;transform:translateX(-4px) scale(1.005)}100%{opacity:1;transform:translateX(0) scale(1)}}@keyframes macNotifOut{0%{opacity:1;transform:translateX(0) scale(1)}100%{opacity:0;transform:translateX(calc(100% + 28px)) scale(.95)}}.mac-notif-main{display:flex;align-items:flex-start;gap:12px}.mac-notif-icon{width:38px;height:38px;border-radius:9px;object-fit:contain;background:#000;flex:none;box-shadow:0 2px 6px rgba(0,0,0,.3)}.mac-notif-body{flex:1;min-width:0}.mac-notif-top{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:10px;color:var(--muted);letter-spacing:.5px;text-transform:uppercase;font-weight:600}.mac-notif-title{font-size:13px;font-weight:600;color:var(--text);margin-top:2px;line-height:1.3;overflow:hidden;text-overflow:ellipsis}.mac-notif-sub{font-size:11px;color:var(--muted);margin-top:2px;line-height:1.35}.mac-notif-actions{display:flex;justify-content:flex-end;gap:7px;margin-top:10px;padding-top:9px;border-top:1px solid rgba(146,152,141,.18)}.mac-notif-btn{padding:5px 11px;font-size:11px;border-radius:6px}.mac-notif-x{position:absolute;top:-6px;left:-6px;width:21px;height:21px;padding:3px;border-radius:50%;background:var(--panel2);border:1px solid var(--line);color:var(--muted);box-shadow:0 2px 6px rgba(0,0,0,.25);opacity:0;transition:opacity .15s}.mac-notif:hover .mac-notif-x,.mac-notif:focus-within .mac-notif-x{opacity:1}.mac-notif-x svg{width:11px;height:11px}
 @media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
@@ -6912,7 +7723,7 @@ const palette=['#c7ad77','#879ad8','#70b7a6','#ce9683','#a08dcc','#7bb5c8'];
 const kindNames={properties:'Biens immobiliers',leases:'Baux & locataires',calls:'Appels de loyers',entries:'Trésorerie',partners:'Associés',loans:'Emprunts',tasks:'Échéances',documents:'Documents'};
 const navs={treasury:['Trésorerie','wallet'],agenda:['Échéancier','calendar'],documents:['Documents','folder']};
 const tabs=[['overview','Vue d’ensemble'],['properties','Biens'],['leases','Baux & locataires'],['calls','Loyers'],['entries','Trésorerie'],['partners','Associés'],['loans','Emprunts'],['tasks','Échéances'],['documents','Documents'],['identity','Société']];
-let S={scis:[],records:[],settings:{},audit:[]}, page='dashboard',tab='overview',query='',scope='',filter='',docFolder='',modalDirty=false,previousFocus=null,settingsQueue=Promise.resolve(),closing=false,importData=null;
+let S={scis:[],records:[],settings:{},audit:[]}, page='dashboard',tab='overview',query='',scope='',filter='',docFolder='',docYear='',modalDirty=false,previousFocus=null,settingsQueue=Promise.resolve(),closing=false,importData=null;
 let settingsSection='general', updateInfo={status:'checking',current:'',message:'Vérification sur GitHub…'}, updateInstalling=false, updateRequestPending=false, updatePrompted=false, updateInstance=null, restartSince=0, restartNotified=false;
 const updateLabels={idle:'En attente',checking:'Vérification en cours',available:'Mise à jour disponible',current:'À jour',unavailable:'Vérification impossible',disabled:'Aperçu',downloading:'Téléchargement en cours',installing:'Installation en cours',restarting:'Redémarrage automatique',failed:'Installation annulée'};
 const busyUpdate=()=>['downloading','installing','restarting'].includes(updateInfo.status);
@@ -7081,7 +7892,7 @@ const yr=r=>isAllYears()||String(r.date||'').startsWith(String(activeYear()));
 // doit rester visible.
 const yearMatches=(r,kind)=>isAllYears()||(kind==='entries'?String(r.date||'').slice(0,4)===String(activeYear()):kind==='calls'?(String(r.period||'').slice(0,4)===String(activeYear())||String(r.due||'').slice(0,4)===String(activeYear())):true);
 const defaultTableColumns={
-entries:[{id:'society',label:'Société'},{id:'label',label:'Opération'},{id:'sci',label:'SCI'},{id:'date',label:'Date'},{id:'category',label:'Catégorie'},{id:'amount',label:'Montant'}],
+entries:[{id:'label',label:'Opération'},{id:'sci',label:'SCI'},{id:'date',label:'Date'},{id:'category',label:'Catégorie'},{id:'credit',label:'Crédit'},{id:'debit',label:'Débit'},{id:'solde',label:'Solde'},{id:'amount',label:'Montant'}],
 leases:[{id:'tenant',label:'Locataire'},{id:'property',label:'Bien'},{id:'bail',label:'Bail'},{id:'rent',label:'Loyer / charges'},{id:'status',label:'Statut'}],
 calls:[{id:'tenant',label:'Locataire / période'},{id:'due',label:'Échéance'},{id:'called',label:'Appelé'},{id:'paid',label:'Encaissé'},{id:'status',label:'Statut'}],
 partners:[{id:'name',label:'Associé'},{id:'role',label:'Fonction'},{id:'shares',label:'Parts sociales'},{id:'participation',label:'Participation'},{id:'cca',label:'Compte courant déclaré'}],
@@ -7090,6 +7901,21 @@ tasks:[{id:'name',label:'Échéance'},{id:'sci',label:'SCI'},{id:'due',label:'Da
 documents:[{id:'name',label:'Document'},{id:'sci',label:'SCI'},{id:'folder',label:'Dossier'},{id:'category',label:'Catégorie'},{id:'date',label:'Date'},{id:'file',label:'Fichier'}],
 entries_preview:[{id:'label',label:'Opération / société'},{id:'date',label:'Date'},{id:'amount',label:'Montant'}]
 };
+// Réglages d'affichage d'un tableau : densité, ajustement, en-tête collant,
+// ligne de totaux et panneau graphique facultatif (écrans réellement larges).
+const tableDefaults={density:'confort',fit:true,sticky:true,totals:true,charts:false};
+function tableView(kind){
+    let all=(S.settings.table_view&&typeof S.settings.table_view==='object')?S.settings.table_view:{};
+    let cfg=(all[kind]&&typeof all[kind]==='object')?all[kind]:{};
+    let merged={...tableDefaults,...cfg};
+    if(!['confort','compact','dense'].includes(merged.density))merged.density='confort';
+    return merged;
+}
+async function saveTableView(kind,cfg){
+    let all={...(S.settings.table_view&&typeof S.settings.table_view==='object'?S.settings.table_view:{})};
+    all[kind]={...tableView(kind),...cfg};
+    await setPref({table_view:all});
+}
 function getTableColumns(kind){
     let defs=defaultTableColumns[kind]||[];
     let cfg=(S.settings.table_columns&&typeof S.settings.table_columns==='object')?S.settings.table_columns[kind]:null;
@@ -7111,9 +7937,25 @@ function renderTableColumnsList(kind){
     let cols=getTableColumns(kind),visCount=cols.filter(c=>c.visible).length;
     return `<p class="sub" style="margin-bottom:12px">Activez ou masquez les colonnes souhaitées et réorganisez leur ordre d’affichage avec les flèches. Vos réglages sont enregistrés automatiquement.</p><div id="col-config-list">${cols.map((c,i)=>`<div class="col-config-item ${!c.visible?'col-hidden':''}" data-col-item="${c.id}"><button type="button" class="toggle ${c.visible?'on':''}" data-col-toggle="${c.id}" data-col-kind="${kind}" role="switch" aria-checked="${c.visible}" aria-label="Afficher la colonne ${esc(c.label)}" ${c.visible&&visCount<=1?'disabled title="Au moins une colonne doit rester affichée"':''}></button><span style="font-weight:500">${esc(c.label)}</span><span class="pill ${c.visible?'green':''}" style="margin-left:auto;margin-right:6px">${c.visible?'Affichée':'Masquée'}</span><div class="actions" style="margin-left:0"><button type="button" data-col-move="${c.id}" data-col-kind="${kind}" data-dir="-1" ${i===0?'disabled':''} title="Monter" aria-label="Monter ${esc(c.label)}">${icon('up')}</button><button type="button" data-col-move="${c.id}" data-col-kind="${kind}" data-dir="1" ${i===cols.length-1?'disabled':''} title="Descendre" aria-label="Descendre ${esc(c.label)}">${icon('down')}</button></div></div>`).join('')}</div>`;
 }
+function renderTableViewOptions(kind){
+    let v=tableView(kind),isEntries=kind==='entries';
+    let densities=[['confort','Confort','Aéré, lisible, hauteur de ligne actuelle'],['compact','Compact','Hauteurs réduites, plus de lignes visibles'],['dense','Très compact','Densité tableur, pour comparer beaucoup de lignes']];
+    let toggle=(key,label,help)=>`<div class="setting-row" style="padding:12px 0"><div><h3>${label}</h3><p>${help}</p></div><button type="button" class="toggle ${v[key]?'on':''}" data-table-opt="${key}" data-table-kind="${kind}" role="switch" aria-checked="${v[key]}" aria-label="${esc(label)}"></button></div>`;
+    return `<div class="tv-options"><h3 style="margin-bottom:4px">Affichage</h3><p class="sub" style="margin-bottom:14px">Ces réglages ne concernent que ce tableau et sont enregistrés automatiquement.</p>
+        <div class="tv-density"><div><h3>Densité</h3><p>Le mode compact réduit les marges et la taille du texte sans masquer d’information.</p></div><div class="tv-seg" role="group" aria-label="Densité du tableau">${densities.map(([id,label,title])=>`<button type="button" class="${v.density===id?'active':''}" data-table-density="${id}" data-table-kind="${kind}" title="${esc(title)}" aria-pressed="${v.density===id}">${label}</button>`).join('')}</div></div>
+        ${toggle('fit','Ajuster à la largeur','Le tableau occupe toute la largeur disponible et les libellés passent à la ligne au lieu de créer un défilement horizontal.')}
+        ${toggle('sticky','En-tête fixe','Les titres de colonnes restent visibles pendant le défilement.')}
+        ${toggle('totals','Ligne de totaux','Affiche les totaux de la sélection en bas du tableau.')}
+        ${isEntries?toggle('charts','Panneau graphique','Ajoute deux graphiques à droite du tableau. Sur un écran étroit, ils passent sous le tableau pour ne jamais réduire la largeur utile. Sinon, la vue d’ensemble contient déjà les graphiques. '):''}
+    </div>`;
+}
+function refreshTableViewUi(kind){
+    if($('#table-view-options'))$('#table-view-options').innerHTML=renderTableViewOptions(kind);
+    if(kind==='entries_preview')render();else renderListing();
+}
 function openTableColumnsModal(kind){
     let title=kindNames[kind]||(kind==='entries_preview'?'Dernières opérations':'Tableau');
-    openModal('Colonnes · '+title,`<div id="col-config-wrap">${renderTableColumnsList(kind)}</div>`,`<button type="button" data-col-reset="${kind}">Réinitialiser par défaut</button><button type="button" class="primary" data-action="close-modal">${icon('check')} Enregistrer</button>`);
+    openModal('Réglages du tableau · '+title,`<div id="table-view-options">${renderTableViewOptions(kind)}</div><h3 style="margin:24px 0 8px">Colonnes</h3><div id="col-config-wrap">${renderTableColumnsList(kind)}</div>`,`<button type="button" data-col-reset="${kind}">Réinitialiser les colonnes</button><button type="button" class="primary" data-action="close-modal">${icon('check')} Fermer</button>`,true);
 }
 let shownMacNotifs=new Set(),macNotifTimers=new Map(),taskEditSnapshot=null;
 function taskReminderDates(r){
@@ -7211,9 +8053,27 @@ const toNum=v=>{let n=Number(v);return Number.isFinite(n)?n:0;};
 const r2=n=>Math.round((toNum(n))*100)/100;
 const entryDate=r=>String((r&&r.date)||'').slice(0,10);
 const entrySigned=r=>(r&&r.direction==='Recette'?1:-1)*toNum(r&&r.amount);
-function sciCashInfo(s,list){
-    let opening=toNum(s&&s.opening), start=String((s&&s.opening_date)||'').slice(0,10);
-    let all=(list||rows('entries',s&&s.id)).filter(r=>r.sci===(s&&s.id)&&entryDate(r)&&entryDate(r)<=today());
+const selectedYear=()=>{
+    if(typeof isAllYears==='function'&&isAllYears())return 0;
+    if(typeof activeYear==='function')return Number(activeYear())||0;
+    return 0;
+};
+// Date d'arrêt du solde : 31/12 pour un exercice clos, aujourd'hui pour
+// l'exercice en cours, et aujourd'hui pour « Toutes les années ».
+const humanDate=v=>(typeof date==='function')?date(v):String(v);
+function cashRef(year){
+    let y=year===undefined?selectedYear():((year==='all'||year==='')?0:Number(year)||0);
+    if(!y)return {date:today(),label:'à ce jour ('+humanDate(today())+')',short:'à ce jour',year:0};
+    let end=y+'-12-31';
+    if(end>=today())return {date:today(),label:'à ce jour ('+humanDate(today())+')',short:'à ce jour',year:y};
+    return {date:end,label:'au 31/12/'+y,short:'au 31/12/'+y,year:y};
+}
+function sciCashInfo(s,list,refDate){
+    let opening=toNum(s&&s.opening), start=String((s&&s.opening_date)||'').slice(0,10), stop=String(refDate||today()).slice(0,10);
+    let all=(list||rows('entries',s&&s.id)).filter(r=>r.sci===(s&&s.id)&&entryDate(r)&&entryDate(r)<=stop);
+    // Une SCI dont l'ouverture est postérieure à la date d'arrêt n'existe pas
+    // encore à cette date : son solde est nul, pas son solde d'ouverture.
+    if(opening&&start&&start>stop)return {cash:0,skipped:0,notYet:true};
     let skipped=0, kept=all;
     // Un solde d'ouverture nul n'ancre aucun historique : dans ce cas tous les
     // mouvements saisis comptent, même s'ils précèdent la date du solde initial
@@ -7223,24 +8083,66 @@ function sciCashInfo(s,list){
         skipped=all.filter(r=>entryDate(r)<start).length;
         kept=all.filter(r=>entryDate(r)>=start);
     }
-    return {cash:r2(opening+kept.reduce((t,r)=>t+entrySigned(r),0)),skipped};
+    let movements=kept.reduce((t,r)=>t+entrySigned(r),0);
+    return {cash:r2(opening+movements),skipped,movements:r2(movements)};
 }
-function metrics(id){
-    let p=rows('properties',id), es=rows('entries',id), e=es.filter(yr), sc=S.scis.filter(s=>!id||s.id===id);
-    let income=r2(e.filter(r=>r.direction==='Recette').reduce((a,r)=>a+entrySigned(r),0));
-    let expense=r2(e.filter(r=>r.direction==='Dépense').reduce((a,r)=>a-entrySigned(r),0));
-    let infos=sc.map(s=>sciCashInfo(s,es));
+function cashAt(id,year){
+    let ref=cashRef(year), sc=S.scis.filter(s=>!id||s.id===id), es=rows('entries',id);
+    let infos=sc.map(s=>sciCashInfo(s,es,ref.date));
+    return {
+        cash:r2(infos.reduce((a,i)=>a+i.cash,0)),
+        skipped:infos.reduce((a,i)=>a+i.skipped,0),
+        notYet:infos.length>0&&infos.every(i=>i.notYet),
+        openings:r2(sc.reduce((a,s)=>a+toNum(s.opening),0)),
+        ref
+    };
+}
+function metrics(id,year){
+    let ref=cashRef(year);
+    let pick=r=>year===undefined?yr(r):(String(entryDate(r)).slice(0,4)===String(year));
+    let p=rows('properties',id), es=rows('entries',id), e=es.filter(pick), sc=S.scis.filter(s=>!id||s.id===id);
+    let income=r2(e.filter(r=>r.direction==='Recette').reduce((a,r)=>a+Math.abs(entrySigned(r)),0));
+    let expense=r2(e.filter(r=>r.direction==='Dépense').reduce((a,r)=>a+Math.abs(entrySigned(r)),0));
+    let infos=sc.map(s=>sciCashInfo(s,es,ref.date));
     return {
         value:r2(p.reduce((a,r)=>a+toNum(r.value),0)),
-        income,expense,
+        income,expense,net:r2(income-expense),
         cash:r2(infos.reduce((a,i)=>a+i.cash,0)),
         cashSkipped:infos.reduce((a,i)=>a+i.skipped,0),
+        cashOpenings:r2(sc.reduce((a,s)=>a+toNum(s.opening),0)),
+        cashMovements:r2(infos.reduce((a,i)=>a+(i.movements||0),0)),
+        cashRef:ref,
+        cashNotYet:infos.length>0&&infos.every(i=>i.notYet),
         debt:r2(rows('loans',id).reduce((a,r)=>a+toNum(r.balance),0)),
         occupied:p.filter(r=>r.status==='Loué').length,
         properties:p.length,
         overdue:r2(rows('calls',id).filter(r=>r.due<today()).reduce((a,r)=>a+due(r),0))
     };
 }
+// Solde courant après chaque mouvement : il sert à la colonne « Solde ».
+// Le calcul est chronologique et propre à chaque SCI, indépendamment du filtre
+// d'année : le solde d'une ligne ne doit pas changer quand on change d'année.
+function ledgerBalances(id){
+    let map=new Map();
+    S.scis.filter(s=>!id||s.id===id).forEach(s=>{
+        let opening=toNum(s.opening), start=String(s.opening_date||'').slice(0,10), balance=opening;
+        let list=rows('entries',s.id).filter(r=>entryDate(r))
+            .sort((a,b)=>entryDate(a).localeCompare(entryDate(b)));
+        list.forEach(r=>{
+            let excluded=opening!==0&&start&&entryDate(r)<start;
+            if(!excluded)balance=r2(balance+entrySigned(r));
+            map.set(r.id,{balance,excluded:!!excluded,future:entryDate(r)>today()});
+        });
+    });
+    return map;
+}
+// Solde du relevé bancaire pour une date donnée (ancres importées d'Excel).
+function statementBalance(s,day){
+    if(!s||!Array.isArray(s.balances)||!day)return null;
+    let hit=s.balances.find(b=>String(b.date||'').slice(0,10)===String(day).slice(0,10));
+    return hit?round2(hit.value):null;
+}
+function round2(n){return Math.round(toNum(n)*100)/100;}
 async function api(path,data){let res=await fetch('/api/'+path,{method:data===undefined?'GET':'POST',headers:{'Content-Type':'application/json','X-Dominis-Token':TOKEN},body:data===undefined?undefined:JSON.stringify(data)});if(!res.ok){let e=await res.json().catch(()=>({error:'Le serveur ne répond pas.'}));throw new Error(e.error)}return res;}
 async function load(){S=await (await api('state')).json();}
 function notify(msg,error=false){let d=document.createElement('div');d.className='toast'+(error?' error-toast':'');d.textContent=msg;$('#toasts').appendChild(d);setTimeout(()=>d.remove(),6000);}
@@ -7251,7 +8153,7 @@ function navName(id){return navs[id]?.[0]||sciname(id)}
 function navIcon(id){return navs[id]?icon(navs[id][1]):`<span class="nav-dot" style="background:${sciColor(id)}"></span>`}
 function color(v){return /^#[0-9a-fA-F]{6}$/.test(v||'')?v:'#c7ad77'}
 function sciColor(id){let i=S.scis.findIndex(s=>s.id===id),v=i>=0?S.scis[i].color:'';return /^#[0-9a-fA-F]{6}$/.test(v||'')?v:palette[Math.max(0,i)%palette.length];}
-function navigate(id,t='overview'){page=id;tab=t;query='';filter='';scope='';docFolder='';setPref({last_page:page,last_tab:tab});render();window.scrollTo({top:0,behavior:'smooth'});}
+function navigate(id,t='overview'){page=id;tab=t;query='';filter='';scope='';docFolder='';docYear='';setPref({last_page:page,last_tab:tab});render();window.scrollTo({top:0,behavior:'smooth'});}
 function renderShell(){document.documentElement.dataset.theme=S.settings.theme||'dark';document.body.classList.toggle('collapsed',!!S.settings.collapsed);
 $('#sidebar').innerHTML=`<div class="brand"><img class="brand-mark" src="/logo.png" width="42" height="42" alt="Logo Dominis"><div class="brand-text"><div class="brand-name">DOMINIS</div><div class="brand-caption">Gestion patrimoniale</div></div></div><div class="workspace"><div class="workspace-icon">${icon('building')}</div><div><div style="font-size:11px">${esc(S.settings.owner||'Mon espace patrimonial')}</div><div class="sub" style="font-size:9px">${S.scis.length} sociétés · Espace privé</div></div></div><div class="nav-scroll"><div class="eyebrow nav-label">Votre patrimoine</div><button class="nav-item ${page==='dashboard'?'active':''}" data-nav="dashboard" title="Tableau de bord général">${icon('grid')}<span class="nav-text">Tableau de bord</span></button><div class="nav-divider"></div>${navOrder().map(id=>`<button class="nav-item ${page===id?'active':''}" data-nav="${id}" title="${esc(navName(id))}">${navIcon(id)}<span class="nav-text">${esc(navName(id))}</span></button>`).join('')}<button class="nav-item" data-action="new-sci" title="Ajouter une SCI" style="font-size:11px;color:var(--gold);margin-top:14px">${icon('plus')}<span class="nav-text">Ajouter une SCI</span></button></div><div class="nav-bottom"><button class="nav-item ${page==='settings'?'active':''}" data-nav="settings" title="Paramètres">${icon('settings')}<span class="nav-text">Paramètres</span></button><button class="nav-item" data-action="quit" title="Enregistrer et quitter">${icon('exit')}<span class="nav-text">Quitter l’application</span></button><div class="local-status"><span class="status-dot"></span>Données enregistrées en local</div></div><div class="user-block row"><div class="avatar">D</div><div class="user-details"><div style="font-size:11px">Votre espace privé</div><div class="sub" style="font-size:9px">Local · Base SQLite</div></div><span class="user-lock">${icon('lock')}</span></div>`;
 let title=page==='dashboard'?'Vue d’ensemble':page==='settings'?'Paramètres':navs[page]?.[0]||sciname(page);
@@ -7470,52 +8372,90 @@ async function documentPreview(id){
         if(body)body.innerHTML=`<div class="error">${esc(e.message)}</div>`;
     }
 }
-function newDocFolderModal(){
-    openModal('Nouveau dossier',`<p class="sub" style="margin-bottom:15px">Regroupez vos documents par thème : baux, comptabilité, travaux, assurances… Le dossier appartient à la société indiquée et n’apparaît pas dans les autres SCI.</p>${docFolderSciField()}${field('folder-name','Nom du dossier','text','',null,true,true)}`,`<button data-action="close-modal">Annuler</button><button class="primary" id="create-folder">${icon('check')} Créer le dossier</button>`);
+function newDocFolderModal(parentId){
+    parentId=parentId||'';
+    let sid=docFolderSciTarget();
+    let list=sid?sciDocFolders(sid):[], parent=parentId?folderById(list,parentId):null;
+    if(parentId&&folderDepth(list,parentId)>=3)return notify('Trois niveaux de dossiers au maximum.',true);
+    let where=parent?` dans <strong>${esc(parent.name)}</strong>`:'';
+    openModal(parent?'Nouveau sous-dossier':'Nouveau dossier',`<p class="sub" style="margin-bottom:15px">Regroupez vos documents par thème${where}. Le dossier appartient à la société indiquée et n’apparaît pas dans les autres SCI.${parent?' Un sous-dossier permet de classer par année ou par type.':''}</p>${docFolderSciField()}${field('folder-name','Nom du dossier','text','',null,true,true)}`,`<button data-action="close-modal">Annuler</button><button class="primary" id="create-folder">${icon('check')} Créer le dossier</button>`);
     $('#create-folder').onclick=async()=>{
         try{
-            let sid=docFolderSciTarget();
-            if(!sid)return modalError(new Error('Créez d’abord une SCI.'));
+            let target=docFolderSciTarget();
+            if(!target)return modalError(new Error('Créez d’abord une SCI.'));
             let name=$('#f-folder-name').value.trim();
             if(!name)return modalError(new Error('Saisissez un nom de dossier.'));
             if(name.length>80)return modalError(new Error('Nom de dossier limité à 80 caractères.'));
-            let folders=sciDocFolders(sid);
-            if(folders.some(f=>f.name.toLowerCase()===name.toLowerCase()))return modalError(new Error('Un dossier porte déjà ce nom dans '+sciname(sid)+'.'));
-            await saveDocFolders(sid,[...folders,{id:newFolderId(),name}]);
+            let folders=sciDocFolders(target), current=parent?sciDocFolders(target).find(f=>f.id===parentId):null;
+            if(parentId&&!current)return modalError(new Error('Le dossier parent n’existe plus.'));
+            if(folderChildren(folders,parentId).some(f=>f.name.toLowerCase()===name.toLowerCase()))return modalError(new Error('Un dossier de ce niveau porte déjà ce nom dans '+sciname(target)+'.'));
+            let item={id:newFolderId(),name};
+            if(parentId)item.parent_id=parentId;
+            await saveDocFolders(target,[...folders,item]);
             closeModal(true);
-            notify('Dossier « '+name+' » créé pour '+sciname(sid)+'.');
+            notify((parentId?'Sous-dossier « ':'Dossier « ')+name+' » créé pour '+sciname(target)+'.');
         }catch(e){modalError(e);}
     };
 }
-// Fenêtre « Modifier » d'un dossier : renommer, changer sa place ou le supprimer.
+// Fenêtre « Modifier » d'un dossier : renommer, déplacer, réordonner, créer un
+// sous-dossier ou supprimer l'ensemble.
 function renameDocFolderModal(id){
     let scoped=docScope();
     let folder=docFolders(scoped).find(f=>f.id===id);
     if(!folder)return;
-    openModal('Modifier le dossier',`<p class="sub" style="margin-bottom:15px">Renommez ce dossier, changez sa place ou supprimez-le. La modification ne concerne que la société indiquée ; les documents classés sont toujours conservés.</p>${docFolderSciField()}${field('folder-name','Nom du dossier','text',folder.name,null,true,true)}<div id="folder-order-box" class="folder-order-box"></div>`,`<button data-action="close-modal">Annuler</button><button class="danger" id="manage-folder-delete">${icon('trash')} Supprimer le dossier</button><button class="primary" id="rename-folder">${icon('check')} Enregistrer</button>`);
+    let sid=scoped||S.scis[0]?.id||'';
+    let list=sciDocFolders(sid);
+    let blocked=new Set([id,...folderDescendants(list,id).map(f=>f.id)]);
+    let parentOptions=[['',"Racine · aucun dossier parent"]].concat(list.filter(f=>!blocked.has(f.id)&&folderDepth(list,f.id)<3).map(f=>{
+        let depth=folderDepth(list,f.id);
+        return [f.id,'— '.repeat(Math.max(0,depth-1))+(depth>1?'↳ ':'')+f.name];
+    }));
+    openModal('Modifier le dossier',`<p class="sub" style="margin-bottom:15px">Renommez ce dossier, changez sa place ou supprimez-le. La modification ne concerne que la société indiquée ; les documents classés sont toujours conservés.</p>${docFolderSciField()}${field('folder-name','Nom du dossier','text',folder.name,null,true,true)}${field('folder-parent','Dossier parent','select',folderParentId(folder),parentOptions)}<div class="row gap8" style="margin-top:14px"><button type="button" id="folder-add-child">${icon('plus')} Créer un sous-dossier</button></div><div id="folder-order-box" class="folder-order-box"></div>`,`<button data-action="close-modal">Annuler</button><button class="danger" id="manage-folder-delete">${icon('trash')} Supprimer le dossier</button><button class="primary" id="rename-folder">${icon('check')} Enregistrer</button>`);
     const drawOrder=()=>{
         let box=$('#folder-order-box');
         if(!box)return;
-        let sid=docFolderSciTarget(), list=sciDocFolders(sid), ix=list.findIndex(f=>f.id===id);
-        box.innerHTML=`<h4>Ordre des dossiers de ${esc(sciname(sid))}</h4><div class="folder-order-list">${list.map((f,i)=>`<span class="pill ${f.id===id?'gold':''}">${i+1}. ${esc(f.name)}</span>`).join('')}</div><div class="row gap8" style="margin-top:12px"><button type="button" id="folder-order-left" ${ix<=0?'disabled':''}>${icon('up')} Vers la gauche</button><button type="button" id="folder-order-right" ${ix<0||ix>=list.length-1?'disabled':''}>${icon('down')} Vers la droite</button></div>`;
-        $('#folder-order-left').onclick=async()=>{try{await moveDocFolder(docFolderSciTarget(),id,-1);drawOrder();}catch(e){modalError(e);}};
-        $('#folder-order-right').onclick=async()=>{try{await moveDocFolder(docFolderSciTarget(),id,1);drawOrder();}catch(e){modalError(e);}};
+        let target=docFolderSciTarget(), folders=sciDocFolders(target), current=folderById(folders,id);
+        if(!current){box.innerHTML='';return;}
+        let parentId=folderParentId(current), siblings=folderChildren(folders,parentId);
+        let ix=siblings.findIndex(f=>f.id===id);
+        box.innerHTML=`<h4>Ordre dans ${parentId?esc(docFolderName(parentId,target)):'la racine'}</h4><div class="folder-order-list">${siblings.map((f,i)=>`<span class="pill ${f.id===id?'gold':''}">${i+1}. ${esc(f.name)}</span>`).join('')}</div><div class="row gap8" style="margin-top:12px"><button type="button" id="folder-order-left" ${ix<=0?'disabled':''}>${icon('up')} Vers la gauche</button><button type="button" id="folder-order-right" ${ix<0||ix>=siblings.length-1?'disabled':''}>${icon('down')} Vers la droite</button></div>`;
+        $('#folder-order-left').onclick=async()=>{try{await moveDocFolder(docFolderSciTarget(),id,-1);drawOrder();drawParents();}catch(e){modalError(e);}};
+        $('#folder-order-right').onclick=async()=>{try{await moveDocFolder(docFolderSciTarget(),id,1);drawOrder();drawParents();}catch(e){modalError(e);}};
+    };
+    const drawParents=()=>{
+        let sel=$('#f-folder-parent');
+        if(!sel)return;
+        let target=docFolderSciTarget(), folders=sciDocFolders(target);
+        let current=folderById(folders,id);
+        let blocked=new Set([id,...folderDescendants(folders,id).map(f=>f.id)]);
+        let value=current?folderParentId(current):'';
+        sel.innerHTML=[['',"Racine · aucun dossier parent"]].concat(folders.filter(f=>!blocked.has(f.id)&&folderDepth(folders,f.id)<3).map(f=>{
+            let depth=folderDepth(folders,f.id);
+            return [f.id,'— '.repeat(Math.max(0,depth-1))+(depth>1?'↳ ':'')+f.name];
+        })).map(([v,t])=>`<option value="${esc(v)}" ${v===value?'selected':''}>${esc(t)}</option>`).join('');
     };
     drawOrder();
-    $('#f-folder-sci')?.addEventListener('change',drawOrder);
+    $('#f-folder-sci')?.addEventListener('change',()=>{drawOrder();drawParents();});
+    $('#folder-add-child')?.addEventListener('click',()=>newDocFolderModal(id));
     $('#rename-folder').onclick=async()=>{
         try{
-            let sid=docFolderSciTarget();
-            if(!sid)return modalError(new Error('Choisissez la société concernée.'));
+            let target=docFolderSciTarget();
+            if(!target)return modalError(new Error('Choisissez la société concernée.'));
             let name=$('#f-folder-name').value.trim();
             if(!name)return modalError(new Error('Saisissez un nom de dossier.'));
             if(name.length>80)return modalError(new Error('Nom de dossier limité à 80 caractères.'));
-            let list=sciDocFolders(sid);
-            if(!list.some(f=>f.id===id))return modalError(new Error('Ce dossier n’existe pas dans '+sciname(sid)+'.'));
-            if(list.some(f=>f.id!==id&&f.name.toLowerCase()===name.toLowerCase()))return modalError(new Error('Un dossier porte déjà ce nom dans '+sciname(sid)+'.'));
-            await saveDocFolders(sid,list.map(f=>f.id===id?{...f,name}:f));
+            let folders=sciDocFolders(target);
+            if(!folders.some(f=>f.id===id))return modalError(new Error('Ce dossier n’existe pas dans '+sciname(target)+'.'));
+            let wanted=($('#f-folder-parent')?.value)||'';
+            let current=folderById(folders,id), oldParent=folderParentId(current);
+            if(folderChildren(folders,oldParent).some(f=>f.id!==id&&f.name.toLowerCase()===name.toLowerCase()))return modalError(new Error('Un dossier de ce niveau porte déjà ce nom dans '+sciname(target)+'.'));
+            if(wanted!==oldParent){
+                await setDocFolderParent(target,id,wanted);
+            }
+            let updated=sciDocFolders(target).map(f=>f.id===id?{...f,name}:f);
+            await saveDocFolders(target,updated);
             closeModal(true);
-            notify('Dossier renommé dans '+sciname(sid)+'.');
+            notify('Dossier enregistré dans '+sciname(target)+'.');
         }catch(e){modalError(e);}
     };
     $('#manage-folder-delete').onclick=()=>deleteDocFolder(id);
@@ -7525,25 +8465,29 @@ function deleteDocFolder(id){
     let folder=docFolders(scoped).find(f=>f.id===id);
     if(!folder)return;
     let sid=scoped||S.scis[0]?.id||'';
-    let count=sid?folderDocCount(id,sid):0;
-    openModal('Supprimer ce dossier ?',`<p>Le dossier <strong>${esc(folder.name)}</strong> sera retiré de la liste${scoped?'':' de la société choisie'}.</p>${docFolderSciField()}<p class="sub" style="margin-top:12px"><span id="folder-delete-count">${count?`Les ${count} document${count>1?'s':''} qu’il contient sont conservés et restent visibles dans « Tous les documents ».`:'Ce dossier est vide.'}</span> Aucun document n’est supprimé.</p>${folder.builtin?`<p class="sub" style="margin-top:10px">Dossier proposé par défaut : il disparaît uniquement de cette société. Le bouton « Restaurer les dossiers par défaut » de la page Documents le rétablit.</p>`:''}`,`<button data-action="close-modal">Annuler</button><button class="danger" id="confirm-folder-delete">${icon('trash')} Supprimer le dossier</button>`);
+    let list=sciDocFolders(sid), subtree=[folder,...folderDescendants(list,id)];
+    let docs=rows('documents',sid).filter(r=>subtree.some(f=>f.id===resolveDocFolder(r)));
+    openModal('Supprimer ce dossier ?',`<p>Le dossier <strong>${esc(folder.name)}</strong> sera retiré de la liste${scoped?'':' de la société choisie'}${subtree.length>1?` avec ses <strong>${subtree.length-1} sous-dossier${subtree.length>2?'s':''}</strong>`:''}.</p>${docFolderSciField()}<p class="sub" style="margin-top:12px"><span id="folder-delete-count">${docs.length?`Les ${docs.length} document${docs.length>1?'s':''} qu’il contient sont conservés et restent visibles dans « Tous les documents ».`:'Ce dossier est vide.'}</span> Aucun document n’est supprimé.</p>${folder.builtin?`<p class="sub" style="margin-top:10px">Dossier proposé par défaut : il disparaît uniquement de cette société. Le bouton « Dossiers par défaut » de la page Documents le rétablit.</p>`:''}`,`<button data-action="close-modal">Annuler</button><button class="danger" id="confirm-folder-delete">${icon('trash')} Supprimer le dossier</button>`);
     $('#f-folder-sci')?.addEventListener('change',()=>{
-        let tid=$('#f-folder-sci').value;
-        if(!sciDocFolders(tid).some(f=>f.id===id))return modalError(new Error('Ce dossier n’existe pas dans '+sciname(tid)+'.'));
-        let el=$('#modal-error');if(el){el.className='';el.textContent='';}
-        let n=folderDocCount(id,tid),box=$('#folder-delete-count');
-        if(box)box.textContent=n?`Les ${n} document${n>1?'s':''} qu’il contient sont conservés et restent visibles dans « Tous les documents ».`:'Ce dossier est vide dans '+sciname(tid)+'.';
+        let target=$('#f-folder-sci').value;
+        let targetList=sciDocFolders(target);
+        if(!targetList.some(f=>f.id===id))return modalError(new Error('Ce dossier n’existe pas dans '+sciname(target)+'.'));
+        let group=[folderById(targetList,id),...folderDescendants(targetList,id)];
+        let n=rows('documents',target).filter(r=>group.some(f=>f.id===resolveDocFolder(r))).length;
+        let box=$('#folder-delete-count');
+        if(box)box.textContent=n?`Les ${n} document${n>1?'s':''} qu’il contient sont conservés et restent visibles dans « Tous les documents ».`:'Ce dossier est vide dans '+sciname(target)+'.';
     });
     $('#confirm-folder-delete').onclick=async()=>{
         try{
-            let tid=docFolderSciTarget();
-            if(!tid)return modalError(new Error('Choisissez la société concernée.'));
-            let list=sciDocFolders(tid);
-            if(!list.some(f=>f.id===id))return modalError(new Error('Ce dossier n’existe pas dans '+sciname(tid)+'.'));
-            if(docFolder===id)docFolder='';
-            await saveDocFolders(tid,list.filter(f=>f.id!==id));
+            let target=docFolderSciTarget();
+            if(!target)return modalError(new Error('Choisissez la société concernée.'));
+            let targetList=sciDocFolders(target);
+            if(!targetList.some(f=>f.id===id))return modalError(new Error('Ce dossier n’existe pas dans '+sciname(target)+'.'));
+            let removed=new Set([id,...folderDescendants(targetList,id).map(f=>f.id)]);
+            if(removed.has(docFolder))docFolder='';
+            await saveDocFolders(target,targetList.filter(f=>!removed.has(f.id)));
             closeModal(true);
-            notify('Dossier supprimé de '+sciname(tid)+'. Les documents sont conservés.');
+            notify('Dossier supprimé de '+sciname(target)+'. Les documents sont conservés.');
         }catch(e){modalError(e);}
     };
 }
@@ -7561,8 +8505,8 @@ async function restoreDefaultDocFolders(){
 function kpis(id){
 let m=metrics(id);return `<div class="kpis">${[
 ['Patrimoine immobilier',money(m.value),'building',`${m.properties} biens · ${id?'Valeurs renseignées':S.scis.length+' sociétés'}`,'Valeur estimée',false],
-['Recettes encaissées',money(m.income),'trend',`${yearLabel()} · Toutes catégories`,'Flux annuels',false],
-['Trésorerie disponible',money(m.cash),'wallet',`Solde d’ouverture + mouvements à ce jour`,'Solde calculé',m.cash<0],
+['Recettes de l’exercice',money(m.income),'trend',`${yearLabel()} · toutes dates`,'Recettes enregistrées',false],
+['Trésorerie disponible',money(m.cash),'wallet',`Solde ${m.cashRef.short}`,'Solde calculé',m.cash<0],
 ['Taux d’occupation',m.properties?num(m.occupied/m.properties*100)+' %':'—','home',`${m.occupied} biens loués sur ${m.properties} · Statuts saisis`,'Occupation actuelle',false]
 ].map(([l,v,i,n,h,neg])=>`<div class="kpi"><div class="kpi-top">${l}${icon(i)}</div><div class="kpi-value ${neg?'red':''}">${v}</div><div class="kpi-bottom"><span class="${neg?'red':i==='home'?'green':'gold'}">${h}</span></div><div class="sub" style="font-size:9px;margin-top:4px">${n}</div></div>`).join('')}</div>`;}
 function chart(id){let e=rows('entries',id).filter(yr),a=Array.from({length:12},(_,m)=>['Recette','Dépense'].map(d=>r2(e.filter(r=>Number(entryDate(r).slice(5,7))===m+1&&r.direction===d).reduce((s,r)=>s+Math.abs(entrySigned(r)),0)))),max=Math.max(100,...a.flat())*1.15;let months=['Jan','Fév','Mar','Avr','Mai','Juin','Juil','Août','Sep','Oct','Nov','Déc'];let w=660,h=205,left=46,right=15,top=9,bottom=27,pw=w-left-right,ph=h-top-bottom,step=pw/12;
@@ -7573,18 +8517,198 @@ return `<div class="panel"><div class="panel-head"><div><h2>Les flux de votre pa
 function donut(id){let list=id?rows('properties',id).map((r,i)=>({name:r.name,value:Number(r.value||0),color:palette[i%6]})):S.scis.map((s,i)=>({name:s.name,value:metrics(s.id).value,color:color(s.color||palette[i%6])}));let total=list.reduce((a,r)=>a+r.value,0),offset=0;let bg=total?list.map(r=>{let start=offset;offset+=r.value/total*100;return `${r.color} ${start}% ${offset}%`}).join(','):'var(--line) 0% 100%';return `<div class="panel"><div class="panel-head"><div><h2>Répartition du patrimoine</h2><p>${id?'Par bien immobilier':'Par société civile immobilière'}</p></div>${icon('building')}</div><div class="donut-wrap"><div class="donut" style="background:conic-gradient(${bg})"><div class="donut-label"><b>${total>=1000000?num(total/1000000)+' M€':total>=1000?num(total/1000)+' k€':money(total)}</b><small>Valeur totale estimée</small></div></div><div class="donut-legend">${list.slice(0,4).map(r=>`<div><span class="color-dot" style="background:${r.color}"></span>${esc(r.name)}<div class="amount">${total?num(r.value/total*100):0} %</div></div>`).join('')||'<span>Aucun bien renseigné</span>'}${list.length>4?`<div class="muted">+ ${list.length-4} autres biens / SCI</div>`:''}</div></div></div>`;}
 function sciCards(){return `<div class="section-title"><h2>Vos sociétés <small>${S.scis.length} SCI dans votre portefeuille</small></h2><button class="text-link row" data-action="new-sci">${icon('plus')} Ajouter une SCI</button></div><div class="sci-grid">${S.scis.map((s,i)=>{let m=metrics(s.id);return `<article class="sci-card" data-nav="${s.id}" tabindex="0" role="button" aria-label="Ouvrir ${esc(s.name)}"><div class="row between"><div class="row"><div class="building-icon" style="color:${sciColor(s.id)}">${icon('building')}</div><div><h3>${esc(s.name)}</h3><div class="location">${esc(s.city||s.address||'Adresse à renseigner')}</div></div></div><span class="pill">${esc(s.regime||'IR')}</span></div><div class="sci-stats"><div><label>Patrimoine estimé</label><strong>${money(m.value)}</strong></div><div><label>Trésorerie actuelle</label><strong class="${m.cash<0?'red':''}">${money(m.cash)}</strong></div></div><div class="mini-bar">${Array.from({length:m.properties||1},(_,j)=>`<i style="background:${j<m.occupied?sciColor(s.id):'var(--line)'}"></i>`).join('')}</div><div class="sci-card-bottom"><span>${m.properties} biens <span style="margin:0 5px">·</span> ${rows('leases',s.id).filter(r=>r.status==='Actif').length} baux actifs</span><span class="row gap8 ${m.overdue?'gold':'green'}">${m.overdue?'Loyers à suivre':'Voir la société'} ${icon('arrow')}</span></div></article>`}).join('')}</div>`;}
 function tasksPreview(id){let list=rows('tasks',id).filter(r=>r.status!=='Terminé').sort((a,b)=>a.due.localeCompare(b.due)).slice(0,4);return `<div class="panel"><div class="panel-head" style="padding-bottom:15px"><h2>Prochaines échéances</h2><button class="text-link" data-nav="${id||'agenda'}" ${id?'data-tab="tasks"':''}>Tout voir ↗</button></div>${list.map(r=>{let d=new Date(r.due+'T12:00:00');return `<div class="task-line"><div class="task-date">${d.getDate()}<small>${d.toLocaleDateString('fr-FR',{month:'short'})}</small></div><div><h3>${esc(r.name)}${r.important?' <span class="pill red" style="margin-left:5px">Important</span>':''}</h3><p>${esc(sciname(r.sci))} · ${esc(r.category||'Général')}</p></div><button class="ghost icon-only task-right" data-edit="${r.id}" title="Consulter l’échéance">${icon('chevron')}</button></div>`}).join('')||empty('Tout est à jour','Aucune échéance à venir.')}</div>`;}
-function entriesPreview(id){let list=rows('entries',id).filter(yr).sort((a,b)=>b.date.localeCompare(a.date)).slice(0,4);let cols=getTableColumns('entries_preview').filter(c=>c.visible);let gear=`<th class="align-right col-settings-th"><button type="button" class="ghost icon-only table-gear-btn" data-table-config="entries_preview" title="Réglages des colonnes" aria-label="Réglages des colonnes">${icon('settings')}</button></th>`;return `<div class="panel"><div class="panel-head" style="padding-bottom:17px"><h2>Dernières opérations</h2><button class="text-link" data-nav="${id||'treasury'}" ${id?'data-tab="entries"':''}>Tout voir ↗</button></div><div class="table-wrap"><table><thead><tr>${cols.map(c=>`<th ${c.id==='amount'?'class="align-right"':''}>${esc(c.label)}</th>`).join('')}${gear}</tr></thead><tbody>${list.map(r=>{let cells={label:`<strong>${esc(r.label)}</strong><span class="cell-sub">${esc(sciname(r.sci))}</span>`,date:`<span class="muted">${date(r.date)}</span>`,amount:`<span class="${r.direction==='Recette'?'green':'red'}">${r.direction==='Recette'?'+':'−'} ${money(r.amount,2)}</span>`};return `<tr>${cols.map(c=>`<td ${c.id==='amount'?'class="align-right"':''}>${cells[c.id]}</td>`).join('')}<td class="align-right"><div class="actions"><button data-edit="${r.id}" title="Modifier" aria-label="Modifier ${esc(label(r))}">${icon('edit')}</button></div></td></tr>`;}).join('')}</tbody></table>${!list.length?empty('Aucune opération','Enregistrez votre premier mouvement.') :''}</div></div>`;}
+function entriesPreview(id){let list=rows('entries',id).filter(yr).sort((a,b)=>b.date.localeCompare(a.date)).slice(0,4);let cols=getTableColumns('entries_preview').filter(c=>c.visible);let gear=`<th class="align-right col-settings-th"><button type="button" class="ghost icon-only table-gear-btn" data-table-config="entries_preview" title="Réglages du tableau" aria-label="Réglages du tableau">${icon('settings')}</button></th>`;return `<div class="panel"><div class="panel-head" style="padding-bottom:17px"><h2>Dernières opérations</h2><button class="text-link" data-nav="${id||'treasury'}" ${id?'data-tab="entries"':''}>Tout voir ↗</button></div><div class="table-wrap"><table><thead><tr>${cols.map(c=>`<th ${c.id==='amount'?'class="align-right"':''}>${esc(c.label)}</th>`).join('')}${gear}</tr></thead><tbody>${list.map(r=>{let cells={label:`<strong>${esc(r.label)}</strong><span class="cell-sub">${esc(sciname(r.sci))}</span>`,date:`<span class="muted">${date(r.date)}</span>`,amount:`<span class="${r.direction==='Recette'?'green':'red'}">${r.direction==='Recette'?'+':'−'} ${money(r.amount,2)}</span>`};return `<tr>${cols.map(c=>`<td ${c.id==='amount'?'class="align-right"':''}>${cells[c.id]}</td>`).join('')}<td class="align-right"><div class="actions"><button data-edit="${r.id}" title="Modifier" aria-label="Modifier ${esc(label(r))}">${icon('edit')}</button></div></td></tr>`;}).join('')}</tbody></table>${!list.length?empty('Aucune opération','Enregistrez votre premier mouvement.') :''}</div></div>`;}
 function dashboard(id){let m=metrics(id);return `${S.settings.demo&&!id?`<div class="demo-notice"><span>ESPACE DE DÉMONSTRATION <span style="opacity:.6;margin:0 9px">/</span> Données fictives pour explorer Dominis en toute liberté.</span><button data-nav="settings">Gérer les données</button></div>`:''}${kpis(id)}<div class="charts-grid">${chart(id)}${donut(id)}</div>${!id?sciCards():`<div class="notice row between"><div>${m.overdue?`<span class="gold">${money(m.overdue,2)} de loyers échus restent à encaisser.</span>`:'Aucun solde de loyer échu à ce jour.'} <span style="margin-left:10px">Dette renseignée : ${money(m.debt)}.</span></div><button class="text-link" data-tab="calls">Consulter les loyers →</button></div>`}<div class="lower-grid">${entriesPreview(id)}${tasksPreview(id)}</div>${attention(id)}`;}
 
 function attention(id){let alerts=[],limit=new Date();limit.setDate(limit.getDate()+60);let until=limit.toISOString().slice(0,10);S.scis.filter(s=>!id||s.id===id).forEach(s=>{let m=metrics(s.id);if(m.overdue)alerts.push({sci:s.id,tab:'calls',title:money(m.overdue,2)+' de loyers échus à encaisser',detail:s.name+' · Consulter les appels et les paiements',icon:'wallet'});if(s.regime==='IR'&&rows('leases',s.id).some(l=>l.type==='Habitation meublée'&&l.status==='Actif'))alerts.push({sci:s.id,tab:'identity',title:'Location meublée : régime fiscal à examiner',detail:s.name+' · Vérifier les conséquences avec votre conseil fiscal',icon:'info'});});rows('properties',id).forEach(r=>{if(['F','G'].includes(r.dpe)||r.dpe_date&&r.dpe_date<today())alerts.push({sci:r.sci,tab:'properties',title:'Diagnostic à vérifier · '+r.name,detail:'DPE '+(r.dpe||'non renseigné')+' · Vérifier validité, décence et éventuels travaux',icon:'home'});});rows('leases',id).filter(r=>r.status==='Actif'&&r.end&&r.end<=until).forEach(r=>alerts.push({sci:r.sci,tab:'leases',title:'Fin de bail à examiner · '+r.tenant,detail:date(r.end)+' · Anticiper la suite selon les règles du bail',icon:'calendar'}));rows('tasks',id).filter(r=>r.status!=='Terminé'&&r.due<today()).forEach(r=>alerts.push({sci:r.sci,tab:'tasks',title:'Échéance dépassée · '+r.name,detail:sciname(r.sci)+' · Prévue le '+date(r.due),icon:'clock'}));if(!alerts.length)return '';return `<div class="panel" style="margin-top:23px"><div class="panel-head" style="padding-bottom:14px"><h2>Points d’attention <small class="gold" style="margin-left:8px">${alerts.length}</small></h2><span class="sub">À partir des données renseignées</span></div>${alerts.slice(0,6).map(a=>`<div class="task-line"><span class="gold">${icon(a.icon)}</span><div><h3>${esc(a.title)}</h3><p>${esc(a.detail)}</p></div><button class="ghost icon-only task-right" data-nav="${a.sci}" data-tab="${a.tab}" title="Examiner">${icon('arrow')}</button></div>`).join('')}${alerts.length>6?'<div class="panel-body sub">Les six premiers points sont affichés. Consultez aussi les échéances de chaque SCI.</div>':''}</div>`;}
-function annualReport(){let s=currentSCI();if(!s)return;let m=metrics(s.id),partners=rows('partners',s.id),total=partners.reduce((a,r)=>a+Number(r.shares||0),0),entries=rows('entries',s.id).filter(yr),cats=[...new Set(entries.map(e=>e.category||'Autre'))];let doc=`<!doctype html><html lang="fr"><meta charset="utf-8"><title>Synthèse ${esc(s.name)}</title><style>body{font:14px Arial;color:#263028;max-width:850px;margin:50px auto;padding:35px;line-height:1.7}h1{font:34px Georgia}h2{font:24px Georgia;margin-top:30px}header{border-bottom:2px solid #b49c67;padding-bottom:20px}table{width:100%;border-collapse:collapse}td,th{padding:10px;border-bottom:1px solid #ddd;text-align:left}small{color:#666}.note{background:#f1eee5;padding:16px}@media print{body{margin:0}button{display:none}h2{break-after:avoid}tr{break-inside:avoid}}</style><header><small>DOMINIS · DOCUMENT DE TRAVAIL</small><h1>${esc(s.name)}</h1><p>Synthèse de gestion · ${yearLabel()}<br>Établie le ${date(today())} · Régime ${esc(s.regime||'IR')} · Gérant : ${esc(s.manager||'À compléter')}</p></header><p class="note">Support préparatoire, à vérifier et compléter par le gérant. Ce document n’est ni un bilan comptable, ni une déclaration fiscale, ni un rapport annuel statutaire complet. Les flux portent sur l’année civile sélectionnée, indépendamment de la clôture déclarée (${esc(s.closing||'31/12')}).</p><h2>1. Trésorerie et flux</h2><table><tr><td>Recettes enregistrées sur l’année</td><td>${money(m.income,2)}</td></tr><tr><td>Dépenses enregistrées sur l’année</td><td>${money(m.expense,2)}</td></tr><tr><td>Flux net (non fiscal)</td><td>${money(m.income-m.expense,2)}</td></tr><tr><td>Solde calculé à ce jour</td><td>${money(m.cash,2)}</td></tr><tr><td>Loyers échus restant à encaisser à ce jour</td><td>${money(m.overdue,2)}</td></tr></table><h2>2. Ventilation des flux</h2><table><tr><th>Catégorie</th><th>Recettes</th><th>Dépenses</th></tr>${cats.map(k=>`<tr><td>${esc(k)}</td>${['Recette','Dépense'].map(d=>`<td>${money(entries.filter(e=>(e.category||'Autre')===k&&e.direction===d).reduce((a,e)=>a+Number(e.amount||0),0),2)}</td>`).join('')}</tr>`).join('')}</table><h2>3. Patrimoine et financements · Situation actuelle</h2><table><tr><th>Bien</th><th>Valeur estimée</th><th>Occupation déclarée</th></tr>${rows('properties',s.id).map(r=>`<tr><td>${esc(r.name)}</td><td>${money(r.value)}</td><td>${esc(r.status)}</td></tr>`).join('')}</table><p>Dette renseignée : ${money(m.debt)}. Dates de référence propres à chaque emprunt, non actualisées automatiquement.</p><h2>4. Associés · Situation actuelle</h2><table><tr><th>Associé</th><th>Parts</th><th>Participation</th><th>Compte courant déclaré</th></tr>${partners.map(r=>`<tr><td>${esc(r.name)}</td><td>${num(r.shares)}</td><td>${total?num(r.shares/total*100)+' %':'—'}</td><td>${money(r.cca,2)}</td></tr>`).join('')}</table><h2>5. Analyse à compléter par le gérant</h2><p>Activité de la période, faits marquants, bénéfices réalisés ou prévisibles, pertes encourues ou prévues, travaux, risques et perspectives :</p><p style="white-space:pre-wrap">${esc(s.notes||'[À compléter]')}</p><p class="note">Rapprocher les flux avec les relevés bancaires et la comptabilité. Distinguer notamment recettes locatives, apports, dépôts de garantie, capital d’emprunt et charges déductibles. Ne pas répartir le flux net entre les associés comme s’il s’agissait d’un résultat fiscal.</p><p>Signature du gérant : ____________________</p><button onclick="window.print()">Imprimer / enregistrer en PDF</button></html>`;downloadText(doc,'synthese-'+(isAllYears()?'toutes-annees':activeYear())+'.html');notify('Synthèse HTML préparée. Ouvrez-la pour imprimer en PDF.');}
-
+function synthesisYears(s){
+    let set=new Set(rows('entries',s.id).map(e=>String(entryDate(e)).slice(0,4)).filter(y=>/^\d{4}$/.test(y)));
+    set.add(String(new Date().getFullYear()));
+    return [...set].sort().reverse();
+}
+// Un seul dossier « Synthèses » par société, puis deux sous-dossiers de
+// présentation et un dossier par année : Synthèses › Classique › 2026. Trois
+// niveaux suffisent, sans multiplier les dossiers de premier niveau.
+async function ensureSynthesisFolders(sciId,year){
+    let folders=sciDocFolders(sciId), changed=false;
+    const find=(name,parent)=>folders.find(f=>f.name.toLowerCase()===name.toLowerCase()&&folderParentId(f)===(parent||''));
+    let root=find('Synthèses','');
+    if(!root){root={id:newFolderId(),name:'Synthèses'};folders.push(root);changed=true;}
+    let out={root:root.id,classique:'',graphique:'',years:{}};
+    [['classique','Classique'],['graphique','Graphique']].forEach(([key,name])=>{
+        let f=find(name,root.id);
+        if(!f){f={id:newFolderId(),name,parent_id:root.id};folders.push(f);changed=true;}
+        out[key]=f.id;
+        let y=find(String(year),f.id);
+        if(!y){y={id:newFolderId(),name:String(year),parent_id:f.id};folders.push(y);changed=true;}
+        out.years[key]=y.id;
+    });
+    if(changed)await saveDocFolders(sciId,folders);
+    return out;
+}
+// Analyse automatique : chaque constat s'appuie sur un chiffre de l'exercice.
+// Les seuils restent volontairement simples et lisibles, sans conseil générique.
+function annualReportAnalysis(s,year,m,ctx){
+    const strengths=[],watch=[];
+    const push=(arr,txt)=>{if(txt&&!arr.includes(txt)&&arr.length<4)arr.push(txt);};
+    const months=Math.max(1,ctx.months), monthlyExpense=r2(m.expense/months);
+    if(m.cash<0)push(watch,`Trésorerie négative de ${money(m.cash,2)} ${m.cashRef.short}. Sécurisez les encaissements avant d’engager de nouvelles dépenses.`);
+    else if(monthlyExpense>0){
+        let cover=r2(m.cash/monthlyExpense);
+        if(cover<1)push(watch,`La trésorerie de ${money(m.cash,2)} couvre moins d’un mois de dépenses au rythme de ${money(monthlyExpense,2)} par mois.`);
+        else if(cover>=6)push(strengths,`La trésorerie de ${money(m.cash,2)} représente ${num(cover)} mois de dépenses : une marge de sécurité confortable.`);
+        else push(strengths,`La trésorerie de ${money(m.cash,2)} couvre ${num(cover)} mois de dépenses.`);
+    }
+    if(m.net<0){
+        let share=m.income>0?r2(-m.net/m.income*100):null;
+        push(watch,`Les dépenses dépassent les recettes de ${money(-m.net,2)}${share!==null?` (${num(share)} % des recettes)`:''}.`);
+    }else if(m.net>0){
+        let margin=m.income>0?r2(m.net/m.income*100):null;
+        push(strengths,`Flux net positif de ${money(m.net,2)}${margin!==null?`, soit ${num(margin)} % des recettes`:''}.`);
+    }
+    if(ctx.loanService>0){
+        // Le DSCR compare les loyers nets de charges d'exploitation au seul
+        // service de la dette : compter l'échéance dans les charges la
+        // compterait deux fois.
+        let dscr=r2((m.income-ctx.operatingExpense)/ctx.loanService);
+        if(dscr<1)push(watch,`Le service de la dette (${money(ctx.loanService,2)} sur l’exercice) n’est pas couvert par les loyers nets de charges : DSCR de ${num(dscr)}.`);
+        else if(dscr>=1.5)push(strengths,`Le service de la dette est couvert ${num(dscr)} fois par les loyers nets de charges (DSCR ${num(dscr)}).`);
+        else push(watch,`Le service de la dette n’est couvert que ${num(dscr)} fois par les loyers nets de charges (DSCR ${num(dscr)}), sous le seuil de sécurité de 1,5.`);
+    }
+    if(m.overdue>0)push(watch,`${money(m.overdue,2)} de loyers échus restent à encaisser à la date d’édition.`);
+    if(ctx.vacant>0)push(watch,`${ctx.vacant} bien${ctx.vacant>1?'s':''} sur ${m.properties} n’est pas loué${ctx.vacant>1?'s':''} : taux d’occupation de ${num(ctx.occupancy)} %.`);
+    else if(m.properties>0)push(strengths,`Tous les biens (${m.properties}) sont déclarés loués, soit une occupation de 100 %.`);
+    if(m.value>0&&m.debt>0){
+        let ltv=r2(m.debt/m.value*100);
+        if(ltv>60)push(watch,`L’endettement représente ${num(ltv)} % de la valeur estimée du patrimoine : marge de désendettement limitée.`);
+        else if(ltv<=40)push(strengths,`L’endettement ne représente que ${num(ltv)} % de la valeur estimée du patrimoine.`);
+    }
+    if(m.income>0&&ctx.operatingExpense/m.income>0.35)push(watch,`Les charges d’exploitation absorbent ${num(r2(ctx.operatingExpense/m.income*100))} % des recettes.`);
+    if(ctx.topLeaseShare>=60&&ctx.leaseCount>1)push(watch,`${num(ctx.topLeaseShare)} % des loyers appelés reposent sur un seul bail : la vacance de ce locataire pèserait fortement sur l’exercice.`);
+    if(ctx.previousIncome>0){
+        let delta=r2((m.income-ctx.previousIncome)/ctx.previousIncome*100);
+        if(delta>=10)push(strengths,`Les recettes progressent de ${num(delta)} % par rapport à ${year-1}.`);
+        else if(delta<=-10)push(watch,`Les recettes reculent de ${num(Math.abs(delta))} % par rapport à ${year-1} (${money(ctx.previousIncome,2)}).`);
+    }
+    let conclusion=`L’exercice ${year} se solde par un flux net ${m.net>=0?'positif':'négatif'} de ${money(Math.abs(m.net),2)}, pour ${money(m.income,2)} de recettes et ${money(m.expense,2)} de dépenses. `;
+    conclusion+=m.cash>=0?`La trésorerie ${m.cashRef.short} atteint ${money(m.cash,2)}.`:`La trésorerie ${m.cashRef.short} est négative (${money(m.cash,2)}).`;
+    if(m.overdue>0)conclusion+=` ${money(m.overdue,2)} de loyers restent à encaisser.`;
+    if(ctx.topCategory)conclusion+=` Premier poste de sortie : ${ctx.topCategory.name} (${money(ctx.topCategory.expense,2)}, ${num(ctx.topCategory.share)} % des dépenses).`;
+    if(ctx.cca>0)conclusion+=` Les comptes courants d’associés représentent ${money(ctx.cca,2)} à rembourser.`;
+    return {strengths,watch,conclusion};
+}
+function annualReportModel(s,year,style){
+    const m=metrics(s.id,year);
+    const entries=rows('entries',s.id).filter(e=>String(entryDate(e)).slice(0,4)===String(year));
+    const props=rows('properties',s.id),partners=rows('partners',s.id),loans=rows('loans',s.id),calls=rows('calls',s.id).filter(c=>String(c.period||'').slice(0,4)===String(year));
+    const totalShares=partners.reduce((a,r)=>a+toNum(r.shares),0);
+    const monthly=Array.from({length:12},()=>({income:0,expense:0}));
+    entries.forEach(e=>{let mo=Number(entryDate(e).slice(5,7))-1;if(mo>=0&&mo<12){if(e.direction==='Recette')monthly[mo].income+=Math.abs(entrySigned(e));else monthly[mo].expense+=Math.abs(entrySigned(e));}});
+    const activeMonths=Math.max(1,monthly.filter(x=>x.income||x.expense).length);
+    const catMap=new Map();
+    entries.forEach(e=>{let k=e.category||'Autre',o=catMap.get(k)||{income:0,expense:0};if(e.direction==='Recette')o.income+=Math.abs(entrySigned(e));else o.expense+=Math.abs(entrySigned(e));catMap.set(k,o);});
+    const cats=[...catMap.entries()].map(([name,v])=>({name,income:r2(v.income),expense:r2(v.expense)})).sort((a,b)=>(b.income+b.expense)-(a.income+a.expense));
+    const expenseCats=cats.filter(c=>c.expense>0).sort((a,b)=>b.expense-a.expense);
+    const topExpense=expenseCats[0]||null;
+    const topCategory=topExpense?{name:topExpense.name,expense:topExpense.expense,share:m.expense>0?r2(topExpense.expense/m.expense*100):0}:null;
+    // Service de la dette réellement enregistré sur l'exercice (catégorie
+    // « Emprunt… ») ; à défaut, l'échéancier déclaré sur les emprunts.
+    const loanPaid=r2(entries.filter(e=>e.direction==='Dépense'&&/^emprunt/i.test(String(e.category||''))).reduce((a,e)=>a+Math.abs(entrySigned(e)),0));
+    const annualDebt=loans.reduce((a,l)=>a+toNum(l.monthly)*12,0);
+    const loanService=loanPaid>0?loanPaid:annualDebt;
+    const operatingExpense=r2(m.expense-loanPaid);
+    const leaseAmounts=new Map();
+    calls.forEach(c=>leaseAmounts.set(c.lease_id,(leaseAmounts.get(c.lease_id)||0)+toNum(c.rent)+toNum(c.charges)));
+    const totalCalled=[...leaseAmounts.values()].reduce((a,v)=>a+v,0);
+    const topLease=totalCalled>0?Math.max(...leaseAmounts.values()):0;
+    const previousIncome=r2(rows('entries',s.id).filter(e=>String(entryDate(e)).slice(0,4)===String(Number(year)-1)&&e.direction==='Recette').reduce((a,e)=>a+Math.abs(entrySigned(e)),0));
+    const occupancy=props.length?r2(props.filter(p=>p.status==='Loué').length/props.length*100):0;
+    const ctx={months:activeMonths,annualDebt,loanService,operatingExpense,topCategory,vacant:props.length-props.filter(p=>p.status==='Loué').length,occupancy,leaseCount:leaseAmounts.size,topLeaseShare:totalCalled>0?r2(topLease/totalCalled*100):0,previousIncome,cca:r2(partners.reduce((a,r)=>a+toNum(r.cca),0)),categories:cats};
+    const analysis=annualReportAnalysis(s,year,m,ctx);
+    const sections=[];
+    const monthsLabels=['Jan','Fév','Mar','Avr','Mai','Juin','Juil','Août','Sep','Oct','Nov','Déc'];
+    if(style==='graphique'){
+        sections.push({title:'1. Trésorerie et flux',kpis:[
+            {label:'Recettes de l’exercice',value:money(m.income,2),tone:'green'},
+            {label:'Dépenses de l’exercice',value:money(m.expense,2),tone:'red'},
+            {label:'Flux net (non fiscal)',value:money(m.net,2),tone:m.net<0?'red':'green'},
+            {label:'Solde calculé · '+m.cashRef.short,value:money(m.cash,2),tone:m.cash<0?'red':'gold'}
+        ],chart:{type:'bars',labels:monthsLabels,series:[{label:'Recettes',color:'#367858',values:monthly.map(x=>r2(x.income))},{label:'Dépenses',color:'#b45043',values:monthly.map(x=>r2(x.expense))}]},paragraphs:[`Le solde calculé part du solde d’ouverture de la société et des mouvements enregistrés. Il ne constitue pas un résultat fiscal.`]});
+        sections.push({title:'2. Ventilation des flux',chart:{type:'hbar',items:expenseCats.slice(0,6).map(c=>({label:c.name,value:c.expense,value_label:money(c.expense,2),color:'#b45043'}))},paragraphs:[`Les charges d’exploitation représentent ${num(m.income>0?r2(operatingExpense/m.income*100):0)} % des recettes de l’exercice${loanService?`, auxquelles s’ajoute le service de la dette (${money(loanService,2)})`:''}.${topCategory?` Le premier poste de sortie est « ${topCategory.name} », avec ${money(topCategory.expense,2)}.`:''}`]});
+    }else{
+        sections.push({title:'1. Trésorerie et flux',table:{headers:['Indicateur','Montant'],rows:[
+            ['Recettes de l’exercice',money(m.income,2)],
+            ['Dépenses de l’exercice',money(m.expense,2)],
+            ['Flux net (non fiscal)',money(m.net,2)],
+            ['Solde calculé · '+m.cashRef.short,money(m.cash,2)],
+            ['Loyers échus restant à encaisser',money(m.overdue,2)],
+            ['Taux d’occupation déclaré',num(occupancy)+' %']
+        ],weights:[3,1],aligns:['left','right']},note:'Le solde part du solde d’ouverture de chaque société, ou de l’ensemble des mouvements lorsqu’aucun solde d’ouverture n’est renseigné.'});
+        sections.push({title:'2. Ventilation des flux',table:{headers:['Catégorie','Recettes','Dépenses','Solde'],rows:cats.map(c=>[c.name,money(c.income,2),money(c.expense,2),money(c.income-c.expense,2)]).concat([['Total',money(m.income,2),money(m.expense,2),money(m.net,2)]]),weights:[2.2,1.2,1.2,1.2],aligns:['left','right','right','right']},note:'Ventilation par catégorie telle que saisie. Les apports, dépôts de garantie et capitaux d’emprunt ne constituent pas des recettes locatives.'});
+    }
+    sections.push({title:'3. Patrimoine et financements',table:props.length?{headers:['Bien','Valeur estimée','Occupation'],rows:props.map(p=>[p.name,money(p.value),p.status||'—']),weights:[2.4,1.2,1],aligns:['left','right','left']}:null,paragraphs:[props.length?`Valeur estimée cumulée : ${money(m.value,2)}. Dette renseignée : ${money(m.debt,2)}${m.value>0?` (${num(r2(m.debt/m.value*100))} % de la valeur)`:''}.`:'Aucun bien renseigné pour cette société.',props.length?'Les dates de référence des emprunts ne sont pas actualisées automatiquement.':'']});
+    sections.push({title:'4. Associés',table:partners.length?{headers:['Associé','Parts','Participation','Compte courant'],rows:partners.map(p=>[p.name,num(p.shares),totalShares?num(r2(p.shares/totalShares*100))+' %':'—',money(p.cca,2)]),weights:[2,0.8,1.1,1.4],aligns:['left','right','right','right']}:null,paragraphs:[partners.length?'':'Aucun associé renseigné pour cette société.']});
+    sections.push({title:'5. Analyse automatique',analysis,note:'Analyse produite automatiquement à partir des données saisies dans Dominis. Elle signale des écarts chiffrés et ne remplace ni un avis comptable, ni une déclaration fiscale, ni le rapport de gestion du gérant.'});
+    return {
+        eyebrow:'DOMINIS · SYNTHÈSE ANNUELLE',
+        title:s.name,
+        subtitle:`Synthèse de gestion · Exercice ${year}`,
+        meta:[`Établie le ${date(today())}`,`Régime ${s.regime||'IR'} · Gérant : ${s.manager||'À compléter'}`,`Clôture de l’exercice : ${s.closing||'31/12'}`],
+        notice:'Document préparatoire de gestion, à vérifier avec les relevés bancaires et la comptabilité. Ce PDF n’est ni un bilan comptable, ni une déclaration fiscale, ni un rapport annuel statutaire complet. Les flux portent sur l’année civile sélectionnée, indépendamment de la clôture déclarée.',
+        sections
+    };
+}
+function annualReport(){
+    let s=currentSCI();
+    if(!s)return notify('Ouvrez d’abord la page d’une SCI.',true);
+    let years=synthesisYears(s),year=years.includes(String(activeYear()))?String(activeYear()):years[0];
+    let style='classique';
+    openModal('Préparer une synthèse annuelle',`<p class="sub" style="margin-bottom:15px">La synthèse est enregistrée en <strong>PDF</strong> dans Documents › Synthèses › Classique ou Graphique, puis classée par année. Aucun réglage n’est nécessaire.</p>${field('report-year','Exercice','select',year,years.map(y=>[y,'Année civile '+y]))}${field('report-style','Présentation','select',style,[['classique','Classique · tableaux détaillés'],['graphique','Graphique · indicateurs et graphiques']])}<div id="report-choice" class="notice" style="margin-top:14px"></div>`,`<button data-action="close-modal">Annuler</button><button class="primary" id="generate-report">${icon('file')} Générer le PDF</button>`);
+    const draw=()=>{
+        let y=$('#f-report-year')?.value||year,st=$('#f-report-style')?.value||style,box=$('#report-choice');
+        if(!box)return;
+        box.innerHTML=st==='graphique'
+            ?`<strong>Synthèse graphique · ${esc(y)}</strong><br>Indicateurs clés, flux mensuels et répartition des dépenses, puis patrimoine, associés et analyse automatique.`
+            :`<strong>Synthèse classique · ${esc(y)}</strong><br>Tableaux détaillés (trésorerie, ventilation, patrimoine, associés) puis analyse automatique.`;
+    };
+    draw();
+    $('#f-report-year')?.addEventListener('change',draw);
+    $('#f-report-style')?.addEventListener('change',draw);
+    $('#generate-report').onclick=async()=>{
+        let btn=$('#generate-report');
+        btn.disabled=true;let old=btn.innerHTML;btn.innerHTML='Génération en cours…';
+        try{
+            let y=$('#f-report-year').value,st=$('#f-report-style').value;
+            let styleKey=st==='graphique'?'graphique':'classique';
+            let folders=await ensureSynthesisFolders(s.id,y);
+            let model=annualReportModel(s,Number(y),st);
+            let res=await (await api('annual-report',{sci:s.id,year:y,style:st,folder_id:folders.years[styleKey],model})).json();
+            await refresh();
+            openModal('Synthèse enregistrée',`<p class="sub">Le PDF <strong>${esc(res.filename)}</strong> (${num((res.size||0)/1024)} Ko) a été ajouté à <strong>Documents › Synthèses › ${st==='graphique'?'Graphique':'Classique'} › ${esc(y)}</strong>. Vous pouvez l’ouvrir, l’imprimer ou le télécharger depuis la page Documents.</p>`,`<button data-action="close-modal">Fermer</button><button class="primary" id="open-report">${icon('search')} Ouvrir la synthèse</button>`);
+            $('#open-report').onclick=()=>{closeModal(true);documentPreview(res.id);};
+        }catch(e){
+            btn.disabled=false;btn.innerHTML=old;
+            modalError(e);
+        }
+    };
+}
 function scopeFilter(){return `<select id="scope" aria-label="Filtrer par SCI"><option value="">Toutes les SCI</option>${S.scis.map(s=>`<option value="${s.id}" ${scope===s.id?'selected':''}>${esc(s.name)}</option>`).join('')}</select>`;}
-function tableFilters(kind,id){return `<div class="filters"><input id="filter-search" type="search" placeholder="Rechercher dans ${esc(kindNames[kind].toLowerCase())}…" value="${esc(query)}" aria-label="Rechercher dans la liste">${!id?scopeFilter():''}${['entries','calls','tasks'].includes(kind)?`<select id="status-filter" aria-label="Filtrer par statut"><option value="">Tous les ${kind==='entries'?'mouvements':'statuts'}</option>${(kind==='entries'?['Recette','Dépense']:kind==='calls'?['Payé','Partiel','À encaisser','En retard']:['À faire','En cours','Terminé']).map(t=>`<option ${filter===t?'selected':''}>${t}</option>`).join('')}</select>`:''}<span class="muted" style="margin-left:auto;font-size:11px" id="list-count"></span></div>`;}
+function docYears(){
+    let scoped=docScope(),set=new Set();
+    rows('documents',scoped).forEach(r=>{let y=docYearOf(r);if(y)set.add(String(y));});
+    return [...set].sort().reverse();
+}
+function docYearFilter(){
+    let years=docYears();
+    if(!years.length)return '';
+    return `<select id="doc-year-filter" aria-label="Année des documents"><option value="">Toutes les années</option>${years.map(y=>`<option value="${esc(y)}" ${String(docYear)===String(y)?'selected':''}>${esc(y)}</option>`).join('')}</select>`;
+}
+function tableFilters(kind,id){return `<div class="filters"><input id="filter-search" type="search" placeholder="Rechercher dans ${esc(kindNames[kind].toLowerCase())}…" value="${esc(query)}" aria-label="Rechercher dans la liste">${!id?scopeFilter():''}${['entries','calls','tasks'].includes(kind)?`<select id="status-filter" aria-label="Filtrer par statut"><option value="">Tous les ${kind==='entries'?'mouvements':'statuts'}</option>${(kind==='entries'?['Recette','Dépense']:kind==='calls'?['Payé','Partiel','À encaisser','En retard']:['À faire','En cours','Terminé']).map(t=>`<option ${filter===t?'selected':''}>${t}</option>`).join('')}</select>`:''}${kind==='documents'?docYearFilter():''}<span class="muted" style="margin-left:auto;font-size:11px" id="list-count"></span></div>`;}
 function callStatus(r){return due(r)<.005?'Payé':r.due<today()?'En retard':paid(r)>0?'Partiel':'À encaisser'}
 function badge(text){let c=['Payé','Terminé','Actif','Loué'].includes(text)?'green':['En retard','Vacant'].includes(text)?'red':'gold';return `<span class="pill ${c}">${esc(text||'—')}</span>`;}
 function actions(r,extra=''){return `<div class="actions">${extra}<button data-edit="${r.id}" title="Modifier" aria-label="Modifier ${esc(label(r))}">${icon('edit')}</button><button data-delete="${r.id}" title="Supprimer" aria-label="Supprimer ${esc(label(r))}">${icon('trash')}</button></div>`;}
-function filtered(kind,id){return rows(kind,id||scope).filter(r=>{let text=Object.values(r).filter(v=>typeof v==='string').join(' ')+' '+sciname(r.sci)+' '+label(rec(r.property_id))+' '+label(rec(r.lease_id));let status=kind==='calls'?callStatus(r):kind==='entries'?r.direction:r.status;return text.toLowerCase().includes(query.toLowerCase())&&(!filter||status===filter)&&yearMatches(r,kind)}).sort((a,b)=>['entries','calls'].includes(kind)?(b.date||b.period).localeCompare(a.date||a.period):kind==='tasks'?a.due.localeCompare(b.due):0);}
+const docYearOf=r=>String((r&&(r.synthesis_year||String(r.date||'').slice(0,4)))||'');
+function filtered(kind,id){return rows(kind,id||scope).filter(r=>{let text=Object.values(r).filter(v=>typeof v==='string').join(' ')+' '+sciname(r.sci)+' '+label(rec(r.property_id))+' '+label(rec(r.lease_id));let status=kind==='calls'?callStatus(r):kind==='entries'?r.direction:r.status;return text.toLowerCase().includes(query.toLowerCase())&&(!filter||status===filter)&&yearMatches(r,kind)&&(kind!=='documents'||!docYear||docYearOf(r)===String(docYear))}).sort((a,b)=>['entries','calls'].includes(kind)?(b.date||b.period).localeCompare(a.date||a.period):kind==='tasks'?a.due.localeCompare(b.due):0);}
 const defaultDocFolders=[{id:'f-statuts',name:'Statuts & vie sociale',builtin:true},{id:'f-immobilier',name:'Baux & immobilier',builtin:true},{id:'f-comptable',name:'Comptabilité & fiscalité',builtin:true},{id:'f-banque',name:'Banque & financement',builtin:true},{id:'f-technique',name:'Travaux & diagnostics',builtin:true},{id:'f-assurance',name:'Assurances',builtin:true}];
 // Les dossiers de classement appartiennent à une SCI. Renommer, supprimer ou
 // réordonner un dossier ne modifie donc jamais les autres sociétés.
@@ -7596,7 +8720,20 @@ function normalizeDocFolders(list){
         if(!id||!name||out.some(x=>x.id===id))return;
         let item={id,name};
         if(f.builtin)item.builtin=true;
+        let parent=String(f.parent_id||'').trim().slice(0,60);
+        if(parent&&parent!==id)item.parent_id=parent;
         out.push(item);
+    });
+    // Un parent inexistant ou une boucle renvoie le dossier à la racine : une
+    // arborescence ne doit jamais disparaître parce qu'un parent a été supprimé.
+    let by=new Map(out.map(f=>[f.id,f]));
+    out.forEach(f=>{
+        if(f.parent_id&&!by.has(f.parent_id))delete f.parent_id;
+        let cur=f.parent_id?by.get(f.parent_id):null,guard=0;
+        while(cur&&guard++<12){
+            if(cur.id===f.id){delete f.parent_id;break;}
+            cur=cur.parent_id?by.get(cur.parent_id):null;
+        }
     });
     return out;
 }
@@ -7619,7 +8756,36 @@ function docFolders(sciId){
     S.scis.forEach(s=>sciDocFolders(s.id).forEach(f=>{if(seen.has(f.id))return;seen.add(f.id);out.push(f);}));
     return out.length?out:normalizeDocFolders(defaultDocFolders);
 }
+// Chemin lisible d'un dossier : « Synthèses › Graphique › 2026 ». Deux
+// sous-dossiers peuvent porter le même nom (une année par exemple), le chemin
+// évite toute ambiguïté dans la liste des documents.
+function docFolderPath(id,sciId){
+    let folders=sciDocFolders(sciId);
+    let path=folderPath(folders,id).map(f=>f.name);
+    return path.length?path.join(' › '):docFolderName(id,sciId);
+}
 function docFolderName(id,sciId){return docFolders(sciId).find(f=>f.id===id)?.name||''}
+function folderById(list,id){return (list||[]).find(f=>f.id===id)||null;}
+function folderParentId(f){return (f&&f.parent_id)||'';}
+function folderChildren(list,parentId){return (list||[]).filter(f=>folderParentId(f)===(parentId||''));}
+function folderDepth(list,id){
+    let f=folderById(list,id),n=0,guard=0;
+    while(f&&guard++<10){n++;f=folderById(list,folderParentId(f));}
+    return n;
+}
+function folderPath(list,id){
+    let out=[],f=folderById(list,id),guard=0;
+    while(f&&guard++<10){out.unshift(f);f=folderById(list,folderParentId(f));}
+    return out;
+}
+function folderDescendants(list,id){
+    let out=[],stack=[id];
+    while(stack.length){
+        let cur=stack.pop();
+        folderChildren(list,cur).forEach(c=>{out.push(c);stack.push(c.id);});
+    }
+    return out;
+}
 function newFolderId(){return 'f-'+Date.now().toString(36)+Math.random().toString(36).slice(2,7);}
 async function saveDocFolders(sciId,list){
     if(!sciId)throw new Error('Société introuvable.');
@@ -7628,16 +8794,40 @@ async function saveDocFolders(sciId,list){
     await setPref({doc_folders_by_sci:by});
     await refresh();
 }
-async function moveDocFolder(sciId,folderId,dir){
-    let list=sciDocFolders(sciId), ix=list.findIndex(f=>f.id===folderId);
-    if(!sciId||ix<0)return;
-    let jx=ix+(Number(dir)>0?1:-1);
-    if(jx<0||jx>=list.length)return;
-    let moved=[...list],item=moved.splice(ix,1)[0];
-    moved.splice(jx,0,item);
-    await saveDocFolders(sciId,moved);
+function applySiblingOrder(list,ordered,parentId){
+    let queue=ordered.slice();
+    return list.map(f=>(folderParentId(f)===(parentId||'')?(queue.shift()||f):f));
 }
-// Choix de la société quand la page Documents affiche toutes les SCI.
+// Les flèches déplacent désormais un dossier parmi ses frères, jamais à travers
+// les niveaux : un sous-dossier reste dans son dossier parent.
+async function moveDocFolder(sciId,folderId,dir){
+    let list=sciDocFolders(sciId), folder=folderById(list,folderId);
+    if(!sciId||!folder)return;
+    let parentId=folderParentId(folder), siblings=folderChildren(list,parentId);
+    let ix=siblings.findIndex(f=>f.id===folderId), jx=ix+(Number(dir)>0?1:-1);
+    if(ix<0||jx<0||jx>=siblings.length)return;
+    let reordered=[...siblings], item=reordered.splice(ix,1)[0];
+    reordered.splice(jx,0,item);
+    await saveDocFolders(sciId,applySiblingOrder(list,reordered,parentId));
+}
+async function setDocFolderParent(sciId,folderId,parentId){
+    let list=sciDocFolders(sciId), folder=folderById(list,folderId);
+    if(!folder)throw new Error('Dossier introuvable.');
+    parentId=parentId||'';
+    if(parentId){
+        if(parentId===folderId)throw new Error('Un dossier ne peut pas être son propre parent.');
+        if(!folderById(list,parentId))throw new Error('Dossier parent introuvable.');
+        if(folderDescendants(list,folderId).some(f=>f.id===parentId))throw new Error('Impossible de déplacer un dossier dans l’un de ses sous-dossiers.');
+        if(folderDepth(list,parentId)>=3)throw new Error('Trois niveaux de dossiers au maximum.');
+    }
+    let rest=list.filter(f=>f.id!==folderId);
+    let moved={...folder};
+    if(parentId)moved.parent_id=parentId;else delete moved.parent_id;
+    let siblings=rest.filter(f=>folderParentId(f)===parentId);
+    let insertAt=siblings.length?rest.findIndex(f=>f.id===siblings[siblings.length-1].id)+1:rest.length;
+    rest.splice(insertAt,0,moved);
+    await saveDocFolders(sciId,rest);
+}
 function docFolderSciField(){
     if(docScope()||!S.scis.length)return '';
     return field('folder-sci','Société concernée','select',S.scis[0].id,S.scis.map(s=>[s.id,s.name]),true,true);
@@ -7645,7 +8835,8 @@ function docFolderSciField(){
 function docFolderSciTarget(){return docScope()||($('#f-folder-sci')?.value)||(S.scis[0]?.id)||'';}
 function docFolderOptionsHtml(sciId,keep){
     let auto=docCategoryFolder($('#f-category')?.value||'');
-    return `<option value="">${auto?'Classement automatique · '+esc(docFolderName(auto,sciId)):'Aucun dossier (classement automatique)'}</option>`+sciDocFolders(sciId).map(f=>`<option value="${esc(f.id)}" ${f.id===keep?'selected':''}>${esc(f.name)}</option>`).join('');
+    let folders=sciDocFolders(sciId);
+    return `<option value="">${auto?'Classement automatique · '+esc(docFolderName(auto,sciId)):'Aucun dossier (classement automatique)'}</option>`+folders.map(f=>{let depth=folderDepth(folders,f.id);return `<option value="${esc(f.id)}" ${f.id===keep?'selected':''}>${'— '.repeat(Math.max(0,depth-1))}${depth>1?'↳ ':''}${esc(f.name)}</option>`}).join('');
 }
 function docCategoryFolder(category){
     if(category==='Statuts'||category==='Assemblée / rapport')return 'f-statuts';
@@ -7665,20 +8856,42 @@ function folderDocCount(id,sciId){
     let scoped=sciId===undefined?docScope():sciId;
     return rows('documents',scoped).filter(r=>resolveDocFolder(r)===id).length;
 }
+// Nombre de documents contenus dans un dossier, sous-dossiers compris : une
+// carte « Synthèses » annonce bien les PDF rangés dans Classique > 2026.
+function folderDeepCounts(docs){
+    let deep=new Map();
+    docs.forEach(r=>{
+        let fid=resolveDocFolder(r);
+        if(!fid)return;
+        let chain=folderPath(sciDocFolders(r.sci),fid);
+        if(!chain.length)chain=[{id:fid}];
+        chain.forEach(f=>deep.set(f.id,(deep.get(f.id)||0)+1));
+    });
+    return deep;
+}
 function docFolderBar(){
-    let scoped=docScope(), folders=docFolders(scoped), docs=rows('documents',scoped),
-        all=docs.length, unclassed=docs.filter(r=>!resolveDocFolder(r)).length,
-        draggable=!!scoped;
-    let folderCard=(f,i)=>{
-        let n=folderDocCount(f.id,scoped);
-        // Plus de flèches ni de corbeille sur chaque carte : l'ordre se règle en
-        // maintenant l'appui puis en glissant la carte. La suppression reste
-        // disponible dans « Modifier le dossier », avec confirmation.
-        return `<article class="doc-folder-card ${draggable?'doc-folder-draggable':''} ${docFolder===f.id?'active':''}"${draggable?` data-folder-drag="${esc(f.id)}" title="Cliquer pour ouvrir · Maintenir appuyé pour déplacer"`:''} data-doc-folder="${esc(f.id)}" role="button" tabindex="0" aria-label="Ouvrir le dossier ${esc(f.name)}${draggable?'. Maintenir appuyé pour le déplacer':''}"><div class="doc-folder-top"><span class="doc-folder-name">${icon('folder')} ${esc(f.name)}</span><div class="doc-folder-actions"><button type="button" data-folder-rename="${esc(f.id)}" title="Renommer, ranger ou supprimer le dossier" aria-label="Gérer le dossier ${esc(f.name)}">${icon('edit')}</button></div></div><div class="doc-folder-meta"><span>${n} document${n>1?'s':''}</span><span class="muted">${f.builtin?'Dossier proposé par défaut':'Dossier personnel'}</span></div></article>`;
+    let scoped=docScope(), folders=docFolders(scoped), docs=rows('documents',scoped);
+    let current=(docFolder&&docFolder!=='none')?folderById(folders,docFolder):null;
+    if(!current&&docFolder&&docFolder!=='none')docFolder='';
+    let children=current?folderChildren(folders,current.id):folderChildren(folders,'');
+    let all=docs.length, unclassed=docs.filter(r=>!resolveDocFolder(r)).length, draggable=!!scoped;
+    let counts=folderDeepCounts(docs);
+    let card=f=>{
+        let deep=counts.get(f.id)||0, kids=folderChildren(folders,f.id).length;
+        return `<article class="doc-folder-card ${draggable?'doc-folder-draggable':''} ${docFolder===f.id?'active':''}" draggable="false"${draggable?` data-folder-drag="${esc(f.id)}" title="Cliquer pour ouvrir · Maintenir appuyé pour déplacer"`:''} data-doc-folder="${esc(f.id)}" role="button" tabindex="0" aria-label="Ouvrir le dossier ${esc(f.name)}${draggable?'. Maintenir appuyé pour le déplacer':''}"><div class="doc-folder-top"><span class="doc-folder-name">${icon("folder")}<span>${esc(f.name)}</span></span><div class="doc-folder-actions"><button type="button" data-folder-rename="${esc(f.id)}" title="Renommer, ranger ou supprimer le dossier" aria-label="Gérer le dossier ${esc(f.name)}">${icon('edit')}</button></div></div><div class="doc-folder-meta"><span>${deep} document${deep>1?'s':''}</span><span class="muted">${kids?`${kids} sous-dossier${kids>1?'s':''}`:(f.builtin?'Dossier proposé':'Dossier personnel')}</span></div></article>`;
     };
-    // « Tous les documents » reste toujours à droite, quel que soit l'ordre des dossiers.
+    let crumbs=[{id:'',name:'Tous les documents'}];
+    if(current)folderPath(folders,current.id).forEach(f=>crumbs.push({id:f.id,name:f.name}));
+    let crumbHtml=crumbs.length>1?`<nav class="doc-breadcrumb" aria-label="Chemin du dossier">${crumbs.map((c,i)=>i===crumbs.length-1?`<span aria-current="page">${esc(c.name)}</span>`:`<button type="button" data-doc-folder="${esc(c.id)}">${esc(c.name)}</button>${icon('chevron')}`).join('')}</nav>`:'';
+    let parentForNew=current?current.id:'';
+    // Trois niveaux au maximum : au dernier niveau, la carte « Sous-dossier »
+    // disparaît plutôt que d'ouvrir un formulaire qui refusera la création.
+    let canAdd=!current||folderDepth(folders,current.id)<3;
+    let newCard=!canAdd?'':`<button type="button" class="doc-folder-card doc-folder-new" data-folder-new="1" data-folder-parent="${esc(parentForNew)}" style="justify-content:center;color:var(--gold);border-style:dashed" aria-label="${esc(current?'Créer un sous-dossier':'Créer un dossier de classement')}">${icon('plus')} ${current?'Sous-dossier':'Nouveau dossier'}</button>`;
+    let rootExtras=current?'':`<article class="doc-folder-card ${docFolder==='none'?'active':''}" data-doc-folder="none" role="button" tabindex="0" aria-label="Documents sans dossier"><div class="doc-folder-top"><span class="doc-folder-name">${icon("file")}<span>Sans dossier</span></span></div><div class="doc-folder-meta"><span>${unclassed} document${unclassed>1?'s':''}</span></div></article>`;
     let dragHint=(!scoped&&S.scis.length>1)?'<p class="compact-note" style="margin:-6px 0 14px">L’ordre des dossiers est propre à chaque société : choisissez une société dans le filtre « Société » pour les déplacer.</p>':'';
-    return `<div class="doc-folders-bar">${folders.map(folderCard).join('')}<article class="doc-folder-card ${docFolder==='none'?'active':''}" data-doc-folder="none" role="button" tabindex="0" aria-label="Documents sans dossier"><div class="doc-folder-top"><span class="doc-folder-name">${icon('file')} Sans dossier</span></div><div class="doc-folder-meta"><span>${unclassed} document${unclassed>1?'s':''}</span></div></article><button type="button" class="doc-folder-card" data-folder-new="1" style="justify-content:center;color:var(--gold);border-style:dashed" aria-label="Créer un dossier de classement">${icon('plus')} Nouveau dossier</button><article class="doc-folder-card doc-folder-all ${docFolder===''?'active':''}" data-doc-folder="" role="button" tabindex="0" aria-label="Afficher tous les documents"><div class="doc-folder-top"><span class="doc-folder-name">${icon('grid')} Tous les documents</span></div><div class="doc-folder-meta"><span>${all} document${all>1?'s':''}</span><span class="muted">${scoped?esc(sciname(scoped)):'Toutes les SCI'}</span></div></article></div>${dragHint}`;
+    let emptyHint=(current&&!children.length)?`<p class="compact-note" style="margin:-6px 0 14px">${canAdd?'Ce dossier n’a pas encore de sous-dossier. Utilisez « Sous-dossier » pour en créer un.':'Ce dossier est au troisième niveau : les documents s’y classent directement, sans sous-dossier supplémentaire.'}</p>`:'';
+    return `${crumbHtml}<div class="doc-folders-bar">${children.map(card).join('')}${newCard}${rootExtras}<article class="doc-folder-card doc-folder-all ${docFolder===''?'active':''}" data-doc-folder="" role="button" tabindex="0" aria-label="Afficher tous les documents"><div class="doc-folder-top"><span class="doc-folder-name">${icon("grid")}<span>Tous les documents</span></span></div><div class="doc-folder-meta"><span>${all} document${all>1?'s':''}</span><span class="muted">${scoped?esc(sciname(scoped)):'Toutes les SCI'}</span></div></article></div>${dragHint}${emptyHint}`;
 }
 
 // Réorganisation des dossiers par appui maintenu (souris, trackpad, tactile).
@@ -7704,6 +8917,12 @@ function startFolderDrag(card,ev){
     if(folderDrag||!card)return;
     let bar=card.closest('.doc-folders-bar');
     if(!bar)return;
+    // Windows/WebView2 : sans cette neutralisation, la sélection de texte ou le
+    // glisser natif de l'image démarre et coupe silencieusement les pointermove.
+    if(ev&&ev.cancelable){try{ev.preventDefault();}catch(e){}}
+    let captured=false;
+    if(ev&&bar.setPointerCapture){try{bar.setPointerCapture(ev.pointerId);captured=true;}catch(e){}}
+    window.getSelection?.().removeAllRanges?.();
     let rect=card.getBoundingClientRect();
     let ghost=card.cloneNode(true);
     ghost.classList.add('doc-folder-ghost');
@@ -7721,7 +8940,7 @@ function startFolderDrag(card,ev){
     card.classList.add('doc-folder-card-dragging');
     card.style.display='none';
     document.body.appendChild(ghost);
-    folderDrag={card,ghost,placeholder:ph,bar,pid:ev.pointerId,dx:ev.clientX-rect.left,dy:ev.clientY-rect.top};
+    folderDrag={card,ghost,placeholder:ph,bar,pid:ev.pointerId,captured,dx:ev.clientX-rect.left,dy:ev.clientY-rect.top};
     ghost.style.left=(ev.clientX-folderDrag.dx)+'px';
     ghost.style.top=(ev.clientY-folderDrag.dy)+'px';
     document.body.classList.add('doc-folder-dragging');
@@ -7733,18 +8952,22 @@ function finishFolderDrag(commit){
     card.classList.remove('doc-folder-card-dragging');
     card.style.display='';
     let order=folderDragCards().map(el=>el.dataset.folderDrag);
+    if(folderDrag.captured&&folderDrag.bar.hasPointerCapture?.(folderDrag.pid)){
+        try{folderDrag.bar.releasePointerCapture(folderDrag.pid);}catch(e){}
+    }
     placeholder.remove();ghost.remove();
     folderDrag=null;
     document.body.classList.remove('doc-folder-dragging');
     folderDragSuppressUntil=Date.now()+400;
     let scoped=docScope();
     if(!commit||!scoped)return;
-    let folders=docFolders(scoped),by=new Map(folders.map(f=>[f.id,f]));
-    let current=folders.map(f=>f.id);
-    if(order.join('|')===current.join('|'))return;
-    let next=order.map(id=>by.get(id)).filter(Boolean);
-    folders.forEach(f=>{if(!order.includes(f.id))next.push(f);});
-    saveDocFolders(scoped,next).then(()=>notify('Ordre des dossiers enregistré.')).catch(e=>notify(e.message,true));
+    let folders=sciDocFolders(scoped),by=new Map(folders.map(f=>[f.id,f]));
+    let reordered=order.map(id=>by.get(id)).filter(Boolean);
+    if(!reordered.length)return;
+    let parentId=folderParentId(reordered[0]);
+    let siblingIds=folderChildren(folders,parentId).map(f=>f.id);
+    if(order.join('|')===siblingIds.join('|'))return;
+    saveDocFolders(scoped,applySiblingOrder(folders,reordered,parentId)).then(()=>notify('Ordre des dossiers enregistré.')).catch(e=>notify(e.message,true));
 }
 document.addEventListener('pointerdown',ev=>{
     if(folderDrag||ev.button!==0)return;
@@ -7771,6 +8994,19 @@ function endFolderPress(ev,commit){
     if(folderPress&&ev.pointerId===folderPress.pid){clearTimeout(folderPress.timer);folderPress=null;}
     if(folderDrag&&ev.pointerId===folderDrag.pid)finishFolderDrag(commit);
 }
+// Un appui long ne doit jamais ouvrir le menu contextuel ni lancer un glisser
+// natif : ce sont les deux causes de blocage observées sous Windows.
+document.addEventListener('contextmenu',ev=>{
+    let card=ev.target.closest?.('.doc-folders-bar [data-folder-drag]');
+    if(!card)return;
+    if(folderPress||folderDrag||Date.now()<folderDragSuppressUntil)ev.preventDefault();
+});
+document.addEventListener('selectstart',ev=>{
+    if(folderPress||folderDrag||ev.target.closest?.('.doc-folders-bar [data-folder-drag]'))ev.preventDefault();
+});
+document.addEventListener('dragstart',ev=>{
+    if(ev.target.closest?.('.doc-folders-bar'))ev.preventDefault();
+});
 document.addEventListener('pointerup',ev=>endFolderPress(ev,true));
 document.addEventListener('pointercancel',ev=>endFolderPress(ev,false));
 document.addEventListener('keydown',ev=>{if(ev.key==='Escape'&&folderDrag)finishFolderDrag(false);});
@@ -7790,39 +9026,200 @@ async function moveDocToFolder(id,folderId){
         await refresh();
     }
 }
+// Un dossier ouvert affiche aussi les documents rangés dans ses sous-dossiers,
+// exactement comme un explorateur de fichiers.
+function inDocFolder(r){
+    if(docFolder==='')return true;
+    let fid=resolveDocFolder(r);
+    if(docFolder==='none')return !fid;
+    if(!fid)return false;
+    if(fid===docFolder)return true;
+    return folderDescendants(sciDocFolders(r.sci),docFolder).some(f=>f.id===fid);
+}
 function listing(kind,id){let list=filtered(kind,id);
 if(kind==='properties'){if(!list.length)return empty('Aucun élément à afficher',query||filter||scope?'Essayez un autre filtre.':'Ajoutez vos premières données pour compléter cet espace.',!query&&!filter?addBtn(kind,'Ajouter un élément'):'');return `<div class="property-grid">${list.map(r=>`<div class="panel property-card"><div class="property-cover ${r.photo?'has-photo':''}">${r.photo?`<img class="property-cover-img" src="${esc(r.photo)}" style="object-position:${photoPosition(r)}" alt="Photo de ${esc(r.name)}">`:icon('building')}${badge(r.status)}</div><div class="row between"><h3>${esc(r.name)}</h3>${actions(r)}</div><p class="sub" style="margin-top:5px">${esc(r.address)}</p><div class="property-metrics"><div><small>Valeur estimée</small><strong>${money(r.value)}</strong></div><div><small>Surface</small><strong>${num(r.surface)} m²</strong></div><div><small>DPE</small><strong style="color:${['F','G'].includes(r.dpe)?'var(--red)':'var(--green)'}">${esc(r.dpe||'—')}</strong></div></div></div>`).join('')}</div>`;}
-if(kind==='documents')list=docFolder===''?list:(docFolder==='none'?list.filter(r=>!resolveDocFolder(r)):list.filter(r=>resolveDocFolder(r)===docFolder));
-let cols=getTableColumns(kind).filter(c=>c.visible);
-let gearTh=`<th class="align-right col-settings-th"><button type="button" class="ghost icon-only table-gear-btn" data-table-config="${kind}" title="Réglages des colonnes" aria-label="Réglages des colonnes">${icon('settings')}</button></th>`;
-let colTh=c=>`<th${c.id==='society'?' class="col-society"':''}>${esc(c.label)}</th>`;let colTd=(c,v)=>`<td${c.id==='society'?' class="col-society"':''}>${v}</td>`;
-if(!list.length)return `${kind==='documents'?docFolderBar():''}<div class="panel table-wrap"><table><thead><tr>${cols.map(colTh).join('')}${gearTh}</tr></thead></table>${empty('Aucun élément à afficher',query||filter||scope?'Essayez un autre filtre.':'Ajoutez vos premières données pour compléter cet espace.',!query&&!filter?addBtn(kind,'Ajouter un élément'):'')}</div>`;
+if(kind==='documents')list=list.filter(inDocFolder);
+let cols=getTableColumns(kind).filter(c=>c.visible&&!(id&&c.id==='sci'));
+let v=tableView(kind);
+let gearTh=`<th class="align-right col-settings-th"><button type="button" class="ghost icon-only table-gear-btn" data-table-config="${kind}" title="Réglages du tableau" aria-label="Réglages du tableau">${icon('settings')}</button></th>`;
+let numberCol=c=>['amount','credit','debit','solde'].includes(c.id);
+let thClass=c=>[c.id==='society'?'col-society':'',numberCol(c)?'align-right':''].filter(Boolean).join(' ');
+let colTh=c=>`<th${thClass(c)?` class="${thClass(c)}"`:''}>${esc(c.label)}</th>`;
+let colTd=(c,val)=>`<td${thClass(c)?` class="${thClass(c)}"`:''}>${val}</td>`;
+let wrapCls=`panel table-wrap tv-${v.density}${v.fit?' tv-fit':''}${v.sticky?' tv-sticky':''}`;
+if(!list.length)return `${kind==='documents'?docFolderBar():''}<div class="${wrapCls}"><table><thead><tr>${cols.map(colTh).join('')}${gearTh}</tr></thead></table>${empty('Aucun élément à afficher',query||filter||scope||(kind==='documents'&&docYear)?'Essayez un autre filtre.':'Ajoutez vos premières données pour compléter cet espace.',!query&&!filter?addBtn(kind,'Ajouter un élément'):'')}</div>`;
 let totalShares=kind==='partners'?rows('partners',id).reduce((s,r)=>s+Number(r.shares||0),0):0;
+let ledger=kind==='entries'?ledgerBalances(id):null;
 let rowsHtml=list.map(r=>{
     let cellMap={},act='';
-    if(kind==='entries'){cellMap={society:`<span class="sci-dot" style="background:${sciColor(r.sci)}" title="${esc(sciname(r.sci))}" role="img" aria-label="${esc(sciname(r.sci))}"></span>`,label:`${esc(r.label)}${r.call_id?'<span class="cell-sub">Liée à un appel de loyer</span>':''}`,sci:esc(sciname(r.sci)),date:date(r.date),category:esc(r.category),amount:`<span class="${r.direction==='Recette'?'green':'red'}">${r.direction==='Recette'?'+':'−'} ${money(r.amount,2)}</span>`};act=actions(r);}
+    if(kind==='entries'){
+        let bal=ledger.get(r.id)||{balance:0};
+        let statement=statementBalance(sci(r.sci),r.date);
+        let soldeCell=bal.excluded
+            ?'<span class="muted" title="Mouvement antérieur au solde d’ouverture : exclu du solde calculé">—</span>'
+            :`<span class="${bal.balance<0?'red':''}">${money(bal.balance,2)}</span>`+(statement!==null
+                ?(Math.abs(statement-bal.balance)<0.005
+                    ?'<span class="cell-sub green">Conforme au relevé</span>'
+                    :`<span class="cell-sub red" title="Solde du relevé importé">Relevé : ${money(statement,2)}</span>`)
+                :(bal.future?'<span class="cell-sub">Projeté</span>':''));
+        cellMap={
+            label:`${esc(r.label)}${r.call_id?'<span class="cell-sub">Liée à un appel de loyer</span>':''}`,
+            sci:`<span class="sci-cell"><span class="sci-dot" style="background:${sciColor(r.sci)}" aria-hidden="true"></span>${esc(sciname(r.sci))}</span>`,date:date(r.date),category:esc(r.category),
+            credit:r.direction==='Recette'?`<span class="green">${money(r.amount,2)}</span>`:'<span class="muted">—</span>',
+            debit:r.direction==='Dépense'?`<span class="red">${money(r.amount,2)}</span>`:'<span class="muted">—</span>',
+            solde:soldeCell,
+            amount:`<span class="${r.direction==='Recette'?'green':'red'}">${r.direction==='Recette'?'+':'−'} ${money(r.amount,2)}</span>`};
+        act=actions(r);
+    }
     else if(kind==='leases'){cellMap={tenant:esc(r.tenant)+`<span class="cell-sub">${esc(r.email)}</span>`,property:esc(label(rec(r.property_id))),bail:`${date(r.start)} → ${date(r.end)}<span class="cell-sub">${esc(r.type)}</span>`,rent:`${money(r.rent,2)}<span class="cell-sub">Charges : ${money(r.charges,2)} / mois</span>`,status:badge(r.status)};act=actions(r);}
     else if(kind==='calls'){cellMap={tenant:`${esc(label(rec(r.lease_id)))}<span class="cell-sub">${esc(r.period)} · ${esc(sciname(r.sci))}</span>`,due:date(r.due),called:money((+r.rent||0)+(+r.charges||0),2),paid:money(paid(r),2),status:badge(callStatus(r))};act=actions(r,due(r)>.005?`<button data-pay="${r.id}" title="Encaisser un paiement">${icon('wallet')}</button>`:`<button data-receipt="${r.id}" title="Télécharger la quittance">${icon('file')}</button>`);}
     else if(kind==='partners'){cellMap={name:esc(r.name)+`<span class="cell-sub">${esc(r.email)}</span>`,role:esc(r.role),shares:num(r.shares),participation:totalShares?num(r.shares/totalShares*100)+' %':'—',cca:`<span class="${Number(r.cca)<0?'red':''}">${money(r.cca,2)}</span>`};act=actions(r);}
     else if(kind==='loans'){cellMap={name:esc(r.name)+`<span class="cell-sub">${esc(r.bank)}</span>`,principal:money(r.principal),balance:`${money(r.balance)}<span class="cell-sub">Situation au ${date(r.balance_date)}</span>`,rate:`${num(r.rate)} %<span class="cell-sub">${money(r.monthly,2)} / mois</span>`,end:date(r.end)};act=actions(r);}
     else if(kind==='tasks'){let remDates=r.reminders_enabled&&Array.isArray(r.reminders)?r.reminders:[];cellMap={name:`<strong>${esc(r.name)}</strong>${r.important?' <span class="pill red" style="margin-left:6px">Important</span>':''}${remDates.length?`<span class="cell-sub">${remDates.length} rappel${remDates.length>1?'s':''} · ${remDates.map(date).join(', ')}</span>`:''}`,sci:esc(sciname(r.sci)),due:`<span class="${r.due<today()&&r.status!=='Terminé'?'red':''}">${date(r.due)}</span>`,category:esc(r.category),status:badge(r.status)};act=actions(r,r.status!=='Terminé'?`<button data-complete="${r.id}" title="Marquer comme terminé">${icon('check')}</button>`:'');}
-    else if(kind==='documents'){let folder=resolveDocFolder(r);cellMap={name:`${icon('file')} <span style="vertical-align:super;margin-left:6px">${esc(r.name)}</span>`,sci:esc(sciname(r.sci)),category:esc(r.category),folder:folder?`<span class="pill">${icon('folder')} ${esc(docFolderName(folder,r.sci))}</span>`:'<span class="muted">Sans dossier</span>',date:date(r.date),file:r.size?num(r.size/1024)+' Ko':'Note seule'};act=`<div class="actions"><button data-document-preview="${r.id}" title="Ouvrir l’aperçu" aria-label="Ouvrir l’aperçu de ${esc(r.name)}">${icon('search')}</button>${r.size?`<button data-document="${r.id}" title="Télécharger le document" aria-label="Télécharger ${esc(r.name)}">${icon('download')}</button>`:''}<button data-edit="${r.id}" title="Modifier" aria-label="Modifier ${esc(r.name)}">${icon('edit')}</button><button data-delete="${r.id}" title="Supprimer" aria-label="Supprimer ${esc(r.name)}">${icon('trash')}</button></div>`;}
+    else if(kind==='documents'){let folder=resolveDocFolder(r);cellMap={name:`${icon('file')} <span style="vertical-align:super;margin-left:6px">${esc(r.name)}</span>`,sci:esc(sciname(r.sci)),category:esc(r.category),folder:folder?`<span class="pill" title="${esc(docFolderPath(folder,r.sci))}">${icon('folder')} ${esc(docFolderPath(folder,r.sci))}</span>`:'<span class="muted">Sans dossier</span>',date:date(r.date),file:r.size?num(r.size/1024)+' Ko':'Note seule'};act=`<div class="actions"><button data-document-preview="${r.id}" title="Ouvrir l’aperçu" aria-label="Ouvrir l’aperçu de ${esc(r.name)}">${icon('search')}</button>${r.size?`<button data-document="${r.id}" title="Télécharger le document" aria-label="Télécharger ${esc(r.name)}">${icon('download')}</button>`:''}<button data-edit="${r.id}" title="Modifier" aria-label="Modifier ${esc(r.name)}">${icon('edit')}</button><button data-delete="${r.id}" title="Supprimer" aria-label="Supprimer ${esc(r.name)}">${icon('trash')}</button></div>`;}
     return `<tr${kind==='documents'?` class="doc-row" data-doc-open="${r.id}" title="Ouvrir l’aperçu de ${esc(r.name)}"`:''}>${cols.map(c=>colTd(c,cellMap[c.id]??'')).join('')}<td>${act}</td></tr>`;
 }).join('');
-if(kind==='documents')return `${docFolderBar()}<div class="panel table-wrap"><table><thead><tr>${cols.map(colTh).join('')}${gearTh}</tr></thead><tbody>${rowsHtml}</tbody></table></div><p class="compact-note">Cliquez sur une ligne pour ouvrir l’aperçu du document, avec un zoom réglable (par défaut ×1 pour voir le document entier).</p>`;
-return `<div class="panel table-wrap"><table><thead><tr>${cols.map(colTh).join('')}${gearTh}</tr></thead><tbody>${rowsHtml}</tbody></table></div>`;}
-function listPage(kind,id){let title=kindNames[kind];let buttons=(kind==='entries'?yearSelect(id):'')+(kind==='calls'?`<button data-action="generate-calls">${icon('calendar')} Appeler les loyers</button>`:'')+(kind==='documents'?`<button data-action="doc-folder-reset" title="Rétablir les dossiers proposés par défaut pour cette société">${icon('refresh')} Dossiers par défaut</button><button data-action="doc-folder-new">${icon('folder')} Nouveau dossier</button>`:'')+addBtn(kind,kind==='entries'?'Nouvelle opération':kind==='documents'?'Ajouter un document':'Ajouter');let intro='';if(kind==='entries'){let m=metrics(id||scope),net=m.income-m.expense;intro=`<div class="balance-card row between"><div><div class="eyebrow">Solde calculé · À ce jour</div><strong class="${m.cash<0?'red':''}">${money(m.cash,2)}</strong></div><div><div class="sub">Flux net · ${yearScopeLabel()}</div><div class="${net<0?'red':'gold'}" style="font-size:19px;margin-top:5px">${money(net,2)}</div></div></div>${m.cashSkipped?`<div class="notice"><strong>${m.cashSkipped} mouvement${m.cashSkipped>1?'s':''}</strong> daté${m.cashSkipped>1?'s':''} avant le solde d’ouverture d’une SCI ${m.cashSkipped>1?'ne sont':'n’est'} pas inclus dans le solde calculé : ce solde d’ouverture est censé déjà les contenir. Vérifiez la date du solde initial dans la fiche de la société.</div>`:''}<div class="notice">Livre de trésorerie de gestion, toutes dates ci-dessous. Le solde part du solde d’ouverture de chaque SCI, ou de l’ensemble des mouvements lorsqu’aucun solde d’ouverture n’est renseigné. Il ne constitue pas un résultat fiscal ni une comptabilité d’engagement.</div>`;}
+let foot='';
+if(v.totals&&list.length&&['entries','calls'].includes(kind)){
+    let totals={};
+    if(kind==='entries'){
+        let credit=r2(list.filter(r=>r.direction==='Recette').reduce((a,r)=>a+toNum(r.amount),0));
+        let debit=r2(list.filter(r=>r.direction==='Dépense').reduce((a,r)=>a+toNum(r.amount),0));
+        // Solde de la sélection : la somme des soldes de chaque SCI, pas le
+        // solde de la dernière ligne (qui n'a de sens que pour une société).
+        let totalCash=metrics(id).cash;
+        totals={label:`<strong>Totaux · ${list.length} mouvement${list.length>1?'s':''}</strong>`,
+            credit:`<span class="green">${money(credit,2)}</span>`,debit:`<span class="red">${money(debit,2)}</span>`,
+            solde:`<strong class="${totalCash<0?'red':''}" title="Solde calculé de la sélection">${money(totalCash,2)}</strong>`,
+            amount:`<strong class="${credit-debit<0?'red':'green'}">${money(credit-debit,2)}</strong>`};
+    }else{
+        let called=r2(list.reduce((a,r)=>a+toNum(r.rent)+toNum(r.charges),0));
+        let paidTotal=r2(list.reduce((a,r)=>a+paid(r),0));
+        totals={tenant:`<strong>Totaux · ${list.length} appel${list.length>1?'s':''}</strong>`,called:money(called,2),paid:`<span class="${paidTotal+0.005<called?'gold':'green'}">${money(paidTotal,2)}</span>`};
+    }
+    foot=`<tfoot><tr>${cols.map(c=>colTd(c,totals[c.id]||'')).join('')}<td></td></tr></tfoot>`;
+}
+let tableHtml=`<div class="${wrapCls}"><table><thead><tr>${cols.map(colTh).join('')}${gearTh}</tr></thead><tbody>${rowsHtml}</tbody>${foot}</table></div>`;
+if(kind==='documents')return `${docFolderBar()}${tableHtml}<p class="compact-note">Cliquez sur une ligne pour ouvrir l’aperçu du document, avec un zoom réglable (par défaut ×1 pour voir le document entier).</p>`;
+let rail=(v.charts&&kind==='entries')?chartRail(list,id):'';
+return rail?`<div class="table-split has-rail">${tableHtml}${rail}</div>`:tableHtml;}
+// --- Panneau graphique facultatif ----------------------------------------
+// Deux graphiques au maximum, un par question : l'évolution mensuelle et la
+// structure des dépenses. Ils n'apparaissent que si les données suffisent et
+// seulement à côté d'un tableau réellement lisible (écran large).
+function railSvgBars(rows,max,colorFor){
+    let w=280,h=118,left=0,right=0,top=6,bottom=18,pw=w-left-right,ph=h-top-bottom,step=pw/rows.length;
+    let svg=`<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="${esc('Évolution mensuelle')}">`;
+    rows.forEach((r,i)=>{
+        let x=left+i*step+step/2,bh=max>0?r.value/max*ph:0;
+        svg+=`<rect x="${x-step*0.3}" y="${top+ph-bh}" width="${Math.max(step*0.6,3)}" height="${Math.max(bh,0)}" rx="2" fill="${colorFor(r)}"><title>${esc(r.label)} : ${money(r.value,2)}</title></rect>`;
+        svg+=`<text x="${x}" y="${h-4}" text-anchor="middle" fill="var(--muted)" font-family="Arial" font-size="8">${esc(r.short||r.label)}</text>`;
+    });
+    return svg+'</svg>';
+}
+function chartRail(list,id){
+    let months=[],byMonth=new Map();
+    list.slice().reverse().forEach(r=>{
+        let ym=entryDate(r).slice(0,7);
+        if(!byMonth.has(ym))byMonth.set(ym,{recette:0,depense:0});
+        let cell=byMonth.get(ym);
+        if(r.direction==='Recette')cell.recette+=toNum(r.amount);else cell.depense+=toNum(r.amount);
+    });
+    months=[...byMonth.entries()].map(([ym,v])=>({ym,recette:r2(v.recette),depense:r2(v.depense),net:r2(v.recette-v.depense)}));
+    let cats=new Map();
+    list.filter(r=>r.direction==='Dépense').forEach(r=>{
+        let k=r.category||'Sans catégorie';
+        cats.set(k,r2((cats.get(k)||0)+toNum(r.amount)));
+    });
+    let catList=[...cats.entries()].map(([label,value])=>({label,value})).sort((a,b)=>b.value-a.value);
+    let panels=[];
+    if(months.length>=2){
+        let max=Math.max(1,...months.map(m=>Math.max(m.recette,m.depense)));
+        let svg=`<svg viewBox="0 0 280 128" role="img" aria-label="Flux mensuels"><g>`;
+        let w=280,h=128,ph=96,step=w/months.length;
+        months.forEach((m,i)=>{
+            let x=i*step+step/2,hr=m.recette/max*ph,hd=m.depense/max*ph;
+            svg+=`<rect x="${x-13}" y="${6+ph-hr}" width="11" height="${Math.max(hr,0)}" rx="2" fill="var(--green)"><title>${esc(m.ym)} · Recettes ${money(m.recette,2)}</title></rect>`;
+            svg+=`<rect x="${x+2}" y="${6+ph-hd}" width="11" height="${Math.max(hd,0)}" rx="2" fill="var(--red)"><title>${esc(m.ym)} · Dépenses ${money(m.depense,2)}</title></rect>`;
+            svg+=`<text x="${x}" y="${h-6}" text-anchor="middle" fill="var(--muted)" font-family="Arial" font-size="8">${esc(m.ym.slice(5))}</text>`;
+        });
+        svg+='</g></svg>';
+        panels.push(`<div class="panel"><div class="panel-head" style="padding:14px 16px 0"><div><h2 style="font-size:13px">Flux mensuels</h2><p>Recettes et dépenses de la sélection</p></div></div><div class="rail-legend"><span><i style="background:var(--green)"></i>Recettes</span><span><i style="background:var(--red)"></i>Dépenses</span></div><div class="rail-chart">${svg}</div></div>`);
+    }
+    if(catList.length>=2){
+        let max=catList[0].value||1;
+        let bars=catList.slice(0,5).map(c=>`<div class="rail-bar-row"><span class="rail-bar-label" title="${esc(c.label)}">${esc(c.label)}</span><span class="rail-bar-track"><i style="width:${Math.max(3,Math.round(c.value/max*100))}%" data-color="red"></i></span><span class="rail-bar-value">${money(c.value,0)}</span></div>`).join('');
+        panels.push(`<div class="panel"><div class="panel-head" style="padding:14px 16px 0"><div><h2 style="font-size:13px">Structure des dépenses</h2><p>${catList.length} catégorie${catList.length>1?'s':''} · ${money(catList.reduce((a,c)=>a+c.value,0),0)}</p></div></div><div class="panel-body" style="padding:12px 16px 16px"><div class="rail-bars">${bars}</div></div></div>`);
+    }
+    if(!panels.length)return '';
+    return `<aside class="chart-rail" aria-label="Graphiques du tableau">${panels.slice(0,2).join('')}</aside>`;
+}
+function listPage(kind,id){let title=kindNames[kind];let buttons=(kind==='entries'?yearSelect(id):'')+(kind==='calls'?`<button data-action="generate-calls">${icon('calendar')} Appeler les loyers</button>`:'')+(kind==='documents'?`<button data-action="doc-folder-reset" title="Rétablir les dossiers proposés par défaut pour cette société">${icon('refresh')} Dossiers par défaut</button><button data-action="doc-folder-new">${icon('folder')} Nouveau dossier</button>`:'')+addBtn(kind,kind==='entries'?'Nouvelle opération':kind==='documents'?'Ajouter un document':'Ajouter');let intro='';if(kind==='entries'){let m=metrics(id||scope),net=m.income-m.expense;intro=`<div class="balance-card row between"><div><div class="eyebrow">Solde calculé · ${esc(m.cashRef.short)}</div><strong class="${m.cash<0?'red':''}">${money(m.cash,2)}</strong><div class="sub" style="margin-top:5px">Ouverture ${money(m.cashOpenings,2)} + mouvements ${money(m.cashMovements,2)}${m.cashNotYet?' · société non ouverte à cette date':''}</div></div><div><div class="sub">Flux net · ${yearScopeLabel()}</div><div class="${net<0?'red':'gold'}" style="font-size:19px;margin-top:5px">${money(net,2)}</div></div></div>${m.cashSkipped?`<div class="notice"><strong>${m.cashSkipped} mouvement${m.cashSkipped>1?'s':''}</strong> daté${m.cashSkipped>1?'s':''} avant le solde d’ouverture d’une SCI ${m.cashSkipped>1?'ne sont':'n’est'} pas inclus dans le solde calculé : ce solde d’ouverture est censé déjà les contenir. Vérifiez la date du solde initial dans la fiche de la société.</div>`:''}<div class="notice">Livre de trésorerie de gestion, toutes dates ci-dessous. Le solde part du solde d’ouverture de chaque SCI, ou de l’ensemble des mouvements lorsqu’aucun solde d’ouverture n’est renseigné. Il ne constitue pas un résultat fiscal ni une comptabilité d’engagement.</div>`;}
 if(kind==='loans')intro='<div class="notice">Capital restant dû et mensualités renseignés manuellement. Les paiements sont à enregistrer séparément en trésorerie : aucune écriture automatique ni simulation d’amortissement.</div>';
 if(kind==='partners')intro='<div class="notice">La participation est calculée sur les parts renseignées. Les comptes courants sont des soldes déclarés, à rapprocher de la comptabilité ; ils ne génèrent pas d’opérations de trésorerie.</div>';
 if(kind==='documents')intro='<div class="notice">Classez vos documents dans des dossiers pour les retrouver instantanément. Un document sans dossier est rangé automatiquement selon sa catégorie (statuts, baux, comptabilité, assurances, diagnostics). Cliquez sur une ligne pour ouvrir l’aperçu.</div>';
 return `${!id?head(title,'Une vision centralisée, avec une affectation explicite à chaque SCI.',buttons):`<div class="section-title"><h2>${title}</h2><div class="toolbar">${buttons}</div></div>`}${intro}${tableFilters(kind,id)}<div id="listing">${listing(kind,id)}</div>${kind==='calls'?'<p class="compact-note">Un paiement peut être partiel. La quittance est disponible uniquement après règlement intégral du loyer et des charges. Les appels générés sont mensuels, à ajuster en cas de prorata.</p>':''}`;}
-function identity(s){let openTxt=s.opening&&Number(s.opening)!==0?money(s.opening,2)+(s.opening_date?' au '+date(s.opening_date):''):'—';return `<div class="settings-grid"><div class="panel"><div class="panel-head"><h2>Identité de la société</h2><button data-action="edit-sci">${icon('edit')} Modifier</button></div><div class="panel-body info-grid">${[['Dénomination',s.name],['SIREN',s.siren||'Non renseigné'],['Gérant',s.manager||'Non renseigné'],['Siège social',s.address||'Non renseigné'],['Capital social',money(s.capital,2)],['Régime fiscal',s.regime||'IR'],['Clôture de l’exercice',s.closing||'31/12'],['Solde d’ouverture',openTxt]].map(([k,v])=>`<div class="info-item"><label>${k}</label><span>${esc(v)}</span></div>`).join('')}<div class="info-item" style="grid-column:1/-1"><label>Notes de gestion</label><span style="white-space:pre-wrap">${esc(s.notes||'Aucune note.')}</span></div></div></div><div class="stack"><div class="panel"><div class="panel-head"><h2>Repères de gestion · ${esc(s.regime||'IR')}</h2></div><div class="panel-body stack"><p class="sub">${s.regime==='IS'?'Préparer la déclaration 2065 et ses annexes avec une comptabilité d’engagement, les immobilisations et les amortissements. Dominis ne produit pas de liasse fiscale ni de FEC.':'Préparer les informations de la déclaration 2072 selon votre situation. Les recettes et dépenses enregistrées ne déterminent pas automatiquement le résultat foncier imposable.'}</p><p class="sub">Le gérant doit rendre compte annuellement de sa gestion aux associés (article 1856 du Code civil). Les modalités de décision dépendent notamment des statuts.</p><button data-add="tasks">${icon('calendar')} Ajouter une échéance de suivi</button><button data-action="annual-report">${icon('file')} Préparer une synthèse annuelle</button><p class="sub">Les dates fiscales sont à vérifier chaque année. Aucun calendrier légal automatique n’est imposé par l’application.</p></div></div><div class="panel"><div class="panel-body"><h3 class="red">Suppression de la SCI</h3><p class="sub" style="margin:8px 0 15px">Cette action supprime la société et toutes ses données liées. Exportez une sauvegarde complète auparavant.</p><button class="danger" data-action="delete-sci">${icon('trash')} Supprimer cette SCI</button></div></div></div></div>`;}
+// Suppression ciblée : on ne supprime que la page choisie, et seulement pour la
+// SCI affichée. Les dépendances suivent la même logique que le serveur.
+const purgeLabels={properties:'Biens',leases:'Baux & locataires',calls:'Loyers',entries:'Trésorerie',partners:'Associés',loans:'Emprunts',tasks:'Échéances',documents:'Documents'};
+const purgeKinds={properties:['bien','biens'],leases:['bail','baux'],calls:['appel de loyer','appels de loyer'],entries:['mouvement','mouvements'],partners:['associé','associés'],loans:['emprunt','emprunts'],tasks:['échéance','échéances'],documents:['document','documents']};
+function purgePlan(sciId,tab){
+    let all=S.records.filter(r=>r.sci===sciId),by=k=>all.filter(r=>r.kind===k);
+    let ids=new Set(),byKind={};
+    const add=(list,kind)=>{list.forEach(r=>{ids.add(r.id);byKind[kind]=(byKind[kind]||0)+1;});};
+    if(tab==='properties'){
+        let props=by('properties'),pids=new Set(props.map(r=>r.id));
+        let leases=by('leases').filter(r=>pids.has(r.property_id)),lids=new Set(leases.map(r=>r.id));
+        let calls=by('calls').filter(r=>lids.has(r.lease_id)),cids=new Set(calls.map(r=>r.id));
+        let entries=by('entries').filter(r=>cids.has(r.call_id));
+        add(props,'properties');add(leases,'leases');add(calls,'calls');add(entries,'entries');
+    }else if(tab==='leases'){
+        let leases=by('leases'),lids=new Set(leases.map(r=>r.id));
+        let calls=by('calls').filter(r=>lids.has(r.lease_id)),cids=new Set(calls.map(r=>r.id));
+        let entries=by('entries').filter(r=>cids.has(r.call_id));
+        add(leases,'leases');add(calls,'calls');add(entries,'entries');
+    }else if(tab==='calls'){
+        let calls=by('calls'),cids=new Set(calls.map(r=>r.id));
+        let entries=by('entries').filter(r=>cids.has(r.call_id));
+        add(calls,'calls');add(entries,'entries');
+    }else add(by(tab),tab);
+    return {ids,byKind,total:ids.size};
+}
+function manageDeletions(){
+    let s=currentSCI();
+    if(!s)return notify('Ouvrez d’abord la page d’une SCI.',true);
+    let options=Object.keys(purgeLabels).map(k=>[k,`${purgeLabels[k]} · ${rows(k,s.id).length} élément${rows(k,s.id).length>1?'s':''}`]);
+    openModal('Gérer la suppression · '+s.name,`<p class="sub" style="margin-bottom:15px">Choisissez la page à vider. Seules les données de <strong>${esc(s.name)}</strong> sont supprimées ; les autres SCI et vos préférences restent intactes.</p>${field('purge-page','Page à vider','select','',options)}<div id="purge-summary" class="notice" style="margin-top:14px;display:block"></div><div style="margin-top:14px">${field('purge-confirm','Saisissez SUPPRIMER pour confirmer')}</div>`,'<button data-action="close-modal">Annuler</button><button class="danger" id="confirm-purge">'+icon('trash')+' Supprimer les données de cette page</button>');
+    const draw=()=>{
+        let tab=$('#f-purge-page')?.value||'properties';
+        let plan=purgePlan(s.id,tab),box=$('#purge-summary');
+        if(!box)return;
+        if(!plan.total){box.innerHTML=`<strong>Aucune donnée à supprimer.</strong><br>La page « ${esc(purgeLabels[tab])} » est déjà vide pour ${esc(s.name)}.`;return;}
+        let parts=Object.keys(plan.byKind).map(k=>`${plan.byKind[k]} ${esc(plan.byKind[k]>1?purgeKinds[k][1]:purgeKinds[k][0])}`);
+        let deps=(tab==='properties'||tab==='leases'||tab==='calls')?'<br><span class="sub">Les éléments liés (baux, appels de loyer et encaissements rattachés) partent avec la page choisie.</span>':'';
+        box.innerHTML=`<strong>${plan.total} élément${plan.total>1?'s':''} ${plan.total>1?'seront supprimés':'sera supprimé'}.</strong><br>${parts.join(' · ')}${deps}<br><span class="sub">Action définitive pour ${esc(s.name)} uniquement. Exportez une sauvegarde complète si nécessaire.</span>`;
+    };
+    draw();
+    $('#f-purge-page')?.addEventListener('change',draw);
+    $('#confirm-purge').onclick=async()=>{
+        try{
+            let tab=$('#f-purge-page').value;
+            if($('#f-purge-confirm').value.trim().toUpperCase()!=='SUPPRIMER')return modalError(new Error('Saisissez SUPPRIMER pour confirmer cette suppression.'));
+            let plan=purgePlan(s.id,tab);
+            let res=await (await api('purge',{sci:s.id,tab,confirm:true})).json();
+            closeModal(true);
+            await refresh();
+            notify(`${res.deleted} élément${res.deleted>1?'s':''} supprimé${res.deleted>1?'s':''} de la page « ${purgeLabels[tab]} » pour ${s.name}.`);
+        }catch(e){modalError(e);}
+    };
+}
+function identity(s){let openTxt=s.opening&&Number(s.opening)!==0?money(s.opening,2)+(s.opening_date?' au '+date(s.opening_date):''):'—';return `<div class="settings-grid"><div class="panel"><div class="panel-head"><h2>Identité de la société</h2><button data-action="edit-sci">${icon('edit')} Modifier</button></div><div class="panel-body info-grid">${[['Dénomination',s.name],['SIREN',s.siren||'Non renseigné'],['Gérant',s.manager||'Non renseigné'],['Siège social',s.address||'Non renseigné'],['Capital social',money(s.capital,2)],['Régime fiscal',s.regime||'IR'],['Clôture de l’exercice',s.closing||'31/12'],['Solde d’ouverture',openTxt]].map(([k,v])=>`<div class="info-item"><label>${k}</label><span>${esc(v)}</span></div>`).join('')}<div class="info-item" style="grid-column:1/-1"><label>Notes de gestion</label><span style="white-space:pre-wrap">${esc(s.notes||'Aucune note.')}</span></div></div></div><div class="stack"><div class="panel"><div class="panel-head"><h2>Repères de gestion · ${esc(s.regime||'IR')}</h2></div><div class="panel-body stack"><p class="sub">${s.regime==='IS'?'Préparer la déclaration 2065 et ses annexes avec une comptabilité d’engagement, les immobilisations et les amortissements. Dominis ne produit pas de liasse fiscale ni de FEC.':'Préparer les informations de la déclaration 2072 selon votre situation. Les recettes et dépenses enregistrées ne déterminent pas automatiquement le résultat foncier imposable.'}</p><p class="sub">Le gérant doit rendre compte annuellement de sa gestion aux associés (article 1856 du Code civil). Les modalités de décision dépendent notamment des statuts.</p><button data-add="tasks">${icon('calendar')} Ajouter une échéance de suivi</button><button data-action="annual-report">${icon('file')} Préparer une synthèse annuelle</button><p class="sub">Les dates fiscales sont à vérifier chaque année. Aucun calendrier légal automatique n’est imposé par l’application.</p></div></div><div class="panel"><div class="panel-body"><h3 class="red">Suppression de la SCI</h3><p class="sub" style="margin:8px 0 15px">Cette action supprime la société et toutes ses données liées. Exportez une sauvegarde complète auparavant.</p><button class="danger" data-action="delete-sci">${icon('trash')} Supprimer cette SCI</button><button class="danger" data-action="manage-deletions" style="margin-top:8px">${icon('trash')} Gérer la suppression</button><p class="compact-note" style="margin-top:10px">Vider une seule page de cette SCI, sans toucher aux autres sociétés.</p></div></div></div></div>`;}
 function settingsGeneral(){return `<div class="settings-grid"><div class="stack"><section class="panel"><div class="panel-head"><h2>Apparence & préférences</h2>${icon('sun')}</div><div class="panel-body"><div class="setting-row"><div><h3>Thème de l’interface</h3><p>Le même soin, de jour comme de nuit.</p></div><div class="theme-choice"><button data-theme="dark" class="${S.settings.theme==='dark'?'active':''}">${icon('moon')} Sombre</button><button data-theme="light" class="${S.settings.theme==='light'?'active':''}">${icon('sun')} Clair</button></div></div><div class="setting-row"><div><h3>Navigation compacte</h3><p>Une barre latérale discrète, plus d’espace.</p></div><button class="toggle ${S.settings.collapsed?'on':''}" data-action="collapse" aria-label="Navigation compacte" aria-pressed="${!!S.settings.collapsed}"></button></div><div class="setting-row"><div><h3>Nom de votre espace</h3><p>Affiché dans la barre latérale.</p></div><button data-action="rename-space">${icon('edit')} Modifier</button></div><div class="setting-row"><div><h3>Sauvegarde à la fermeture</h3><p>Copie complète dans le dossier sauvegardes/.</p></div><button class="toggle ${S.settings.auto_backup?'on':''}" data-action="auto-backup" aria-label="Sauvegarde à la fermeture" aria-pressed="${!!S.settings.auto_backup}"></button></div><div class="setting-row"><div><h3>Sauvegarde hebdomadaire</h3><p>Copie de data.db au premier lancement de la semaine ; deux fichiers maximum dans auto-save/.</p></div><button class="toggle ${S.settings.weekly_auto_save?'on':''}" data-action="weekly-auto-save" aria-label="Sauvegarde hebdomadaire" aria-pressed="${!!S.settings.weekly_auto_save}"></button></div></div></section><section class="panel"><div class="panel-head"><h2>Ordre de navigation</h2>${icon('panel')}</div><div class="panel-body"><p class="sub">Déplacez les pages avec les flèches. Vos nouvelles SCI apparaissent automatiquement.</p><div class="order-item locked">${icon('grid')} Tableau de bord <span style="margin-left:auto">${icon('lock')}</span></div>${navOrder().map((id,i,a)=>`<div class="order-item">${navIcon(id)}${esc(navName(id))}<div class="actions"><button data-move="${id}" data-dir="-1" ${!i?'disabled':''} title="Monter">${icon('up')}</button><button data-move="${id}" data-dir="1" ${i===a.length-1?'disabled':''} title="Descendre">${icon('down')}</button></div></div>`).join('')}<div class="order-item locked">${icon('settings')} Paramètres <span style="margin-left:auto">${icon('lock')}</span></div><p class="compact-note">Tableau de bord reste en premier, Paramètres en dernier. Quitter est une action distincte.</p></div></section></div><div class="stack"><section class="panel"><div class="panel-head"><h2>Vos données vous appartiennent</h2>${icon('database')}</div><div class="panel-body"><div class="setting-row"><div><h3>Importer des données</h3><p>JSON Dominis, CSV ou Excel (.xlsx) de mouvements multi-SCI.<br>Aperçu et destinations avant validation.</p></div><button data-action="import">${icon('upload')} Importer</button></div><div class="setting-row"><div><h3>Exporter une sélection</h3><p>Choisissez les SCI, les données et le format.</p></div><button data-action="export">${icon('download')} Exporter</button></div><div class="setting-row"><div><h3>Sauvegarde complète</h3><p>Toutes les SCI, pièces jointes et préférences.<br>${S.settings.last_backup?'Dernière : '+new Date(S.settings.last_backup).toLocaleString('fr-FR'):'Aucune sauvegarde manuelle enregistrée.'}</p></div><button class="primary" data-action="backup">${icon('database')} Sauvegarder</button></div><div class="setting-row"><div><h3>Restaurer une sauvegarde</h3><p>Remplace l’ensemble de l’espace. Une copie<br>de sécurité est créée avant restauration.</p></div><button data-action="restore">${icon('clock')} Restaurer</button></div></div></section><section class="panel"><div class="panel-head"><h2>Stockage & confidentialité</h2>${icon('lock')}</div><div class="panel-body stack"><div class="row between"><span class="sub">Base locale</span><span class="pill green"><span class="status-dot"></span>data.db · ${num(S.db_size/1024/1024)} Mo</span></div><p class="sub">Aucune télémétrie. La gestion de vos données fonctionne hors ligne. Seule la vérification des versions contacte GitHub, sans transmettre vos données patrimoniales. Documents, réglages et historique sont stockés dans SQLite. La base n’est pas chiffrée : protégez votre session et vos sauvegardes.</p><p class="sub">Usage local, mono-utilisateur. Ne placez pas une base ouverte sur un partage réseau ou dans une synchronisation cloud.</p>${S.preview?'<div class="notice" style="margin:0">Aperçu hébergé : utilisez des données fictives uniquement. Le téléchargement et les lanceurs sont destinés à l’usage local.</div>':''}</div></section>${S.settings.demo?`<section class="panel"><div class="panel-body"><h3>Données de démonstration</h3><p class="sub" style="margin:8px 0 14px">Efface toutes les données de cet espace démo, y compris vos ajouts. Sauvegardez-les avant de repartir d’un espace vierge.</p><button class="danger" data-action="reset-demo">${icon('trash')} Vider l’espace de démonstration</button></div></section>`:''}</div><section class="panel" style="grid-column:1/-1"><div class="panel-head"><h2>Journal d’activité</h2><span class="sub">80 dernières actions</span></div><div class="panel-body audit-list">${S.audit.map(r=>`<div class="audit-line"><time>${esc(new Date(r.at).toLocaleString('fr-FR'))}</time><strong style="min-width:90px">${esc(r.action)}</strong><span class="muted">${esc(r.detail)}</span></div>`).join('')||'<p class="sub">Aucune action enregistrée.</p>'}</div></section></div>`;}
 function render(){if(!['dashboard','settings',...Object.keys(navs),...S.scis.map(s=>s.id)].includes(page))page='dashboard';yearSelectSeq=0;renderShell();let content='';if(page==='dashboard'){content=head('Votre patrimoine, en perspective.','L’essentiel de vos sociétés, réuni au même endroit.',yearSelect()+exportBtn()+`<button class="primary" data-action="new-sci">${icon('plus')} Nouvelle SCI</button>`,'Tableau de bord général')+(S.scis.length?dashboard():empty('Bienvenue dans votre espace patrimonial','Créez votre première SCI. Son espace de gestion apparaîtra automatiquement dans la navigation.',`<button class="primary" data-action="new-sci">${icon('plus')} Créer ma première SCI</button>`));}
 else if(page==='settings')content=settingsPage();else if(navs[page])content=listPage({treasury:'entries',agenda:'tasks',documents:'documents'}[page]);else{let s=currentSCI();content=head(s.name,(s.city||s.address||'Société civile immobilière')+' · Régime '+(s.regime||'IR'),yearSelect(s.id)+`<button data-action="edit-sci">${icon('edit')} Société</button>`+`<button class="primary" data-action="quick">${icon('plus')} Ajouter</button>`,'Espace société')+`<nav class="tabs" aria-label="Gestion de la SCI">${tabs.map(([t,n])=>`<button class="tab ${tab===t?'active':''}" data-tab="${t}">${n}</button>`).join('')}</nav>`+(tab==='overview'?dashboard(s.id):tab==='identity'?identity(s):listPage(tab,s.id));}
 const recoveryNotice=S.primary_db_missing?`<div class="notice" role="alert" style="border-left-color:var(--red)"><strong>La base principale data.db était absente.</strong> Dominis a créé une base vide ; les fichiers de auto-save/ ne sont pas utilisés comme base. Avant toute nouvelle saisie, restaurez une copie dans data.db.<div style="margin-top:10px"><button class="danger" data-action="restore">${icon('clock')} Restaurer une sauvegarde</button></div></div>`:'';$('#main').innerHTML=recoveryNotice+content+`<div class="footer"><span>DOMINIS <span style="opacity:.5;margin:0 7px">/</span> Votre patrimoine, en toute clarté.</span><span class="row gap8">${icon('lock')} Enregistrement local · Outil de gestion, hors comptabilité certifiée</span></div>`;updateCount();checkTaskNotifications();}
 function currentListKind(){return navs[page]?{treasury:'entries',agenda:'tasks',documents:'documents'}[page]:tab;}
-function visibleCount(kind,id){let list=filtered(kind,id);if(kind==='documents'&&docFolder!=='')list=docFolder==='none'?list.filter(r=>!resolveDocFolder(r)):list.filter(r=>resolveDocFolder(r)===docFolder);return list.length}
+function visibleCount(kind,id){let list=filtered(kind,id);if(kind==='documents')list=list.filter(inDocFolder);return list.length}
 function updateCount(){let el=$('#list-count');if(el){let k=currentListKind();el.textContent=visibleCount(k,currentSCI()?.id)+' éléments';}}
 function renderListing(){let k=navs[page]?{treasury:'entries',agenda:'tasks',documents:'documents'}[page]:tab;if($('#listing')){$('#listing').innerHTML=listing(k,currentSCI()?.id);updateCount();}}
 function openModal(title,body,footer='',wide=false){previousFocus=document.activeElement;modalDirty=false;$('#modal').innerHTML=`<div class="modal-backdrop"><div class="modal ${wide?'wide':''}" role="dialog" aria-modal="true" aria-label="${esc(title)}"><div class="modal-head"><h2>${esc(title)}</h2><button class="ghost icon-only" data-action="close-modal" aria-label="Fermer">${icon('close')}</button></div><div class="modal-content">${body}<div id="modal-error"></div></div>${footer?`<div class="modal-footer">${footer}</div>`:''}</div></div>`;setTimeout(()=>$('#modal input:not([type=hidden]),#modal select,#modal button')?.focus(),30);}
@@ -7963,12 +9360,17 @@ function receipt(id){let c=rec(id),l=rec(c.lease_id),s=sci(c.sci),p=rec(l?.prope
 function searchModal(){openModal('Retrouver l’essentiel',`<input id="global-search" type="search" placeholder="Une SCI, un locataire, un bien, un document…" aria-label="Recherche globale"><div id="search-results" class="search-results" style="margin-top:15px"></div>`);let search=()=>{let q=$('#global-search').value.toLowerCase().trim();let list=[...S.scis.map(s=>({...s,kind:'sci'})),...S.records].filter(r=>q&&Object.values(r).some(v=>typeof v==='string'&&v.toLowerCase().includes(q))).slice(0,30);$('#search-results').innerHTML=list.map(r=>`<button class="search-result" data-search-go="${r.id}" data-search-kind="${r.kind}">${icon(r.kind==='sci'?'building':'file')}<span>${esc(label(r))}<small>${r.kind==='sci'?'Société':esc(sciname(r.sci))+' · '+kindNames[r.kind]}</small></span></button>`).join('')||`<p class="sub">${q?'Aucun résultat.':'La recherche porte sur toutes les SCI et les métadonnées des documents.'}</p>`;};$('#global-search').oninput=search;search();}
 async function quit(){if(closing||updateInstalling)return;if($('#modal').innerHTML&&modalDirty&&!confirm('Des modifications de formulaire ne sont pas enregistrées. Les abandonner et quitter ?'))return;openModal('Quitter en toute sérénité',`<p>Les écritures enregistrées et les réglages seront synchronisés, puis l’intégrité de la base sera vérifiée.</p><p class="sub" style="margin-top:12px">${S.settings.auto_backup?'Une sauvegarde complète sera créée dans sauvegardes/. ':''}${S.preview?'Mode aperçu : le service de démonstration restera disponible.':S.native?'La fenêtre et le processus local seront fermés.':'En mode navigateur, la fermeture automatique de l’onglet peut être bloquée ; le serveur sera bien arrêté.'}</p>`,`<button data-action="close-modal">Rester dans Dominis</button><button class="primary" id="confirm-quit">${icon('exit')} Enregistrer et quitter</button>`);$('#confirm-quit').onclick=async()=>{closing=true;$('#confirm-quit').disabled=true;try{await settingsQueue;await api('quit',{});closeModal(true);if(S.preview){notify('Intégrité vérifiée, données sauvegardées. Le service reste actif dans cet aperçu.');await refresh();}else{$('#main').innerHTML=empty('Votre espace est fermé.','Toutes les données enregistrées ont été sauvegardées. Vous pouvez fermer cet onglet.');setTimeout(()=>window.close(),400);}}catch(e){modalError(e);$('#confirm-quit')&&($('#confirm-quit').disabled=false);}finally{closing=false;}};}
 function quickModal(){openModal('Une action, sans détour',`<div class="checks">${Object.entries(kindNames).map(([k,n])=>`<button data-add="${k}" style="justify-content:flex-start">${icon('plus')}${n}</button>`).join('')}</div>`);}
-async function handleAction(a){switch(a){case'collapse':await setPref({collapsed:!S.settings.collapsed});document.body.classList.toggle('collapsed',!!S.settings.collapsed);if(page==='settings')render();break;case'bell':openBellModal();break;case'new-sci':editForm('sci');break;case'edit-sci':editForm('sci',currentSCI());break;case'delete-sci':deletion('sci',page);break;case'close-modal':closeModal();break;case'export':exportModal();break;case'import':importModal();break;case'backup':await settingsQueue;await download(await api('backup',{}),'dominis-sauvegarde-'+today()+'.db');await refresh();notify('Sauvegarde complète téléchargée. Conservez-la sur un support sûr.');break;case'restore':restoreModal();break;case'generate-calls':callsModal();break;case'search':searchModal();break;case'quick':quickModal();break;case'annual-report':annualReport();break;case'doc-folder-reset':await restoreDefaultDocFolders();break;case'doc-folder-new':newDocFolderModal();break;case'quit':await quit();break;case'auto-backup':await setPref({auto_backup:!S.settings.auto_backup});render();break;case'weekly-auto-save':await setPref({weekly_auto_save:!S.settings.weekly_auto_save});render();break;case'rename-space':openModal('Nom de votre espace',field('owner','Nom affiché','text',S.settings.owner),`<button data-action="close-modal">Annuler</button><button class="primary" id="save-owner">Enregistrer</button>`);$('#save-owner').onclick=async()=>{try{let v=$('#f-owner').value.trim();if(!v||v.length>45)throw new Error('Choisissez un nom de 1 à 45 caractères.');await setPref({owner:v});closeModal(true);render();}catch(e){modalError(e)}};break;case'reset-demo':openModal('Repartir d’un espace vierge',`<p class="sub">Toutes les SCI et données de cette démonstration seront supprimées, y compris vos ajouts. Vos préférences d’apparence sont conservées. Créez une sauvegarde avant de continuer.</p><div style="margin-top:15px">${field('confirm-demo','Saisissez EFFACER pour confirmer')}</div>`,`<button data-action="close-modal">Annuler</button><button class="danger" id="reset-confirm">Vider la démonstration</button>`);$('#reset-confirm').onclick=async()=>{try{await api('reset-demo',{confirmation:$('#f-confirm-demo').value});closeModal(true);page='dashboard';await refresh();notify('Votre espace est maintenant vierge.');}catch(e){modalError(e)}};break;}}
-document.addEventListener('click',async ev=>{let el=ev.target.closest('button,[data-nav],[data-doc-open],[data-doc-folder]');if(!el)return;if(Date.now()<folderDragSuppressUntil)return;try{if(updateInstalling)return;if(el.dataset.folderNew){newDocFolderModal();return;}if(el.dataset.folderRename){renameDocFolderModal(el.dataset.folderRename);return;}if(el.dataset.folderMove){await moveDocFolder(docScope(),el.dataset.folderMove,Number(el.dataset.dir));return;}if(el.dataset.docFolder!==undefined&&el.dataset.docFolder!==null&&el.dataset.docOpen===undefined){docFolder=el.dataset.docFolder;renderListing();return;}if(el.dataset.docOpen){await documentPreview(el.dataset.docOpen);return;}if(el.dataset.documentPreview){await documentPreview(el.dataset.documentPreview);return;}if(el.dataset.docZoom){let v=el.dataset.docZoom;if(v==='in')docPreviewStageZoom(docPreviewZoom+0.25);else if(v==='out')docPreviewStageZoom(docPreviewZoom-0.25);else docPreviewStageZoom(Number(v)/100);return;}if(el.dataset.docSheet!==undefined&&el.dataset.docSheet!==null){docPreviewSheetSelect(Number(el.dataset.docSheet));return;}if(el.dataset.macClose){dismissMacNotification(el.dataset.macClose);return;}if(el.dataset.macView){let id=el.dataset.macView,r=rec(id);await markTaskRemindersRead(id);if(r){closeModal(true);navigate(r.sci,'tasks');editForm('tasks',r);}return;}if(el.dataset.bellView){let id=el.dataset.bellView,r=rec(id);await markTaskRemindersRead(id);closeModal(true);if(r){navigate(r.sci,'tasks');editForm('tasks',r);}return;}if(el.dataset.bellRead){await markTaskRemindersRead(el.dataset.bellRead);if($('#bell-modal-body'))openBellModal();return;}if(el.dataset.bellReadAll){for(let r of unreadReminderTasks())await markTaskRemindersRead(r.id);if($('#bell-modal-body'))openBellModal();return;}if(el.dataset.bellAgenda){closeModal(true);navigate('agenda');return;}if(el.dataset.tableConfig){openTableColumnsModal(el.dataset.tableConfig);return;}if(el.dataset.colToggle){let k=el.dataset.colKind,cid=el.dataset.colToggle,cols=getTableColumns(k),c=cols.find(x=>x.id===cid);if(c){if(c.visible&&cols.filter(x=>x.visible).length<=1)return;c.visible=!c.visible;await saveTableColumns(k,cols);if(k==='entries_preview')render();else renderListing();if($('#col-config-wrap'))$('#col-config-wrap').innerHTML=renderTableColumnsList(k);}return;}if(el.dataset.colMove){let k=el.dataset.colKind,cid=el.dataset.colMove,dir=Number(el.dataset.dir),cols=getTableColumns(k),i=cols.findIndex(x=>x.id===cid),j=i+dir;if(i>=0&&j>=0&&j<cols.length){[cols[i],cols[j]]=[cols[j],cols[i]];await saveTableColumns(k,cols);if(k==='entries_preview')render();else renderListing();if($('#col-config-wrap'))$('#col-config-wrap').innerHTML=renderTableColumnsList(k);}return;}if(el.dataset.colReset){let k=el.dataset.colReset,all={...(S.settings.table_columns||{})};delete all[k];await setPref({table_columns:all});if(k==='entries_preview')render();else renderListing();if($('#col-config-wrap'))$('#col-config-wrap').innerHTML=renderTableColumnsList(k);return;}if(el.dataset.settingsSection){settingsSection=el.dataset.settingsSection;render();return;}if(el.dataset.updateAction){let a=el.dataset.updateAction;if(a==='check'){updateInfo=await (await api('update/check',{})).json();render();}else if(a==='offer')showUpdateOffer();else if(a==='install')await beginUpdate();else if(a==='force')await forceUpdate();else if(a==='force-install')await beginUpdate(true);return;}if(el.dataset.nav){navigate(el.dataset.nav,el.dataset.tab||'overview');return;}if(el.dataset.tab){tab=el.dataset.tab;query='';filter='';setPref({last_tab:tab});render();return;}if(el.dataset.action){await handleAction(el.dataset.action);return;}if(el.dataset.add){editForm(el.dataset.add);return;}if(el.dataset.edit){let r=rec(el.dataset.edit);editForm(r.kind,r);return;}if(el.dataset.delete){let r=rec(el.dataset.delete);deletion(r.kind,r.id);return;}if(el.dataset.pay){let c=rec(el.dataset.pay);editForm('entries',null,{sci:c.sci,label:'Loyer '+label(rec(c.lease_id))+' · '+c.period,call_id:c.id,amount:due(c),direction:'Recette',category:'Loyers'});$('#f-sci').value=c.sci;$('#f-sci').disabled=true;return;}if(el.dataset.receipt){receipt(el.dataset.receipt);return;}if(el.dataset.document){let r=rec(el.dataset.document);await download(await api('document?id='+r.id),r.filename||'document');return;}if(el.dataset.complete){let r=rec(el.dataset.complete);dismissMacNotification(r.id);let reached=taskReminderDates(r).filter(d=>d&&d<=today());let read=[...new Set([...(Array.isArray(r.read_reminders)?r.read_reminders:[]),...reached])];await api('save',{kind:r.kind,id:r.id,sci:r.sci,data:{...r,status:'Terminé',read_reminders:read}});await refresh();notify('Échéance terminée.');return;}if(el.dataset.theme){await setPref({theme:el.dataset.theme});render();return;}if(el.dataset.move){let o=navOrder(),i=o.indexOf(el.dataset.move),j=i+Number(el.dataset.dir);if(j>=0&&j<o.length){[o[i],o[j]]=[o[j],o[i]];await setPref({order:o});render();}return;}if(el.dataset.searchGo){let id=el.dataset.searchGo,kind=el.dataset.searchKind;closeModal(true);if(kind==='sci')navigate(id);else{let r=rec(id);navigate(r.sci,kind);editForm(kind,r);}return;}}catch(e){notify(e.message,true);}});
-document.addEventListener('change',async ev=>{let el=ev.target;try{if(el.classList&&el.classList.contains('year-select')){let v=el.value===YEAR_ALL?YEAR_ALL:Number(el.value);syncYearSelects(el.value);await setPref({year:v});render();}if(el.id==='scope'){scope=el.value;render();}if(el.id==='status-filter'){filter=el.value;renderListing();}if(el.id==='doc-preview-folder'){moveDocToFolder(docPreviewId,el.value);}}catch(e){notify(e.message,true)}});
+async function handleAction(a){switch(a){case'collapse':await setPref({collapsed:!S.settings.collapsed});document.body.classList.toggle('collapsed',!!S.settings.collapsed);if(page==='settings')render();break;case'bell':openBellModal();break;case'new-sci':editForm('sci');break;case'edit-sci':editForm('sci',currentSCI());break;case'delete-sci':deletion('sci',page);break;case'manage-deletions':manageDeletions();break;case'close-modal':closeModal();break;case'export':exportModal();break;case'import':importModal();break;case'backup':await settingsQueue;await download(await api('backup',{}),'dominis-sauvegarde-'+today()+'.db');await refresh();notify('Sauvegarde complète téléchargée. Conservez-la sur un support sûr.');break;case'restore':restoreModal();break;case'generate-calls':callsModal();break;case'search':searchModal();break;case'quick':quickModal();break;case'annual-report':annualReport();break;case'doc-folder-reset':await restoreDefaultDocFolders();break;case'doc-folder-new':newDocFolderModal();break;case'quit':await quit();break;case'auto-backup':await setPref({auto_backup:!S.settings.auto_backup});render();break;case'weekly-auto-save':await setPref({weekly_auto_save:!S.settings.weekly_auto_save});render();break;case'rename-space':openModal('Nom de votre espace',field('owner','Nom affiché','text',S.settings.owner),`<button data-action="close-modal">Annuler</button><button class="primary" id="save-owner">Enregistrer</button>`);$('#save-owner').onclick=async()=>{try{let v=$('#f-owner').value.trim();if(!v||v.length>45)throw new Error('Choisissez un nom de 1 à 45 caractères.');await setPref({owner:v});closeModal(true);render();}catch(e){modalError(e)}};break;case'reset-demo':openModal('Repartir d’un espace vierge',`<p class="sub">Toutes les SCI et données de cette démonstration seront supprimées, y compris vos ajouts. Vos préférences d’apparence sont conservées. Créez une sauvegarde avant de continuer.</p><div style="margin-top:15px">${field('confirm-demo','Saisissez EFFACER pour confirmer')}</div>`,`<button data-action="close-modal">Annuler</button><button class="danger" id="reset-confirm">Vider la démonstration</button>`);$('#reset-confirm').onclick=async()=>{try{await api('reset-demo',{confirmation:$('#f-confirm-demo').value});closeModal(true);page='dashboard';await refresh();notify('Votre espace est maintenant vierge.');}catch(e){modalError(e)}};break;}}
+document.addEventListener('click',async ev=>{let el=ev.target.closest('button,[data-nav],[data-doc-open],[data-doc-folder]');if(!el)return;if(Date.now()<folderDragSuppressUntil)return;try{if(updateInstalling)return;if(el.dataset.folderNew){newDocFolderModal(el.dataset.folderParent||'');return;}if(el.dataset.folderRename){renameDocFolderModal(el.dataset.folderRename);return;}if(el.dataset.folderMove){await moveDocFolder(docScope(),el.dataset.folderMove,Number(el.dataset.dir));return;}if(el.dataset.docFolder!==undefined&&el.dataset.docFolder!==null&&el.dataset.docOpen===undefined){docFolder=el.dataset.docFolder;docYear='';renderListing();return;}if(el.dataset.docOpen){await documentPreview(el.dataset.docOpen);return;}if(el.dataset.documentPreview){await documentPreview(el.dataset.documentPreview);return;}if(el.dataset.docZoom){let v=el.dataset.docZoom;if(v==='in')docPreviewStageZoom(docPreviewZoom+0.25);else if(v==='out')docPreviewStageZoom(docPreviewZoom-0.25);else docPreviewStageZoom(Number(v)/100);return;}if(el.dataset.docSheet!==undefined&&el.dataset.docSheet!==null){docPreviewSheetSelect(Number(el.dataset.docSheet));return;}if(el.dataset.macClose){dismissMacNotification(el.dataset.macClose);return;}if(el.dataset.macView){let id=el.dataset.macView,r=rec(id);await markTaskRemindersRead(id);if(r){closeModal(true);navigate(r.sci,'tasks');editForm('tasks',r);}return;}if(el.dataset.bellView){let id=el.dataset.bellView,r=rec(id);await markTaskRemindersRead(id);closeModal(true);if(r){navigate(r.sci,'tasks');editForm('tasks',r);}return;}if(el.dataset.bellRead){await markTaskRemindersRead(el.dataset.bellRead);if($('#bell-modal-body'))openBellModal();return;}if(el.dataset.bellReadAll){for(let r of unreadReminderTasks())await markTaskRemindersRead(r.id);if($('#bell-modal-body'))openBellModal();return;}if(el.dataset.bellAgenda){closeModal(true);navigate('agenda');return;}if(el.dataset.tableConfig){openTableColumnsModal(el.dataset.tableConfig);return;}
+if(el.dataset.tableDensity){await saveTableView(el.dataset.tableKind,{density:el.dataset.tableDensity});refreshTableViewUi(el.dataset.tableKind);return;}
+if(el.dataset.tableOpt){let tk=el.dataset.tableKind,cur=tableView(tk);await saveTableView(tk,{[el.dataset.tableOpt]:!cur[el.dataset.tableOpt]});refreshTableViewUi(tk);return;}if(el.dataset.colToggle){let k=el.dataset.colKind,cid=el.dataset.colToggle,cols=getTableColumns(k),c=cols.find(x=>x.id===cid);if(c){if(c.visible&&cols.filter(x=>x.visible).length<=1)return;c.visible=!c.visible;await saveTableColumns(k,cols);if(k==='entries_preview')render();else renderListing();if($('#col-config-wrap'))$('#col-config-wrap').innerHTML=renderTableColumnsList(k);}return;}if(el.dataset.colMove){let k=el.dataset.colKind,cid=el.dataset.colMove,dir=Number(el.dataset.dir),cols=getTableColumns(k),i=cols.findIndex(x=>x.id===cid),j=i+dir;if(i>=0&&j>=0&&j<cols.length){[cols[i],cols[j]]=[cols[j],cols[i]];await saveTableColumns(k,cols);if(k==='entries_preview')render();else renderListing();if($('#col-config-wrap'))$('#col-config-wrap').innerHTML=renderTableColumnsList(k);}return;}if(el.dataset.colReset){let k=el.dataset.colReset,all={...(S.settings.table_columns||{})};delete all[k];await setPref({table_columns:all});if(k==='entries_preview')render();else renderListing();if($('#col-config-wrap'))$('#col-config-wrap').innerHTML=renderTableColumnsList(k);return;}if(el.dataset.settingsSection){settingsSection=el.dataset.settingsSection;render();return;}if(el.dataset.updateAction){let a=el.dataset.updateAction;if(a==='check'){updateInfo=await (await api('update/check',{})).json();render();}else if(a==='offer')showUpdateOffer();else if(a==='install')await beginUpdate();else if(a==='force')await forceUpdate();else if(a==='force-install')await beginUpdate(true);return;}if(el.dataset.nav){navigate(el.dataset.nav,el.dataset.tab||'overview');return;}if(el.dataset.tab){tab=el.dataset.tab;query='';filter='';setPref({last_tab:tab});render();return;}if(el.dataset.action){await handleAction(el.dataset.action);return;}if(el.dataset.add){editForm(el.dataset.add);return;}if(el.dataset.edit){let r=rec(el.dataset.edit);editForm(r.kind,r);return;}if(el.dataset.delete){let r=rec(el.dataset.delete);deletion(r.kind,r.id);return;}if(el.dataset.pay){let c=rec(el.dataset.pay);editForm('entries',null,{sci:c.sci,label:'Loyer '+label(rec(c.lease_id))+' · '+c.period,call_id:c.id,amount:due(c),direction:'Recette',category:'Loyers'});$('#f-sci').value=c.sci;$('#f-sci').disabled=true;return;}if(el.dataset.receipt){receipt(el.dataset.receipt);return;}if(el.dataset.document){let r=rec(el.dataset.document);await download(await api('document?id='+r.id),r.filename||'document');return;}if(el.dataset.complete){let r=rec(el.dataset.complete);dismissMacNotification(r.id);let reached=taskReminderDates(r).filter(d=>d&&d<=today());let read=[...new Set([...(Array.isArray(r.read_reminders)?r.read_reminders:[]),...reached])];await api('save',{kind:r.kind,id:r.id,sci:r.sci,data:{...r,status:'Terminé',read_reminders:read}});await refresh();notify('Échéance terminée.');return;}if(el.dataset.theme){await setPref({theme:el.dataset.theme});render();return;}if(el.dataset.move){let o=navOrder(),i=o.indexOf(el.dataset.move),j=i+Number(el.dataset.dir);if(j>=0&&j<o.length){[o[i],o[j]]=[o[j],o[i]];await setPref({order:o});render();}return;}if(el.dataset.searchGo){let id=el.dataset.searchGo,kind=el.dataset.searchKind;closeModal(true);if(kind==='sci')navigate(id);else{let r=rec(id);navigate(r.sci,kind);editForm(kind,r);}return;}}catch(e){notify(e.message,true);}});
+document.addEventListener('change',async ev=>{let el=ev.target;try{if(el.classList&&el.classList.contains('year-select')){let v=el.value===YEAR_ALL?YEAR_ALL:Number(el.value);syncYearSelects(el.value);await setPref({year:v});render();}if(el.id==='scope'){scope=el.value;render();}if(el.id==='status-filter'){filter=el.value;renderListing();}if(el.id==='doc-year-filter'){docYear=el.value;renderListing();}
+if(el.id==='doc-preview-folder'){moveDocToFolder(docPreviewId,el.value);}}catch(e){notify(e.message,true)}});
 document.addEventListener('input',ev=>{if(ev.target.id==='filter-search'){query=ev.target.value;renderListing();}if(ev.target.id==='doc-zoom-range'){docPreviewStageZoom((Number(ev.target.value)||100)/100);}if(ev.target.closest('#modal')&&!['global-search'].includes(ev.target.id)&&!ev.target.closest('#col-config-wrap')&&!ev.target.closest('#bell-modal-body')&&!ev.target.closest('#doc-preview-body'))modalDirty=true;});
 document.addEventListener('submit',ev=>{if(ev.target.id==='edit-form'){ev.preventDefault();submitForm(ev.target);}});
-document.addEventListener('keydown',ev=>{if((ev.ctrlKey||ev.metaKey)&&ev.key.toLowerCase()==='k'){ev.preventDefault();if(!modalDirty)searchModal();}if(ev.key==='Escape'&&$('#modal').innerHTML)closeModal();if(ev.key==='Enter'&&ev.target.matches('article[data-nav]'))navigate(ev.target.dataset.nav);if(ev.key==='Tab'&&$('#modal').innerHTML){let items=$$('#modal button:not(:disabled),#modal input:not(:disabled),#modal select:not(:disabled),#modal textarea');let first=items[0],last=items[items.length-1];if(ev.shiftKey&&document.activeElement===first){ev.preventDefault();last?.focus();}else if(!ev.shiftKey&&document.activeElement===last){ev.preventDefault();first?.focus();}}});
+document.addEventListener('keydown',ev=>{if((ev.ctrlKey||ev.metaKey)&&ev.key.toLowerCase()==='k'){ev.preventDefault();if(!modalDirty)searchModal();}if(ev.key==='Escape'&&$('#modal').innerHTML)closeModal();if(ev.key==='Enter'&&ev.target.matches('article[data-nav]'))navigate(ev.target.dataset.nav);
+if((ev.key==='Enter'||ev.key===' ')&&ev.target.matches('.doc-folder-card[data-doc-folder]')){ev.preventDefault();docFolder=ev.target.dataset.docFolder;docYear='';renderListing();}
+if(ev.key==='Enter'&&ev.target.matches('.doc-folder-card[data-folder-new]')){ev.preventDefault();newDocFolderModal(ev.target.dataset.folderParent||'');}if(ev.key==='Tab'&&$('#modal').innerHTML){let items=$$('#modal button:not(:disabled),#modal input:not(:disabled),#modal select:not(:disabled),#modal textarea');let first=items[0],last=items[items.length-1];if(ev.shiftKey&&document.activeElement===first){ev.preventDefault();last?.focus();}else if(!ev.shiftKey&&document.activeElement===last){ev.preventDefault();first?.focus();}}});
 window.addEventListener('beforeunload',e=>{if(modalDirty||updateInstalling){e.preventDefault();e.returnValue='';}});
 window.dominisCanClose=async()=>{if(updateInstalling)return false;if(modalDirty&&!confirm('Abandonner les modifications de formulaire non enregistrées et fermer Dominis ?'))return false;try{await settingsQueue;return true;}catch(e){notify('Fermeture annulée : un réglage n’a pas pu être enregistré.',true);return false;}};
 (async()=>{try{await load();page='dashboard';tab='overview';scope='';render();setInterval(checkTaskNotifications,15000);if(S.auto_save_notice?.message&&!S.primary_db_missing)notify(S.auto_save_notice.message,!!S.auto_save_notice.error);pollUpdates();}catch(e){$('#main').innerHTML=empty('Impossible d’ouvrir votre espace',esc(e.message),'<button onclick="location.reload()">Réessayer</button>');}})();
