@@ -145,7 +145,17 @@ Date | Libellé | Débit | Crédit | Solde
   assurances, diagnostics) ; supprimer un dossier ne supprime aucun document.
   Sur la page Documents de toutes les SCI, la barre affiche l’union des dossiers
   et les compteurs suivent le filtre **Société** ; choisissez une société dans
-  ce filtre pour déplacer ses dossiers.
+  ce filtre pour déplacer ses dossiers. Les dossiers peuvent contenir des
+  **sous-dossiers sur trois niveaux** (par exemple *Synthèses › Classique ›
+  2026*) : la carte « Sous-dossier » n’apparaît qu’aux niveaux autorisés, un fil
+  d’Ariane permet de remonter, et ouvrir un dossier affiche **aussi** les
+  documents de ses sous-dossiers. Le sélecteur d’année de la page Documents
+  filtre la liste, avec l’option **« Toutes les années »**.
+- **Synthèses annuelles rangées** : les PDF produits par « Préparer une synthèse
+  annuelle » sont enregistrés dans un **unique dossier `Synthèses` par société**,
+  puis dans `Classique` ou `Graphique`, puis dans un **sous-dossier par année**.
+  Ils restent consultables, imprimables, téléchargeables et supprimables comme
+  tout autre document.
 - **Aperçu d’un document** : un clic sur la ligne ouvre l’aperçu avec un **zoom
   réglable, par défaut ×1** (document entier visible) : images, PDF, classeurs
   Excel (un onglet par feuille), CSV, texte et Word. **Le zoom reste centré** :
@@ -175,19 +185,28 @@ Date | Libellé | Débit | Crédit | Solde
   (`/api/state`) avant de réafficher l’interface. Aucune vue ne peut rester
   décalée de la base, y compris après un redémarrage.
 - **Calculs de la vue d’ensemble** : le **patrimoine immobilier** additionne les
-  valeurs estimées des biens ; les **recettes encaissées** et le **flux net**
-  portent sur l’année civile choisie (« Toutes les années » additionne les
-  exercices) ; le **taux d’occupation** compare les biens « Loué » au nombre de
+  valeurs estimées des biens ; les **recettes de l’exercice** et les **dépenses
+  de l’exercice** portent sur l’année civile choisie, **toutes dates
+  comprises** (« Toutes les années » additionne les exercices) ; le **flux net**
+  en découle ; le **taux d’occupation** compare les biens « Loué » au nombre de
   biens ; la **répartition du patrimoine** ventile la valeur par société ou par
-  bien. La **trésorerie disponible** part du solde d’ouverture de chaque SCI et
-  ajoute ses mouvements jusqu’à aujourd’hui. Lorsque le solde d’ouverture est
-  nul, **tous les mouvements enregistrés comptent**, même s’ils précèdent la
-  date du solde initial : un historique importé n’est plus ignoré et le solde
-  ne reste plus bloqué à 0 €. Les sommes sont arrondies au centime.
-- **Colonne Société dans la trésorerie** : la liste des mouvements de toutes les
-  sociétés commence par une **pastille de couleur** propre à chaque SCI (nom en
-  infobulle), pour distinguer les mouvements d’un coup d’œil. La colonne reste
-  réglable avec les autres dans « Réglages des colonnes ».
+  bien. Le **solde calculé** part du solde d’ouverture de chaque SCI, ajoute ses
+  mouvements **jusqu’à la date de référence de l’année choisie** — aujourd’hui
+  pour l’année en cours, le 31/12 pour un exercice clos — et vaut donc pour
+  l’année sélectionnée, pas seulement « à ce jour ». La carte de trésorerie
+  affiche le détail **ouverture + mouvements**, et le nombre de mouvements
+  antérieurs à la date du solde d’ouverture lorsqu’ils sont ignorés. Lorsque le
+  solde d’ouverture est nul, **tous les mouvements enregistrés comptent** : un
+  historique importé n’est plus ignoré et le solde ne reste plus bloqué à 0 €.
+  Les sommes sont arrondies au centime.
+- **Une seule colonne SCI dans la trésorerie** : la liste des mouvements de
+  toutes les sociétés affiche le nom de la SCI précédé d’une **pastille de
+  couleur** propre à chaque société (une colonne « Société » séparée faisait
+  doublon et consommait de la largeur). La colonne est **masquée
+  automatiquement** dans la page d’une seule société, et reste réglable avec les
+  autres dans « Réglages du tableau ». En vue globale, la colonne **Solde**
+  affiche le solde de **la SCI de chaque ligne**, jamais un cumul trompeur, et
+  la ligne de totaux affiche le solde cumulé de la sélection.
 - **Limites larges** : pièce jointe jusqu’à **500 Mo**, import jusqu’à **500 Mo**,
   restauration jusqu’à **500 Mo**, jusqu’à **30 rappels** datés par échéance
   (365 acceptés par la base).
@@ -197,6 +216,38 @@ Date | Libellé | Débit | Crédit | Solde
   l’interrupteur conserve exactement ses **41 × 23 px** ; auparavant, une
   description longue comprimait le bouton jusqu’à environ 17 px de large alors
   qu’une description courte l’affichait correctement.
+
+## Tableaux, synthèses et suppressions ciblées
+
+- **Réglages de tableau** : l’engrenage d’un tableau ouvre une fenêtre
+  **« Réglages du tableau »** qui règle la **densité** (Confort, Compact, Très
+  compact — densité tableur), l’**ajustement à la largeur**, l’**en-tête fixe**,
+  la **ligne de totaux** et les colonnes affichées et leur ordre. Ces réglages
+  sont enregistrés pour chaque tableau. Le panneau graphique est **facultatif et
+  désactivé par défaut** : lorsqu’il est activé, il n’apparaît qu’à côté d’un
+  tableau encore lisible (au moins 1 560 px de fenêtre) et **passe sous le
+  tableau** sinon. Il ne montre jamais deux fois la même donnée : flux mensuels
+  et structure des dépenses, deux graphiques au maximum.
+- **Synthèse annuelle en PDF** : deux présentations au choix — **Classique**
+  (tableaux détaillés) ou **Graphique** (indicateurs, flux mensuels, répartition
+  des dépenses) — puis, dans les deux cas, patrimoine, associés et **analyse
+  automatique**. Le PDF est produit par Dominis lui-même (aucune dépendance
+  externe), avec les **mêmes montants que l’écran**, puis archivé dans les
+  documents. La section 5 remplace les notes du gérant : elle liste des
+  **points forts** et des **points de vigilance chiffrés** (couverture des
+  dépenses par la trésorerie, marge, **DSCR** calculé sur les loyers nets de
+  charges, loyers échus, occupation, endettement, concentration des loyers,
+  évolution des recettes) et se termine par une synthèse rédigée.
+- **Gérer la suppression** : le bouton rouge de la page Société ouvre une
+  fenêtre qui vide **une seule page** (Biens, Baux & locataires, Loyers,
+  Trésorerie, Associés, Emprunts, Échéances ou Documents) **pour la SCI
+  affichée uniquement**. Le décompte des éléments supprimés, dépendances
+  comprises, est affiché avant confirmation ; la saisie de `SUPPRIMER` est
+  obligatoire. Les dépendances suivent la page choisie : vider les biens retire
+  aussi leurs baux, appels de loyers et encaissements rattachés, vider les baux
+  leurs appels et encaissements, vider les loyers leurs encaissements. Les
+  autres sociétés, les préférences et les documents non concernés restent
+  intacts, et chaque suppression est inscrite au journal d’activité.
 
 ## Vérifications
 
