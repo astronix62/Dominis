@@ -7683,6 +7683,9 @@ HTML = r'''<!doctype html>
 .tv-fit .doc-folder-name{white-space:nowrap;min-width:0}.doc-folder-name>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.doc-folder-name svg{flex:none}
 .tv-sticky thead th{position:sticky;top:0;background:var(--panel);z-index:2;box-shadow:inset 0 -1px 0 var(--line)}
 tfoot td{border-top:1px solid var(--line);border-bottom:0;background:var(--panel2);font-weight:600}
+.month-total-row td{background:var(--panel2);border-top:1px solid var(--line);border-bottom:1px solid var(--line);font-weight:500}
+.month-total-row td:first-child{border-left:2px solid var(--gold)}
+.month-total-row .cell-sub{display:block;font-weight:400;color:var(--muted);font-size:9px;margin-top:2px;margin-left:0}
 .tv-density{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;padding:12px 0;border-bottom:1px solid var(--line)}
 .tv-density p,.tv-options .setting-row p{font-size:10px;color:var(--muted);margin-top:4px;max-width:340px}
 .tv-seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;flex:none}
@@ -7702,7 +7705,18 @@ tfoot td{border-top:1px solid var(--line);border-bottom:0;background:var(--panel
 .rail-bar-label{grid-area:label;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--muted)}
 .rail-bar-value{grid-area:value;font-variant-numeric:tabular-nums}
 .rail-bar-track{grid-area:track;height:5px;border-radius:3px;background:var(--line);overflow:hidden}
-.rail-bar-track i{display:block;height:100%;background:var(--red);border-radius:3px}.sci-cell{display:inline-flex;align-items:center;gap:7px;white-space:nowrap}.col-society{width:40px;text-align:center;padding-left:8px;padding-right:4px}.sci-dot{display:inline-block;width:11px;height:11px;border-radius:50%;background:var(--gold);border:2px solid var(--panel);box-shadow:0 0 0 1px var(--line);vertical-align:middle}tr.doc-row{cursor:pointer}.doc-preview-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:10px 14px;background:var(--panel2);border:1px solid var(--line);border-radius:9px;margin-bottom:14px}.doc-preview-zoom-bar{display:flex;align-items:center;gap:7px;flex-wrap:wrap}.doc-preview-zoom-bar input[type=range]{width:130px;padding:0;accent-color:var(--gold)}.doc-preview-viewport{height:64vh;min-height:390px;background:var(--bg);border:1px solid var(--line);border-radius:10px;overflow:auto;display:flex;position:relative;padding:0;overscroll-behavior:contain}.doc-preview-stage{margin:auto;width:calc(100% * var(--doc-zoom,1));height:calc(100% * var(--doc-zoom,1));min-width:120px;min-height:120px;display:flex;align-items:center;justify-content:center;flex:none;padding:16px;box-sizing:border-box}.doc-preview-img{max-width:100%;max-height:100%;width:100%;height:100%;object-fit:contain;display:block;border-radius:6px;box-shadow:0 8px 28px rgba(0,0,0,.28)}.doc-preview-frame{width:100%;height:100%;border:0;border-radius:6px;background:#fff}.doc-preview-sheet{width:100%;min-height:100%;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:22px 26px;color:var(--text);overflow:auto;box-shadow:0 8px 28px rgba(0,0,0,.2);font-size:calc(13px * var(--doc-zoom,1));line-height:1.6}
+.rail-bar-track i{display:block;height:100%;background:var(--red);border-radius:3px}.sci-cell{display:inline-flex;align-items:center;gap:7px;white-space:nowrap}.col-society{width:40px;text-align:center;padding-left:8px;padding-right:4px}.sci-dot{display:inline-block;width:11px;height:11px;border-radius:50%;background:var(--gold);border:2px solid var(--panel);box-shadow:0 0 0 1px var(--line);vertical-align:middle}tr.doc-row{cursor:pointer}.doc-preview-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:10px 14px;background:var(--panel2);border:1px solid var(--line);border-radius:9px;margin-bottom:14px}.doc-preview-zoom-bar{display:flex;align-items:center;gap:7px;flex-wrap:wrap}.doc-preview-zoom-bar input[type=range]{width:130px;padding:0;accent-color:var(--gold)}.doc-preview-viewport{height:64vh;min-height:390px;background:var(--bg);border:1px solid var(--line);border-radius:10px;overflow:auto;position:relative;padding:0;overscroll-behavior:contain}
+/* Le zoom agrandit réellement le contenu : la scène grandit avec le facteur,
+   le contenu est aligné en haut à gauche pour que le débordement soit
+   atteignable au défilement (un contenu centré verticalement coupait le haut). */
+.doc-preview-stage{margin:0 auto;width:calc(100% * var(--doc-zoom,1));height:calc(100% * var(--doc-zoom,1));min-width:120px;min-height:120px;display:flex;align-items:flex-start;justify-content:center;flex:none;padding:16px;box-sizing:border-box}
+.doc-preview-stage.doc-preview-sheet-stage{width:100%;height:100%;min-height:100%;align-items:flex-start}
+.doc-preview-stage.doc-preview-pdf{width:calc(100% * var(--doc-zoom,1));height:calc(100% * var(--doc-zoom,1));align-items:flex-start;justify-content:flex-start}.doc-preview-img{max-width:100%;max-height:100%;width:100%;height:100%;object-fit:contain;display:block;border-radius:6px;box-shadow:0 8px 28px rgba(0,0,0,.28)}.doc-preview-frame{width:calc(100% / var(--doc-zoom,1));height:calc(100% / var(--doc-zoom,1));border:0;border-radius:6px;background:#fff;transform:scale(var(--doc-zoom,1));transform-origin:top left}
+/* Le texte des feuilles de calcul était en pixels fixes : le zoom ne changeait
+   que le cadre. Ces tailles suivent désormais le facteur de zoom. */
+.doc-preview-sheet th{font-size:calc(9px * var(--doc-zoom,1));padding:calc(12px * var(--doc-zoom,1)) calc(20px * var(--doc-zoom,1))}
+.doc-preview-sheet td{font-size:calc(11px * var(--doc-zoom,1));padding:calc(14px * var(--doc-zoom,1)) calc(20px * var(--doc-zoom,1))}
+.doc-preview-sheet .cell-sub{font-size:calc(9px * var(--doc-zoom,1))}.doc-preview-sheet{width:100%;min-height:100%;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:22px 26px;color:var(--text);overflow:auto;box-shadow:0 8px 28px rgba(0,0,0,.2);font-size:calc(13px * var(--doc-zoom,1));line-height:1.6}
 th.col-settings-th{padding:6px 14px;width:44px;text-align:right;vertical-align:middle}.table-gear-btn{width:28px;height:28px;padding:5px;color:var(--muted);border-radius:6px;border-color:transparent;background:transparent;display:inline-flex;align-items:center;justify-content:center}.table-gear-btn svg{width:15px;height:15px;transition:transform .22s ease}.table-gear-btn:hover{color:var(--gold);background:var(--panel2);border-color:var(--line)}.table-gear-btn:hover svg{transform:rotate(30deg)}.col-config-item{padding:10px 12px;border:1px solid var(--line);border-radius:7px;margin-top:8px;display:flex;align-items:center;gap:10px;background:var(--panel2);font-size:12px;transition:opacity .18s,background .18s}.col-config-item.col-hidden{opacity:.65;background:transparent;border-style:dashed}.col-config-item .actions{margin-left:auto}.bell-btn{position:relative}.bell-badge{position:absolute;top:2px;right:2px;min-width:16px;height:16px;padding:0 4px;border-radius:999px;background:#e5484d;color:#fff;font-size:9px;font-weight:700;line-height:12px;display:inline-flex;align-items:center;justify-content:center;border:2px solid var(--bg);box-shadow:0 2px 6px rgba(229,72,77,.45);pointer-events:none;animation:badgePop .22s cubic-bezier(.22,1,.36,1)}@keyframes badgePop{from{transform:scale(0);opacity:0}to{transform:scale(1);opacity:1}}.bell-list{display:flex;flex-direction:column;gap:10px;max-height:400px;overflow:auto}.bell-item{border:1px solid var(--line);background:var(--panel2);border-radius:10px;padding:13px 15px;display:flex;align-items:center;justify-content:space-between;gap:14px;transition:border-color .18s}.bell-item:hover{border-color:var(--gold)}.bell-item.important{border-left:3px solid var(--red)}.task-params-box{grid-column:1/-1;border:1px solid var(--line);background:var(--panel2);border-radius:10px;padding:14px 16px;display:flex;flex-direction:column;gap:12px}.task-param-row{display:flex;align-items:center;justify-content:space-between;gap:14px}
 .task-param-row>div{flex:1 1 auto;min-width:0}.task-param-row+.task-param-row{border-top:1px solid var(--line);padding-top:12px}.task-param-row h4{margin:0;font-size:12px;font-weight:600;color:var(--text)}.task-param-row p{margin:3px 0 0;font-size:11px;color:var(--muted)}.task-reminders-area{border-top:1px solid var(--line);padding-top:12px;display:flex;flex-direction:column;gap:12px}.task-reminders-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(175px,1fr));gap:12px}.mac-notif-container{position:fixed;top:16px;right:18px;z-index:200;display:flex;flex-direction:column;gap:10px;pointer-events:none;max-width:calc(100vw - 32px)}.mac-notif{pointer-events:auto;width:376px;max-width:100%;background:rgba(30,34,30,.9);backdrop-filter:blur(24px) saturate(180%);-webkit-backdrop-filter:blur(24px) saturate(180%);border:1px solid rgba(255,255,255,.15);border-radius:16px;padding:13px 15px;box-shadow:0 20px 48px rgba(0,0,0,.52),0 3px 10px rgba(0,0,0,.25);color:var(--text);position:relative;animation:macNotifIn .45s cubic-bezier(.22,1,.36,1);transform-origin:top right}:root[data-theme=light] .mac-notif{background:rgba(252,251,247,.92);border-color:rgba(37,44,37,.13);box-shadow:0 18px 42px rgba(37,44,37,.18),0 3px 10px rgba(37,44,37,.08)}.mac-notif.closing{animation:macNotifOut .32s cubic-bezier(.4,0,1,1) forwards;pointer-events:none}@keyframes macNotifIn{0%{opacity:0;transform:translateX(calc(100% + 28px)) scale(.95)}70%{opacity:1;transform:translateX(-4px) scale(1.005)}100%{opacity:1;transform:translateX(0) scale(1)}}@keyframes macNotifOut{0%{opacity:1;transform:translateX(0) scale(1)}100%{opacity:0;transform:translateX(calc(100% + 28px)) scale(.95)}}.mac-notif-main{display:flex;align-items:flex-start;gap:12px}.mac-notif-icon{width:38px;height:38px;border-radius:9px;object-fit:contain;background:#000;flex:none;box-shadow:0 2px 6px rgba(0,0,0,.3)}.mac-notif-body{flex:1;min-width:0}.mac-notif-top{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:10px;color:var(--muted);letter-spacing:.5px;text-transform:uppercase;font-weight:600}.mac-notif-title{font-size:13px;font-weight:600;color:var(--text);margin-top:2px;line-height:1.3;overflow:hidden;text-overflow:ellipsis}.mac-notif-sub{font-size:11px;color:var(--muted);margin-top:2px;line-height:1.35}.mac-notif-actions{display:flex;justify-content:flex-end;gap:7px;margin-top:10px;padding-top:9px;border-top:1px solid rgba(146,152,141,.18)}.mac-notif-btn{padding:5px 11px;font-size:11px;border-radius:6px}.mac-notif-x{position:absolute;top:-6px;left:-6px;width:21px;height:21px;padding:3px;border-radius:50%;background:var(--panel2);border:1px solid var(--line);color:var(--muted);box-shadow:0 2px 6px rgba(0,0,0,.25);opacity:0;transition:opacity .15s}.mac-notif:hover .mac-notif-x,.mac-notif:focus-within .mac-notif-x{opacity:1}.mac-notif-x svg{width:11px;height:11px}
 @media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
@@ -7722,7 +7736,7 @@ const today=()=>new Date().getFullYear()+'-'+String(new Date().getMonth()+1).pad
 const palette=['#c7ad77','#879ad8','#70b7a6','#ce9683','#a08dcc','#7bb5c8'];
 const kindNames={properties:'Biens immobiliers',leases:'Baux & locataires',calls:'Appels de loyers',entries:'Trésorerie',partners:'Associés',loans:'Emprunts',tasks:'Échéances',documents:'Documents'};
 const navs={treasury:['Trésorerie','wallet'],agenda:['Échéancier','calendar'],documents:['Documents','folder']};
-const tabs=[['overview','Vue d’ensemble'],['properties','Biens'],['leases','Baux & locataires'],['calls','Loyers'],['entries','Trésorerie'],['partners','Associés'],['loans','Emprunts'],['tasks','Échéances'],['documents','Documents'],['identity','Société']];
+const tabs=[['overview','Vue d’ensemble'],['properties','Biens'],['leases','Baux & locataires'],['calls','Loyers'],['entries','Trésorerie'],['partners','Associés'],['loans','Emprunts'],['tasks','Échéances'],['documents','Documents'],['balance','Bilan'],['identity','Société']];
 let S={scis:[],records:[],settings:{},audit:[]}, page='dashboard',tab='overview',query='',scope='',filter='',docFolder='',docYear='',modalDirty=false,previousFocus=null,settingsQueue=Promise.resolve(),closing=false,importData=null;
 let settingsSection='general', updateInfo={status:'checking',current:'',message:'Vérification sur GitHub…'}, updateInstalling=false, updateRequestPending=false, updatePrompted=false, updateInstance=null, restartSince=0, restartNotified=false;
 const updateLabels={idle:'En attente',checking:'Vérification en cours',available:'Mise à jour disponible',current:'À jour',unavailable:'Vérification impossible',disabled:'Aperçu',downloading:'Téléchargement en cours',installing:'Installation en cours',restarting:'Redémarrage automatique',failed:'Installation annulée'};
@@ -7904,21 +7918,61 @@ entries_preview:[{id:'label',label:'Opération / société'},{id:'date',label:'D
 // Réglages d'affichage d'un tableau : densité, ajustement, en-tête collant,
 // ligne de totaux et panneau graphique facultatif (écrans réellement larges).
 const tableDefaults={density:'confort',fit:true,sticky:true,totals:true,charts:false};
-function tableView(kind){
+// --- Cloisonnement des réglages de tableau -------------------------------
+// Chaque tableau affiché possède sa propre clé : « page:treasury:entries »,
+// « sci:<id>:entries », « dashboard:entries_preview », etc. Deux tableaux qui
+// se ressemblent (la trésorerie générale et celle d'une SCI, par exemple) ne
+// partagent donc jamais ni densité, ni ajustement, ni en-tête fixe, ni ligne de
+// totaux, ni colonnes : un réglage modifié ne s'applique qu'au tableau modifié.
+function tableKindOf(key){
+    let k=String(key||''),i=k.lastIndexOf(':');
+    return i>=0?k.slice(i+1):k;
+}
+function tableScopeKey(){
+    if(page==='dashboard')return 'dashboard';
+    if(navs[page])return 'page:'+page;
+    if(S.scis.some(s=>s.id===page))return 'sci:'+page;
+    return 'page:'+page;
+}
+function tableKey(kind){return kind==='entries_preview'?'dashboard:entries_preview':tableScopeKey()+':'+kind;}
+function tableScopeLabel(key){
+    let k=String(key||'');
+    if(k==='dashboard:entries_preview')return 'Tableau de bord';
+    if(k.startsWith('sci:'))return 'SCI · '+(sciname(k.slice(4).split(':')[0])||'société');
+    if(k.indexOf('page:treasury')===0)return 'Trésorerie · toutes les SCI';
+    if(k.indexOf('page:agenda')===0)return 'Échéancier · toutes les SCI';
+    if(k.indexOf('page:documents')===0)return 'Documents · toutes les SCI';
+    return 'Tableau';
+}
+function tableKindLabel(key){
+    let kind=tableKindOf(key);
+    if(kind==='entries_preview')return 'Dernières opérations';
+    return kindNames[kind]||'Tableau';
+}
+function tableView(key){
+    let kind=tableKindOf(key);
     let all=(S.settings.table_view&&typeof S.settings.table_view==='object')?S.settings.table_view:{};
-    let cfg=(all[kind]&&typeof all[kind]==='object')?all[kind]:{};
-    let merged={...tableDefaults,...cfg};
+    // Les réglages enregistrés avant le cloisonnement (clé = type de tableau)
+    // servent uniquement de valeurs de départ : ils ne sont jamais réécrits par
+    // un autre tableau, donc ils ne peuvent plus déborder d'un tableau à l'autre.
+    let legacy=(all[kind]&&typeof all[kind]==='object')?all[kind]:{};
+    let own=(all[key]&&typeof all[key]==='object')?all[key]:{};
+    let merged={...tableDefaults,...legacy,...own};
     if(!['confort','compact','dense'].includes(merged.density))merged.density='confort';
     return merged;
 }
-async function saveTableView(kind,cfg){
+async function saveTableView(key,cfg){
     let all={...(S.settings.table_view&&typeof S.settings.table_view==='object'?S.settings.table_view:{})};
-    all[kind]={...tableView(kind),...cfg};
+    all[key]={...tableView(key),...cfg};
     await setPref({table_view:all});
 }
-function getTableColumns(kind){
+function getTableColumns(key){
+    let kind=tableKindOf(key);
     let defs=defaultTableColumns[kind]||[];
-    let cfg=(S.settings.table_columns&&typeof S.settings.table_columns==='object')?S.settings.table_columns[kind]:null;
+    let all=(S.settings.table_columns&&typeof S.settings.table_columns==='object')?S.settings.table_columns:{};
+    // Repli sur l'ancien réglage global du type de tableau, une seule fois :
+    // dès qu'un tableau est modifié, seules ses propres colonnes changent.
+    let cfg=all[key]||all[kind]||null;
     let order=Array.isArray(cfg?.order)?cfg.order:[];
     let hidden=new Set(Array.isArray(cfg?.hidden)?cfg.hidden:[]);
     let validIds=defs.map(d=>d.id);
@@ -7928,34 +7982,37 @@ function getTableColumns(kind){
     if(cols.length&&!cols.some(c=>c.visible))cols[0].visible=true;
     return cols;
 }
-async function saveTableColumns(kind,cols){
+async function saveTableColumns(key,cols){
     let all={...(S.settings.table_columns&&typeof S.settings.table_columns==='object'?S.settings.table_columns:{})};
-    all[kind]={order:cols.map(c=>c.id),hidden:cols.filter(c=>!c.visible).map(c=>c.id)};
+    all[key]={order:cols.map(c=>c.id),hidden:cols.filter(c=>!c.visible).map(c=>c.id)};
     await setPref({table_columns:all});
 }
+function tableWrapClass(v){return `tv-${v.density}${v.fit?' tv-fit':''}${v.sticky?' tv-sticky':''}`;}
 function renderTableColumnsList(kind){
     let cols=getTableColumns(kind),visCount=cols.filter(c=>c.visible).length;
-    return `<p class="sub" style="margin-bottom:12px">Activez ou masquez les colonnes souhaitées et réorganisez leur ordre d’affichage avec les flèches. Vos réglages sont enregistrés automatiquement.</p><div id="col-config-list">${cols.map((c,i)=>`<div class="col-config-item ${!c.visible?'col-hidden':''}" data-col-item="${c.id}"><button type="button" class="toggle ${c.visible?'on':''}" data-col-toggle="${c.id}" data-col-kind="${kind}" role="switch" aria-checked="${c.visible}" aria-label="Afficher la colonne ${esc(c.label)}" ${c.visible&&visCount<=1?'disabled title="Au moins une colonne doit rester affichée"':''}></button><span style="font-weight:500">${esc(c.label)}</span><span class="pill ${c.visible?'green':''}" style="margin-left:auto;margin-right:6px">${c.visible?'Affichée':'Masquée'}</span><div class="actions" style="margin-left:0"><button type="button" data-col-move="${c.id}" data-col-kind="${kind}" data-dir="-1" ${i===0?'disabled':''} title="Monter" aria-label="Monter ${esc(c.label)}">${icon('up')}</button><button type="button" data-col-move="${c.id}" data-col-kind="${kind}" data-dir="1" ${i===cols.length-1?'disabled':''} title="Descendre" aria-label="Descendre ${esc(c.label)}">${icon('down')}</button></div></div>`).join('')}</div>`;
+    return `<p class="sub" style="margin-bottom:12px">Activez ou masquez les colonnes souhaitées et réorganisez leur ordre d’affichage avec les flèches. Vos réglages sont enregistrés automatiquement pour ce tableau uniquement.</p><div id="col-config-list">${cols.map((c,i)=>`<div class="col-config-item ${!c.visible?'col-hidden':''}" data-col-item="${c.id}"><button type="button" class="toggle ${c.visible?'on':''}" data-col-toggle="${c.id}" data-col-kind="${kind}" role="switch" aria-checked="${c.visible}" aria-label="Afficher la colonne ${esc(c.label)}" ${c.visible&&visCount<=1?'disabled title="Au moins une colonne doit rester affichée"':''}></button><span style="font-weight:500">${esc(c.label)}</span><span class="pill ${c.visible?'green':''}" style="margin-left:auto;margin-right:6px">${c.visible?'Affichée':'Masquée'}</span><div class="actions" style="margin-left:0"><button type="button" data-col-move="${c.id}" data-col-kind="${kind}" data-dir="-1" ${i===0?'disabled':''} title="Monter" aria-label="Monter ${esc(c.label)}">${icon('up')}</button><button type="button" data-col-move="${c.id}" data-col-kind="${kind}" data-dir="1" ${i===cols.length-1?'disabled':''} title="Descendre" aria-label="Descendre ${esc(c.label)}">${icon('down')}</button></div></div>`).join('')}</div>`;
 }
-function renderTableViewOptions(kind){
-    let v=tableView(kind),isEntries=kind==='entries';
+function renderTableViewOptions(key){
+    let v=tableView(key),kind=tableKindOf(key),isEntries=kind==='entries',hasTotals=['entries','calls'].includes(kind);
     let densities=[['confort','Confort','Aéré, lisible, hauteur de ligne actuelle'],['compact','Compact','Hauteurs réduites, plus de lignes visibles'],['dense','Très compact','Densité tableur, pour comparer beaucoup de lignes']];
-    let toggle=(key,label,help)=>`<div class="setting-row" style="padding:12px 0"><div><h3>${label}</h3><p>${help}</p></div><button type="button" class="toggle ${v[key]?'on':''}" data-table-opt="${key}" data-table-kind="${kind}" role="switch" aria-checked="${v[key]}" aria-label="${esc(label)}"></button></div>`;
-    return `<div class="tv-options"><h3 style="margin-bottom:4px">Affichage</h3><p class="sub" style="margin-bottom:14px">Ces réglages ne concernent que ce tableau et sont enregistrés automatiquement.</p>
-        <div class="tv-density"><div><h3>Densité</h3><p>Le mode compact réduit les marges et la taille du texte sans masquer d’information.</p></div><div class="tv-seg" role="group" aria-label="Densité du tableau">${densities.map(([id,label,title])=>`<button type="button" class="${v.density===id?'active':''}" data-table-density="${id}" data-table-kind="${kind}" title="${esc(title)}" aria-pressed="${v.density===id}">${label}</button>`).join('')}</div></div>
+    let toggle=(key2,label,help)=>`<div class="setting-row" style="padding:12px 0"><div><h3>${label}</h3><p>${help}</p></div><button type="button" class="toggle ${v[key2]?'on':''}" data-table-opt="${key2}" data-table-kind="${key}" role="switch" aria-checked="${v[key2]}" aria-label="${esc(label)}"></button></div>`;
+    let totalsHelp=isEntries
+        ?'Conserve les totaux en bas du tableau et insère, à chaque fin de mois, une ligne de totaux cumulés depuis la première opération affichée (le mois en cours est rappelé sous le libellé). Désactivée, aucune ligne de totaux n’est affichée.'
+        :'Affiche les totaux de la sélection en bas du tableau.';
+    return `<div class="tv-options"><h3 style="margin-bottom:4px">Affichage</h3><p class="sub" style="margin-bottom:6px">Ces réglages ne concernent que ce tableau : <strong>${esc(tableScopeLabel(key))}</strong>. Ils sont enregistrés automatiquement et ne s’appliquent à aucun autre tableau.</p>
+        <div class="tv-density"><div><h3>Densité</h3><p>Le mode compact réduit les marges et la taille du texte sans masquer d’information.</p></div><div class="tv-seg" role="group" aria-label="Densité du tableau">${densities.map(([id,label,title])=>`<button type="button" class="${v.density===id?'active':''}" data-table-density="${id}" data-table-kind="${key}" title="${esc(title)}" aria-pressed="${v.density===id}">${label}</button>`).join('')}</div></div>
         ${toggle('fit','Ajuster à la largeur','Le tableau occupe toute la largeur disponible et les libellés passent à la ligne au lieu de créer un défilement horizontal.')}
         ${toggle('sticky','En-tête fixe','Les titres de colonnes restent visibles pendant le défilement.')}
-        ${toggle('totals','Ligne de totaux','Affiche les totaux de la sélection en bas du tableau.')}
+        ${hasTotals?toggle('totals','Ligne de totaux',totalsHelp):''}
         ${isEntries?toggle('charts','Panneau graphique','Ajoute deux graphiques à droite du tableau. Sur un écran étroit, ils passent sous le tableau pour ne jamais réduire la largeur utile. Sinon, la vue d’ensemble contient déjà les graphiques. '):''}
     </div>`;
 }
-function refreshTableViewUi(kind){
-    if($('#table-view-options'))$('#table-view-options').innerHTML=renderTableViewOptions(kind);
-    if(kind==='entries_preview')render();else renderListing();
+function refreshTableViewUi(key){
+    if($('#table-view-options'))$('#table-view-options').innerHTML=renderTableViewOptions(key);
+    if(tableKindOf(key)==='entries_preview')render();else renderListing();
 }
-function openTableColumnsModal(kind){
-    let title=kindNames[kind]||(kind==='entries_preview'?'Dernières opérations':'Tableau');
-    openModal('Réglages du tableau · '+title,`<div id="table-view-options">${renderTableViewOptions(kind)}</div><h3 style="margin:24px 0 8px">Colonnes</h3><div id="col-config-wrap">${renderTableColumnsList(kind)}</div>`,`<button type="button" data-col-reset="${kind}">Réinitialiser les colonnes</button><button type="button" class="primary" data-action="close-modal">${icon('check')} Fermer</button>`,true);
+function openTableColumnsModal(key){
+    openModal('Réglages du tableau · '+tableKindLabel(key),`<p class="sub" style="margin:-6px 0 14px">${esc(tableScopeLabel(key))} · réglages propres à ce tableau</p><div id="table-view-options">${renderTableViewOptions(key)}</div><h3 style="margin:24px 0 8px">Colonnes</h3><div id="col-config-wrap">${renderTableColumnsList(key)}</div>`,`<button type="button" data-col-reset="${key}">Réinitialiser les colonnes</button><button type="button" class="primary" data-action="close-modal">${icon('check')} Fermer</button>`,true);
 }
 let shownMacNotifs=new Set(),macNotifTimers=new Map(),taskEditSnapshot=null;
 function taskReminderDates(r){
@@ -8293,29 +8350,31 @@ function photoCropShow(src){
     img.onerror=()=>{photoCrop.error=true;notify('Image illisible : utilisez un fichier PNG, JPEG, WebP ou GIF.',true);photoCropShow('');};
     img.src=src;
 }
+let docPreviewId='',docPreviewZoom=1,docPreviewSheets=[];
+function docPreviewClampZoom(z){let n=Number(z);if(!Number.isFinite(n)||n<=0)n=1;return Math.min(4,Math.max(0.25,Math.round(n*100)/100));}
 function docPreviewStageZoom(z){
     let vp=$('#doc-preview-viewport'),stage=$('#doc-preview-stage');
-    let next=Math.min(4,Math.max(0.25,Number(z)||1));
+    let next=docPreviewClampZoom(z);
+    docPreviewZoom=next;
+    // Un seul facteur pilote réellement l'affichage : les feuilles de calcul
+    // (tailles en calc() de --doc-zoom), les images (scène dimensionnée) et les
+    // PDF (iframe mise à l'échelle) suivent tous ce facteur.
+    if(stage)stage.style.setProperty('--doc-zoom',String(next));
     if(vp&&stage){
         // Le point du document placé au centre de la zone d'aperçu avant le zoom
         // reste au centre après redimensionnement : le document ne dérive plus
         // vers la droite et reste dans la zone d'aperçu.
         let sw=Math.max(1,stage.offsetWidth),sh=Math.max(1,stage.offsetHeight);
         let cx=(vp.scrollLeft+vp.clientWidth/2)/sw,cy=(vp.scrollTop+vp.clientHeight/2)/sh;
-        docPreviewZoom=next;
-        stage.style.setProperty('--doc-zoom',String(next));
         let apply=()=>{
             if(!document.body.contains(stage))return;
             vp.scrollLeft=Math.max(0,cx*stage.offsetWidth-vp.clientWidth/2);
             vp.scrollTop=Math.max(0,cy*stage.offsetHeight-vp.clientHeight/2);
         };
         if(typeof requestAnimationFrame==='function')requestAnimationFrame(apply);else apply();
-    }else{
-        docPreviewZoom=next;
-        if(stage)stage.style.setProperty('--doc-zoom',String(next));
     }
-    let range=$('#doc-zoom-range');if(range)range.value=String(Math.round(docPreviewZoom*100));
-    let label=$('#doc-zoom-label');if(label)label.textContent='×'+docPreviewZoom.toFixed(2).replace('.',',');
+    let range=$('#doc-zoom-range');if(range)range.value=String(Math.round(next*100));
+    let label=$('#doc-zoom-label');if(label)label.textContent='×'+next.toFixed(2).replace('.',',');
 }
 function docPreviewSheetHtml(index){
     let sheet=docPreviewSheets[index];
@@ -8329,30 +8388,29 @@ function docPreviewSheetSelect(index){
     let body=$('#doc-sheet-body');
     if(body)body.innerHTML=docPreviewSheetHtml(index);
 }
-let docPreviewId='',docPreviewZoom=1,docPreviewSheets=[];
 function fmtBytes(n){n=Number(n)||0;if(n<1024)return n+' o';if(n<1024*1024)return num(n/1024)+' Ko';return num(n/1024/1024)+' Mo';}
 function docPreviewToolbar(p){
     return `<div class="doc-preview-toolbar"><div class="row gap8 wrap">${p.category?`<span class="pill gold">${esc(p.category)}</span>`:''}${p.filename?`<span class="sub">${esc(p.filename)}</span>`:''}${p.size?`<span class="muted">${fmtBytes(p.size)}</span>`:''}${p.date?`<span class="muted">${date(p.date)}</span>`:''}</div><div class="doc-preview-zoom-bar"><button type="button" data-doc-zoom="out" title="Réduire" aria-label="Réduire le zoom">−</button><input id="doc-zoom-range" type="range" min="25" max="400" step="5" value="100" aria-label="Niveau de zoom de l’aperçu"><span id="doc-zoom-label" class="pill">×1,00</span><button type="button" data-doc-zoom="100" title="Revenir à ×1" aria-label="Revenir au zoom par défaut">×1</button><button type="button" data-doc-zoom="in" title="Agrandir" aria-label="Agrandir le zoom">+</button></div></div>`;
 }
 function docPreviewBody(p){
     if(p.preview_type==='image')return docPreviewToolbar(p)+`<div class="doc-preview-viewport" id="doc-preview-viewport"><div class="doc-preview-stage" id="doc-preview-stage" style="--doc-zoom:1"><img class="doc-preview-img" src="${p.data_url}" alt="Aperçu de ${esc(p.name)}"></div></div>`;
-    if(p.preview_type==='pdf')return docPreviewToolbar(p)+`<div class="doc-preview-viewport" id="doc-preview-viewport"><div class="doc-preview-stage" id="doc-preview-stage" style="--doc-zoom:1"><iframe class="doc-preview-frame" src="${esc(p.view_url||('/api/document-view?id='+encodeURIComponent(p.id)))}&token=${encodeURIComponent(TOKEN)}" title="Aperçu PDF de ${esc(p.name)}"></iframe></div></div>`;
+    if(p.preview_type==='pdf')return docPreviewToolbar(p)+`<div class="doc-preview-viewport" id="doc-preview-viewport"><div class="doc-preview-stage doc-preview-pdf" id="doc-preview-stage" style="--doc-zoom:1"><iframe class="doc-preview-frame" src="${esc(p.view_url||('/api/document-view?id='+encodeURIComponent(p.id)))}&token=${encodeURIComponent(TOKEN)}" title="Aperçu PDF de ${esc(p.name)}"></iframe></div></div>`;
     if(p.preview_type==='xlsx'){
         docPreviewSheets=(p.sheets||[]).map(s=>({name:s.name,rows:s.rows,active:false}));
         if(!docPreviewSheets.length)return docPreviewToolbar(p)+'<p class="sub">Aucune feuille lisible dans ce classeur.</p>';
-        return docPreviewToolbar(p)+`${docPreviewSheets.length>1?`<div class="tabs" style="margin-bottom:12px" role="tablist">${docPreviewSheets.map((s,i)=>`<button type="button" role="tab" aria-selected="${i===0}" class="tab ${i===0?'active':''}" data-doc-sheet="${i}">${esc(s.name)}</button>`).join('')}</div>`:''}<div class="doc-preview-viewport" id="doc-preview-viewport"><div class="doc-preview-stage" id="doc-preview-stage" style="--doc-zoom:1"><div class="doc-preview-sheet" id="doc-sheet-body">${docPreviewSheetHtml(0)}</div></div></div>`;
+        return docPreviewToolbar(p)+`${docPreviewSheets.length>1?`<div class="tabs" style="margin-bottom:12px" role="tablist">${docPreviewSheets.map((s,i)=>`<button type="button" role="tab" aria-selected="${i===0}" class="tab ${i===0?'active':''}" data-doc-sheet="${i}">${esc(s.name)}</button>`).join('')}</div>`:''}<div class="doc-preview-viewport" id="doc-preview-viewport"><div class="doc-preview-stage doc-preview-sheet-stage" id="doc-preview-stage" style="--doc-zoom:1"><div class="doc-preview-sheet" id="doc-sheet-body">${docPreviewSheetHtml(0)}</div></div></div>`;
     }
     if(p.preview_type==='csv'){
         let csvRows=p.rows||[];
-        return docPreviewToolbar(p)+`<div class="doc-preview-viewport" id="doc-preview-viewport"><div class="doc-preview-stage" id="doc-preview-stage" style="--doc-zoom:1"><div class="doc-preview-sheet">${csvRows.length?`<div class="table-wrap"><table>${csvRows.map((r,i)=>`<tr>${(r||[]).map(v=>i?'<td>'+esc(v)+'</td>':'<th>'+esc(v)+'</th>').join('')}</tr>`).join('')}</table></div>`:'<p class="sub">Fichier CSV vide.</p>'}</div></div></div>`;
+        return docPreviewToolbar(p)+`<div class="doc-preview-viewport" id="doc-preview-viewport"><div class="doc-preview-stage doc-preview-sheet-stage" id="doc-preview-stage" style="--doc-zoom:1"><div class="doc-preview-sheet">${csvRows.length?`<div class="table-wrap"><table>${csvRows.map((r,i)=>`<tr>${(r||[]).map(v=>i?'<td>'+esc(v)+'</td>':'<th>'+esc(v)+'</th>').join('')}</tr>`).join('')}</table></div>`:'<p class="sub">Fichier CSV vide.</p>'}</div></div></div>`;
     }
     if(p.preview_type==='docx'){
         let paras=p.paragraphs||[];
-        return docPreviewToolbar(p)+`<div class="doc-preview-viewport" id="doc-preview-viewport"><div class="doc-preview-stage" id="doc-preview-stage" style="--doc-zoom:1"><div class="doc-preview-sheet">${paras.length?paras.map(t=>`<p>${esc(t)}</p>`).join(''):'<p class="sub">Document Word sans texte exploitable.</p>'}</div></div></div>`;
+        return docPreviewToolbar(p)+`<div class="doc-preview-viewport" id="doc-preview-viewport"><div class="doc-preview-stage doc-preview-sheet-stage" id="doc-preview-stage" style="--doc-zoom:1"><div class="doc-preview-sheet">${paras.length?paras.map(t=>`<p>${esc(t)}</p>`).join(''):'<p class="sub">Document Word sans texte exploitable.</p>'}</div></div></div>`;
     }
-    if(p.preview_type==='text')return docPreviewToolbar(p)+`<div class="doc-preview-viewport" id="doc-preview-viewport"><div class="doc-preview-stage" id="doc-preview-stage" style="--doc-zoom:1"><div class="doc-preview-sheet"><pre style="white-space:pre-wrap;margin:0;font:inherit">${esc(p.text||'')}</pre></div></div></div>`;
-    if(p.preview_type==='note')return docPreviewToolbar(p)+`<div class="doc-preview-viewport" id="doc-preview-viewport"><div class="doc-preview-stage" id="doc-preview-stage" style="--doc-zoom:1"><div class="doc-preview-sheet"><p class="sub">Cette fiche ne contient aucune pièce jointe.</p>${p.notes?`<p style="white-space:pre-wrap;margin-top:12px">${esc(p.notes)}</p>`:''}</div></div></div>`;
-    return docPreviewToolbar(p)+`<div class="doc-preview-viewport" id="doc-preview-viewport"><div class="doc-preview-stage" id="doc-preview-stage" style="--doc-zoom:1"><div class="doc-preview-sheet"><p>Ce format ne peut pas être affiché directement dans Dominis.</p><p class="sub">Le fichier reste disponible au téléchargement.</p><button type="button" class="primary" data-document="${esc(p.id)}">${icon('download')} Télécharger le fichier</button></div></div></div>`;
+    if(p.preview_type==='text')return docPreviewToolbar(p)+`<div class="doc-preview-viewport" id="doc-preview-viewport"><div class="doc-preview-stage doc-preview-sheet-stage" id="doc-preview-stage" style="--doc-zoom:1"><div class="doc-preview-sheet"><pre style="white-space:pre-wrap;margin:0;font:inherit">${esc(p.text||'')}</pre></div></div></div>`;
+    if(p.preview_type==='note')return docPreviewToolbar(p)+`<div class="doc-preview-viewport" id="doc-preview-viewport"><div class="doc-preview-stage doc-preview-sheet-stage" id="doc-preview-stage" style="--doc-zoom:1"><div class="doc-preview-sheet"><p class="sub">Cette fiche ne contient aucune pièce jointe.</p>${p.notes?`<p style="white-space:pre-wrap;margin-top:12px">${esc(p.notes)}</p>`:''}</div></div></div>`;
+    return docPreviewToolbar(p)+`<div class="doc-preview-viewport" id="doc-preview-viewport"><div class="doc-preview-stage doc-preview-sheet-stage" id="doc-preview-stage" style="--doc-zoom:1"><div class="doc-preview-sheet"><p>Ce format ne peut pas être affiché directement dans Dominis.</p><p class="sub">Le fichier reste disponible au téléchargement.</p><button type="button" class="primary" data-document="${esc(p.id)}">${icon('download')} Télécharger le fichier</button></div></div></div>`;
 }
 async function documentPreview(id){
     let r=rec(id);
@@ -8517,7 +8575,7 @@ return `<div class="panel"><div class="panel-head"><div><h2>Les flux de votre pa
 function donut(id){let list=id?rows('properties',id).map((r,i)=>({name:r.name,value:Number(r.value||0),color:palette[i%6]})):S.scis.map((s,i)=>({name:s.name,value:metrics(s.id).value,color:color(s.color||palette[i%6])}));let total=list.reduce((a,r)=>a+r.value,0),offset=0;let bg=total?list.map(r=>{let start=offset;offset+=r.value/total*100;return `${r.color} ${start}% ${offset}%`}).join(','):'var(--line) 0% 100%';return `<div class="panel"><div class="panel-head"><div><h2>Répartition du patrimoine</h2><p>${id?'Par bien immobilier':'Par société civile immobilière'}</p></div>${icon('building')}</div><div class="donut-wrap"><div class="donut" style="background:conic-gradient(${bg})"><div class="donut-label"><b>${total>=1000000?num(total/1000000)+' M€':total>=1000?num(total/1000)+' k€':money(total)}</b><small>Valeur totale estimée</small></div></div><div class="donut-legend">${list.slice(0,4).map(r=>`<div><span class="color-dot" style="background:${r.color}"></span>${esc(r.name)}<div class="amount">${total?num(r.value/total*100):0} %</div></div>`).join('')||'<span>Aucun bien renseigné</span>'}${list.length>4?`<div class="muted">+ ${list.length-4} autres biens / SCI</div>`:''}</div></div></div>`;}
 function sciCards(){return `<div class="section-title"><h2>Vos sociétés <small>${S.scis.length} SCI dans votre portefeuille</small></h2><button class="text-link row" data-action="new-sci">${icon('plus')} Ajouter une SCI</button></div><div class="sci-grid">${S.scis.map((s,i)=>{let m=metrics(s.id);return `<article class="sci-card" data-nav="${s.id}" tabindex="0" role="button" aria-label="Ouvrir ${esc(s.name)}"><div class="row between"><div class="row"><div class="building-icon" style="color:${sciColor(s.id)}">${icon('building')}</div><div><h3>${esc(s.name)}</h3><div class="location">${esc(s.city||s.address||'Adresse à renseigner')}</div></div></div><span class="pill">${esc(s.regime||'IR')}</span></div><div class="sci-stats"><div><label>Patrimoine estimé</label><strong>${money(m.value)}</strong></div><div><label>Trésorerie actuelle</label><strong class="${m.cash<0?'red':''}">${money(m.cash)}</strong></div></div><div class="mini-bar">${Array.from({length:m.properties||1},(_,j)=>`<i style="background:${j<m.occupied?sciColor(s.id):'var(--line)'}"></i>`).join('')}</div><div class="sci-card-bottom"><span>${m.properties} biens <span style="margin:0 5px">·</span> ${rows('leases',s.id).filter(r=>r.status==='Actif').length} baux actifs</span><span class="row gap8 ${m.overdue?'gold':'green'}">${m.overdue?'Loyers à suivre':'Voir la société'} ${icon('arrow')}</span></div></article>`}).join('')}</div>`;}
 function tasksPreview(id){let list=rows('tasks',id).filter(r=>r.status!=='Terminé').sort((a,b)=>a.due.localeCompare(b.due)).slice(0,4);return `<div class="panel"><div class="panel-head" style="padding-bottom:15px"><h2>Prochaines échéances</h2><button class="text-link" data-nav="${id||'agenda'}" ${id?'data-tab="tasks"':''}>Tout voir ↗</button></div>${list.map(r=>{let d=new Date(r.due+'T12:00:00');return `<div class="task-line"><div class="task-date">${d.getDate()}<small>${d.toLocaleDateString('fr-FR',{month:'short'})}</small></div><div><h3>${esc(r.name)}${r.important?' <span class="pill red" style="margin-left:5px">Important</span>':''}</h3><p>${esc(sciname(r.sci))} · ${esc(r.category||'Général')}</p></div><button class="ghost icon-only task-right" data-edit="${r.id}" title="Consulter l’échéance">${icon('chevron')}</button></div>`}).join('')||empty('Tout est à jour','Aucune échéance à venir.')}</div>`;}
-function entriesPreview(id){let list=rows('entries',id).filter(yr).sort((a,b)=>b.date.localeCompare(a.date)).slice(0,4);let cols=getTableColumns('entries_preview').filter(c=>c.visible);let gear=`<th class="align-right col-settings-th"><button type="button" class="ghost icon-only table-gear-btn" data-table-config="entries_preview" title="Réglages du tableau" aria-label="Réglages du tableau">${icon('settings')}</button></th>`;return `<div class="panel"><div class="panel-head" style="padding-bottom:17px"><h2>Dernières opérations</h2><button class="text-link" data-nav="${id||'treasury'}" ${id?'data-tab="entries"':''}>Tout voir ↗</button></div><div class="table-wrap"><table><thead><tr>${cols.map(c=>`<th ${c.id==='amount'?'class="align-right"':''}>${esc(c.label)}</th>`).join('')}${gear}</tr></thead><tbody>${list.map(r=>{let cells={label:`<strong>${esc(r.label)}</strong><span class="cell-sub">${esc(sciname(r.sci))}</span>`,date:`<span class="muted">${date(r.date)}</span>`,amount:`<span class="${r.direction==='Recette'?'green':'red'}">${r.direction==='Recette'?'+':'−'} ${money(r.amount,2)}</span>`};return `<tr>${cols.map(c=>`<td ${c.id==='amount'?'class="align-right"':''}>${cells[c.id]}</td>`).join('')}<td class="align-right"><div class="actions"><button data-edit="${r.id}" title="Modifier" aria-label="Modifier ${esc(label(r))}">${icon('edit')}</button></div></td></tr>`;}).join('')}</tbody></table>${!list.length?empty('Aucune opération','Enregistrez votre premier mouvement.') :''}</div></div>`;}
+function entriesPreview(id){let list=rows('entries',id).filter(yr).sort((a,b)=>b.date.localeCompare(a.date)).slice(0,4);let tkey=tableKey('entries_preview'),v=tableView(tkey);let cols=getTableColumns(tkey).filter(c=>c.visible);let gear=`<th class="align-right col-settings-th"><button type="button" class="ghost icon-only table-gear-btn" data-table-config="${tkey}" title="Réglages du tableau" aria-label="Réglages du tableau">${icon('settings')}</button></th>`;return `<div class="panel"><div class="panel-head" style="padding-bottom:17px"><h2>Dernières opérations</h2><button class="text-link" data-nav="${id||'treasury'}" ${id?'data-tab="entries"':''}>Tout voir ↗</button></div><div class="table-wrap ${tableWrapClass(v)}"><table><thead><tr>${cols.map(c=>`<th ${c.id==='amount'?'class="align-right"':''}>${esc(c.label)}</th>`).join('')}${gear}</tr></thead><tbody>${list.map(r=>{let cells={label:`<strong>${esc(r.label)}</strong><span class="cell-sub">${esc(sciname(r.sci))}</span>`,date:`<span class="muted">${date(r.date)}</span>`,amount:`<span class="${r.direction==='Recette'?'green':'red'}">${r.direction==='Recette'?'+':'−'} ${money(r.amount,2)}</span>`};return `<tr>${cols.map(c=>`<td ${c.id==='amount'?'class="align-right"':''}>${cells[c.id]}</td>`).join('')}<td class="align-right"><div class="actions"><button data-edit="${r.id}" title="Modifier" aria-label="Modifier ${esc(label(r))}">${icon('edit')}</button></div></td></tr>`;}).join('')}</tbody></table>${!list.length?empty('Aucune opération','Enregistrez votre premier mouvement.') :''}</div></div>`;}
 function dashboard(id){let m=metrics(id);return `${S.settings.demo&&!id?`<div class="demo-notice"><span>ESPACE DE DÉMONSTRATION <span style="opacity:.6;margin:0 9px">/</span> Données fictives pour explorer Dominis en toute liberté.</span><button data-nav="settings">Gérer les données</button></div>`:''}${kpis(id)}<div class="charts-grid">${chart(id)}${donut(id)}</div>${!id?sciCards():`<div class="notice row between"><div>${m.overdue?`<span class="gold">${money(m.overdue,2)} de loyers échus restent à encaisser.</span>`:'Aucun solde de loyer échu à ce jour.'} <span style="margin-left:10px">Dette renseignée : ${money(m.debt)}.</span></div><button class="text-link" data-tab="calls">Consulter les loyers →</button></div>`}<div class="lower-grid">${entriesPreview(id)}${tasksPreview(id)}</div>${attention(id)}`;}
 
 function attention(id){let alerts=[],limit=new Date();limit.setDate(limit.getDate()+60);let until=limit.toISOString().slice(0,10);S.scis.filter(s=>!id||s.id===id).forEach(s=>{let m=metrics(s.id);if(m.overdue)alerts.push({sci:s.id,tab:'calls',title:money(m.overdue,2)+' de loyers échus à encaisser',detail:s.name+' · Consulter les appels et les paiements',icon:'wallet'});if(s.regime==='IR'&&rows('leases',s.id).some(l=>l.type==='Habitation meublée'&&l.status==='Actif'))alerts.push({sci:s.id,tab:'identity',title:'Location meublée : régime fiscal à examiner',detail:s.name+' · Vérifier les conséquences avec votre conseil fiscal',icon:'info'});});rows('properties',id).forEach(r=>{if(['F','G'].includes(r.dpe)||r.dpe_date&&r.dpe_date<today())alerts.push({sci:r.sci,tab:'properties',title:'Diagnostic à vérifier · '+r.name,detail:'DPE '+(r.dpe||'non renseigné')+' · Vérifier validité, décence et éventuels travaux',icon:'home'});});rows('leases',id).filter(r=>r.status==='Actif'&&r.end&&r.end<=until).forEach(r=>alerts.push({sci:r.sci,tab:'leases',title:'Fin de bail à examiner · '+r.tenant,detail:date(r.end)+' · Anticiper la suite selon les règles du bail',icon:'calendar'}));rows('tasks',id).filter(r=>r.status!=='Terminé'&&r.due<today()).forEach(r=>alerts.push({sci:r.sci,tab:'tasks',title:'Échéance dépassée · '+r.name,detail:sciname(r.sci)+' · Prévue le '+date(r.due),icon:'clock'}));if(!alerts.length)return '';return `<div class="panel" style="margin-top:23px"><div class="panel-head" style="padding-bottom:14px"><h2>Points d’attention <small class="gold" style="margin-left:8px">${alerts.length}</small></h2><span class="sub">À partir des données renseignées</span></div>${alerts.slice(0,6).map(a=>`<div class="task-line"><span class="gold">${icon(a.icon)}</span><div><h3>${esc(a.title)}</h3><p>${esc(a.detail)}</p></div><button class="ghost icon-only task-right" data-nav="${a.sci}" data-tab="${a.tab}" title="Examiner">${icon('arrow')}</button></div>`).join('')}${alerts.length>6?'<div class="panel-body sub">Les six premiers points sont affichés. Consultez aussi les échéances de chaque SCI.</div>':''}</div>`;}
@@ -9036,21 +9094,64 @@ function inDocFolder(r){
     if(fid===docFolder)return true;
     return folderDescendants(sciDocFolders(r.sci),docFolder).some(f=>f.id===fid);
 }
+const MONTH_NAMES=['janvier','février','mars','avril','mai','juin','juillet','août','septembre','octobre','novembre','décembre'];
+function monthTitle(ym){
+    let p=String(ym||'').split('-'),m=Number(p[1]);
+    return (MONTH_NAMES[m-1]?MONTH_NAMES[m-1].charAt(0).toUpperCase()+MONTH_NAMES[m-1].slice(1):'')+(p[0]?' '+p[0]:'');
+}
+// Trésorerie à une date donnée, toutes SCI confondues (ou pour une seule SCI).
+function cashAtDate(id,day){
+    let es=rows('entries',id);
+    return r2(S.scis.filter(s=>!id||s.id===id).map(s=>sciCashInfo(s,es,day).cash).reduce((a,b)=>a+b,0));
+}
+// Lignes de totaux mensuelles : propres à la trésorerie et affichées seulement
+// si « Ligne de totaux » est activée. Chaque ligne reprend les totaux cumulés
+// des mois précédents, y ajoute le mois affiché et donne le solde de fin de mois.
+function entriesMonthRows(list,id,cols,colTd){
+    let asc=[...list].filter(r=>entryDate(r)).sort((a,b)=>entryDate(a).localeCompare(entryDate(b)));
+    let cumCredit=0,cumDebit=0,byMonth=new Map();
+    asc.forEach(r=>{
+        let ym=entryDate(r).slice(0,7),amt=Math.abs(entrySigned(r));
+        if(!byMonth.has(ym))byMonth.set(ym,{credit:0,debit:0,count:0,last:entryDate(r),cumCredit:0,cumDebit:0});
+        let m=byMonth.get(ym);
+        m.last=entryDate(r);m.count+=1;
+        if(r.direction==='Recette'){cumCredit=r2(cumCredit+amt);m.credit=r2(m.credit+amt);}
+        else{cumDebit=r2(cumDebit+amt);m.debit=r2(m.debit+amt);}
+        m.cumCredit=cumCredit;m.cumDebit=cumDebit;
+    });
+    let out={};
+    byMonth.forEach((m,ym)=>{
+        let bal=cashAtDate(id,m.last),net=r2(m.cumCredit-m.cumDebit);
+        let cells={
+            label:'<strong>Totaux au '+date(m.last)+'</strong><span class="cell-sub">'+esc(monthTitle(ym))+' · mois : +'+money(m.credit,2)+' / −'+money(m.debit,2)+'</span>',
+            date:'<span class="muted">'+date(m.last)+'</span>',
+            category:'',
+            credit:'<span class="green">'+money(m.cumCredit,2)+'</span>',
+            debit:'<span class="red">'+money(m.cumDebit,2)+'</span>',
+            solde:'<strong class="'+(bal<0?'red':'')+'">'+money(bal,2)+'</strong><span class="cell-sub">Solde au '+date(m.last)+'</span>',
+            amount:'<strong class="'+(net<0?'red':'green')+'">'+money(net,2)+'</strong>',
+            sci:''
+        };
+        out[ym]='<tr class="month-total-row">'+cols.map(c=>colTd(c,cells[c.id]||'')).join('')+'<td class="align-right"><span class="pill gold">Cumul</span></td></tr>';
+    });
+    return out;
+}
 function listing(kind,id){let list=filtered(kind,id);
 if(kind==='properties'){if(!list.length)return empty('Aucun élément à afficher',query||filter||scope?'Essayez un autre filtre.':'Ajoutez vos premières données pour compléter cet espace.',!query&&!filter?addBtn(kind,'Ajouter un élément'):'');return `<div class="property-grid">${list.map(r=>`<div class="panel property-card"><div class="property-cover ${r.photo?'has-photo':''}">${r.photo?`<img class="property-cover-img" src="${esc(r.photo)}" style="object-position:${photoPosition(r)}" alt="Photo de ${esc(r.name)}">`:icon('building')}${badge(r.status)}</div><div class="row between"><h3>${esc(r.name)}</h3>${actions(r)}</div><p class="sub" style="margin-top:5px">${esc(r.address)}</p><div class="property-metrics"><div><small>Valeur estimée</small><strong>${money(r.value)}</strong></div><div><small>Surface</small><strong>${num(r.surface)} m²</strong></div><div><small>DPE</small><strong style="color:${['F','G'].includes(r.dpe)?'var(--red)':'var(--green)'}">${esc(r.dpe||'—')}</strong></div></div></div>`).join('')}</div>`;}
 if(kind==='documents')list=list.filter(inDocFolder);
-let cols=getTableColumns(kind).filter(c=>c.visible&&!(id&&c.id==='sci'));
-let v=tableView(kind);
-let gearTh=`<th class="align-right col-settings-th"><button type="button" class="ghost icon-only table-gear-btn" data-table-config="${kind}" title="Réglages du tableau" aria-label="Réglages du tableau">${icon('settings')}</button></th>`;
+let tkey=tableKey(kind);
+let cols=getTableColumns(tkey).filter(c=>c.visible&&!(id&&c.id==='sci'));
+let v=tableView(tkey);
+let gearTh=`<th class="align-right col-settings-th"><button type="button" class="ghost icon-only table-gear-btn" data-table-config="${tkey}" title="Réglages du tableau" aria-label="Réglages du tableau">${icon('settings')}</button></th>`;
 let numberCol=c=>['amount','credit','debit','solde'].includes(c.id);
 let thClass=c=>[c.id==='society'?'col-society':'',numberCol(c)?'align-right':''].filter(Boolean).join(' ');
 let colTh=c=>`<th${thClass(c)?` class="${thClass(c)}"`:''}>${esc(c.label)}</th>`;
 let colTd=(c,val)=>`<td${thClass(c)?` class="${thClass(c)}"`:''}>${val}</td>`;
-let wrapCls=`panel table-wrap tv-${v.density}${v.fit?' tv-fit':''}${v.sticky?' tv-sticky':''}`;
+let wrapCls=`panel table-wrap ${tableWrapClass(v)}`;
 if(!list.length)return `${kind==='documents'?docFolderBar():''}<div class="${wrapCls}"><table><thead><tr>${cols.map(colTh).join('')}${gearTh}</tr></thead></table>${empty('Aucun élément à afficher',query||filter||scope||(kind==='documents'&&docYear)?'Essayez un autre filtre.':'Ajoutez vos premières données pour compléter cet espace.',!query&&!filter?addBtn(kind,'Ajouter un élément'):'')}</div>`;
 let totalShares=kind==='partners'?rows('partners',id).reduce((s,r)=>s+Number(r.shares||0),0):0;
 let ledger=kind==='entries'?ledgerBalances(id):null;
-let rowsHtml=list.map(r=>{
+let rowParts=list.map(r=>{
     let cellMap={},act='';
     if(kind==='entries'){
         let bal=ledger.get(r.id)||{balance:0};
@@ -9078,7 +9179,19 @@ let rowsHtml=list.map(r=>{
     else if(kind==='tasks'){let remDates=r.reminders_enabled&&Array.isArray(r.reminders)?r.reminders:[];cellMap={name:`<strong>${esc(r.name)}</strong>${r.important?' <span class="pill red" style="margin-left:6px">Important</span>':''}${remDates.length?`<span class="cell-sub">${remDates.length} rappel${remDates.length>1?'s':''} · ${remDates.map(date).join(', ')}</span>`:''}`,sci:esc(sciname(r.sci)),due:`<span class="${r.due<today()&&r.status!=='Terminé'?'red':''}">${date(r.due)}</span>`,category:esc(r.category),status:badge(r.status)};act=actions(r,r.status!=='Terminé'?`<button data-complete="${r.id}" title="Marquer comme terminé">${icon('check')}</button>`:'');}
     else if(kind==='documents'){let folder=resolveDocFolder(r);cellMap={name:`${icon('file')} <span style="vertical-align:super;margin-left:6px">${esc(r.name)}</span>`,sci:esc(sciname(r.sci)),category:esc(r.category),folder:folder?`<span class="pill" title="${esc(docFolderPath(folder,r.sci))}">${icon('folder')} ${esc(docFolderPath(folder,r.sci))}</span>`:'<span class="muted">Sans dossier</span>',date:date(r.date),file:r.size?num(r.size/1024)+' Ko':'Note seule'};act=`<div class="actions"><button data-document-preview="${r.id}" title="Ouvrir l’aperçu" aria-label="Ouvrir l’aperçu de ${esc(r.name)}">${icon('search')}</button>${r.size?`<button data-document="${r.id}" title="Télécharger le document" aria-label="Télécharger ${esc(r.name)}">${icon('download')}</button>`:''}<button data-edit="${r.id}" title="Modifier" aria-label="Modifier ${esc(r.name)}">${icon('edit')}</button><button data-delete="${r.id}" title="Supprimer" aria-label="Supprimer ${esc(r.name)}">${icon('trash')}</button></div>`;}
     return `<tr${kind==='documents'?` class="doc-row" data-doc-open="${r.id}" title="Ouvrir l’aperçu de ${esc(r.name)}"`:''}>${cols.map(c=>colTd(c,cellMap[c.id]??'')).join('')}<td>${act}</td></tr>`;
-}).join('');
+});
+let rowsHtml=rowParts.join('');
+// Ligne de totaux en fin de mois : uniquement dans la trésorerie, uniquement
+// lorsque l'option « Ligne de totaux » est activée pour ce tableau.
+if(kind==='entries'&&v.totals&&list.length){
+    let monthRows=entriesMonthRows(list,id,cols,colTd),parts=[],lastYm=null;
+    list.forEach((r,ix)=>{
+        let ym=(entryDate(r)||'').slice(0,7);
+        if(ym!==lastYm){if(monthRows[ym])parts.push(monthRows[ym]);lastYm=ym;}
+        parts.push(rowParts[ix]);
+    });
+    rowsHtml=parts.join('');
+}
 let foot='';
 if(v.totals&&list.length&&['entries','calls'].includes(kind)){
     let totals={};
@@ -9213,10 +9326,182 @@ function manageDeletions(){
         }catch(e){modalError(e);}
     };
 }
+// --- Bilan de la société ---------------------------------------------------
+// Le bilan est construit uniquement avec les données de la société courante :
+// trésorerie (écritures), biens (valeur estimée), emprunts déclarés, appels de
+// loyers et associés. Aucune ligne n'est inventée : l'écart d'équilibre est
+// affiché et expliqué au lieu d'être masqué par une écriture de complaisance.
+const BALANCE_FINANCING_IN=new Set(['Apport associé','Emprunt (capital + intérêts)','Dépôt de garantie']);
+const BALANCE_FINANCING_OUT=new Set(['Remboursement associé','Emprunt (capital + intérêts)','Apport associé']);
+const BALANCE_DEPOSIT='Dépôt de garantie';
+let balanceView={mode:'year',year:0,start:'',end:''};
+function balanceYears(s){
+    let set=new Set(availableYears(s.id));
+    let y0=Number(String(s.opening_date||'').slice(0,4));
+    if(y0)set.add(y0);
+    set.add(new Date().getFullYear());
+    return [...set].filter(y=>y>1900).sort((a,b)=>b-a);
+}
+function balancePeriod(s){
+    let years=balanceYears(s);
+    let pref=activeYear();
+    let year=balanceView.year&&years.includes(balanceView.year)?balanceView.year:(years.includes(pref)?pref:(years[0]||new Date().getFullYear()));
+    if(balanceView.mode==='custom'&&balanceView.start&&balanceView.end){
+        let start=balanceView.start,end=balanceView.end;
+        if(start>end){let t=start;start=end;end=t;}
+        return {mode:'custom',year,start,end,label:'du '+date(start)+' au '+date(end)};
+    }
+    let start=year+'-01-01',end=year+'-12-31';
+    if(end>today())end=today();
+    return {mode:'year',year,start,end,label:'exercice '+year+' · du '+date(start)+' au '+date(end)};
+}
+function balancePaidAsOf(call,end){
+    return r2(rows('entries',call.sci).filter(e=>e.call_id===call.id&&entryDate(e)&&entryDate(e)<=end)
+        .reduce((a,e)=>a+entrySigned(e),0));
+}
+function balanceModel(s,period){
+    let entries=rows('entries',s.id).filter(r=>entryDate(r));
+    let catOf=r=>{let c=String(r.category||'').trim();return c||'Autre';};
+    let inP=r=>entryDate(r)>=period.start&&entryDate(r)<=period.end;
+    let addTo=(map,key,amt)=>map.set(key,r2((map.get(key)||0)+amt));
+    let products=new Map(),charges=new Map(),finIn=new Map(),finOut=new Map();
+    entries.filter(inP).forEach(r=>{
+        let amt=r2(Math.abs(entrySigned(r))),c=catOf(r);
+        if(r.direction==='Recette'){
+            if(BALANCE_FINANCING_IN.has(c))addTo(finIn,c,amt);else addTo(products,c,amt);
+        }else{
+            if(BALANCE_FINANCING_OUT.has(c))addTo(finOut,c,amt);else addTo(charges,c,amt);
+        }
+    });
+    let sum=m=>r2([...m.values()].reduce((a,b)=>a+b,0));
+    let totalProducts=sum(products),totalCharges=sum(charges),result=r2(totalProducts-totalCharges);
+    // Report à nouveau reconstitué : résultats des périodes antérieures.
+    let prior=0;
+    entries.filter(r=>entryDate(r)<period.start).forEach(r=>{
+        let amt=Math.abs(entrySigned(r)),c=catOf(r);
+        if(r.direction==='Recette'){if(!BALANCE_FINANCING_IN.has(c))prior+=amt;}
+        else if(!BALANCE_FINANCING_OUT.has(c))prior-=amt;
+    });
+    prior=r2(prior);
+    // Trésorerie et construction du solde, avec les mêmes règles que le solde
+    // calculé de l'application (solde d'ouverture + mouvements datés).
+    let opening=toNum(s.opening),openingDate=String(s.opening_date||'').slice(0,10);
+    let kept=entries.filter(r=>entryDate(r)<=period.end&&(!openingDate||opening===0||entryDate(r)>=openingDate));
+    let beforeMoves=r2(kept.filter(r=>entryDate(r)<period.start).reduce((a,r)=>a+entrySigned(r),0));
+    let periodMoves=r2(kept.filter(r=>entryDate(r)>=period.start).reduce((a,r)=>a+entrySigned(r),0));
+    let cash=sciCashInfo(s,entries,period.end).cash;
+    // Créances : loyers échus non encaissés à la date de clôture.
+    let receivables=r2(rows('calls',s.id).filter(c=>c.due&&String(c.due).slice(0,10)<=period.end).reduce((a,c)=>{
+        let rest=r2(toNum(c.rent)+toNum(c.charges)-balancePaidAsOf(c,period.end));
+        return a+Math.max(0,rest);
+    },0));
+    // Immobilisations : valeur estimée des biens rattachés à la société.
+    let props=rows('properties',s.id);
+    let assets=r2(props.reduce((a,p)=>a+toNum(p.value),0));
+    let loans=rows('loans',s.id);
+    let loanTotal=r2(loans.reduce((a,l)=>a+toNum(l.balance),0));
+    let loanDates=[...new Set(loans.map(l=>String(l.balance_date||'').slice(0,10)).filter(Boolean))].sort();
+    let capital=r2(toNum(s.capital));
+    let cca=r2(rows('partners',s.id).reduce((a,p)=>a+toNum(p.cca),0));
+    let deposits=r2(entries.filter(r=>entryDate(r)<=period.end&&catOf(r)===BALANCE_DEPOSIT).reduce((a,r)=>a+entrySigned(r),0));
+    let actif=[
+        {code:'AJ',label:'Immobilisations corporelles',detail:props.length+' bien'+(props.length>1?'s':'')+' · valeur estimée',amount:assets},
+        {code:'BK',label:'Créances · loyers échus non encaissés',detail:'au '+date(period.end),amount:receivables},
+        {code:'BU',label:'Disponibilités · trésorerie',detail:'solde calculé au '+date(period.end),amount:cash}
+    ];
+    let passif=[
+        {code:'DA',label:'Capital social',detail:'fiche société',amount:capital},
+        {code:'DJ',label:'Report à nouveau',detail:'résultats antérieurs au '+date(period.start),amount:prior},
+        {code:'DL',label:'Résultat de la période',detail:'produits − charges',amount:result},
+        {code:'DS',label:'Emprunts et dettes financières',detail:loanDates.length?'situation au '+loanDates.join(', '):'aucun emprunt déclaré',amount:loanTotal},
+        {code:'DU',label:'Comptes courants d’associés',detail:'associés',amount:cca},
+        {code:'DZ',label:'Dépôts de garantie reçus',detail:'locataires',amount:deposits}
+    ];
+    let totalActif=r2(actif.reduce((a,l)=>a+l.amount,0));
+    let totalPassif=r2(passif.reduce((a,l)=>a+l.amount,0));
+    let gap=r2(totalActif-totalPassif);
+    return {period,products,charges,finIn,finOut,totalProducts,totalCharges,result,prior,
+        opening,openingDate,beforeMoves,periodMoves,cash,receivables,assets,props,
+        loans,loanTotal,loanDates,capital,cca,deposits,actif,passif,totalActif,totalPassif,gap};
+}
+function balanceRows(list){
+    if(!list.length)return '<tr><td colspan="2" class="muted">Aucun mouvement sur la période.</td></tr>';
+    return list.map(([label,amount])=>`<tr><td>${esc(label)}</td><td class="align-right">${money(amount,2)}</td></tr>`).join('');
+}
+// Présentation légale du bilan : brut, amortissements et net à l'actif ;
+// rubriques et montants au passif. Une seule valeur par poste (aucun
+// amortissement n'est saisi), d'où un net égal au brut.
+function balanceTable(sections,withAmort,totalLabel){
+    let colspan=withAmort?4:2;
+    let head=withAmort?'<th class="align-right">Brut</th><th class="align-right">Amortissements</th><th class="align-right">Net</th>':'<th class="align-right">Montant</th>';
+    let amountCells=(amount,bold)=>withAmort
+        ?`<td class="align-right">${bold?'<strong>':''}${money(amount,2)}${bold?'</strong>':''}</td><td class="align-right muted">—</td><td class="align-right">${bold?'<strong>':''}${money(amount,2)}${bold?'</strong>':''}</td>`
+        :`<td class="align-right">${bold?'<strong>':''}${money(amount,2)}${bold?'</strong>':''}</td>`;
+    let grand=0,body='';
+    sections.forEach(sec=>{
+        body+=`<tr><td colspan="${colspan}" class="sub"><strong>${esc(sec.title)}</strong></td></tr>`;
+        (sec.lines||[]).forEach(l=>{
+            grand=r2(grand+l.amount);
+            body+=`<tr><td>${sec.code!==false?`<strong>${esc(l.code)}</strong> · `:''}${esc(l.label)}<span class="cell-sub">${esc(l.detail||'')}</span></td>${amountCells(l.amount,false)}</tr>`;
+        });
+        if(sec.total){
+            let sub=r2((sec.lines||[]).reduce((a,l)=>a+l.amount,0));
+            body+=`<tr><td><strong>${esc(sec.total)}</strong></td>${amountCells(sub,true)}</tr>`;
+        }
+    });
+    let foot=totalLabel?`<tfoot><tr><td><strong>${esc(totalLabel)}</strong></td>${amountCells(grand,true)}</tr></tfoot>`:'';
+    return `<div class="table-wrap"><table><thead><tr><th>Poste</th>${head}</tr></thead><tbody>${body}</tbody>${foot}</table></div>`;
+}
+function balancePage(s){
+    let period=balancePeriod(s),m=balanceModel(s,period),years=balanceYears(s);
+    let gapOk=Math.abs(m.gap)<0.005;
+    let custom=period.mode==='custom';
+    let yearOptions=years.map(y=>`<option value="${y}" ${!custom&&y===period.year?'selected':''}>Exercice ${y}</option>`).join('');
+    let controls=`<div class="row gap8 wrap" style="margin-bottom:16px"><label class="sub" for="balance-year">Période du bilan</label><select id="balance-year" style="width:auto;min-width:190px">${yearOptions}<option value="custom" ${custom?'selected':''}>Période personnalisée</option></select>${custom?`<input id="balance-start" type="date" value="${esc(period.start)}" aria-label="Début de la période"><span class="muted">→</span><input id="balance-end" type="date" value="${esc(period.end)}" aria-label="Fin de la période">`:''}<span class="pill gold">${esc(period.label)}</span><span class="pill">Clôture statutaire ${esc(s.closing||'31/12')}</span></div>`;
+    let resultColor=m.result<0?'red':'green';
+    let cards=`<div class="settings-grid" style="margin-bottom:20px"><div class="panel"><div class="panel-body"><div class="eyebrow">Total actif</div><div style="font-size:24px;margin-top:6px">${money(m.totalActif,2)}</div><p class="sub" style="margin-top:6px">Biens ${money(m.assets,2)} · créances ${money(m.receivables,2)} · trésorerie ${money(m.cash,2)}</p></div></div><div class="panel"><div class="panel-body"><div class="eyebrow">Total passif</div><div style="font-size:24px;margin-top:6px">${money(m.totalPassif,2)}</div><p class="sub" style="margin-top:6px">Capitaux propres ${money(r2(m.capital+m.prior+m.result),2)} · dettes ${money(r2(m.loanTotal+Math.max(0,m.cca)+m.deposits),2)}</p></div></div></div>`;
+    let actifTable=balanceTable([{title:'Actif immobilisé',lines:m.actif.slice(0,1)},{title:'Actif circulant',lines:m.actif.slice(1)}],true,'Total de l’actif');
+    let passifTable=balanceTable([{title:'Capitaux propres',lines:m.passif.slice(0,3),total:'DP · Total des capitaux propres'},{title:'Dettes',lines:m.passif.slice(3),total:'EA · Total des dettes'}],false,'Total du passif');
+    let produits=[...m.products.entries()].sort((a,b)=>b[1]-a[1]);
+    let charges=[...m.charges.entries()].sort((a,b)=>b[1]-a[1]);
+    let resultatTable=`<div class="table-wrap"><table><thead><tr><th>Compte de résultat</th><th class="align-right">Montant</th></tr></thead><tbody>
+        <tr><td colspan="2" class="sub"><strong>Produits</strong></td></tr>${balanceRows(produits)}
+        <tr><td><strong>Total des produits</strong></td><td class="align-right"><strong class="green">${money(m.totalProducts,2)}</strong></td></tr>
+        <tr><td colspan="2" class="sub"><strong>Charges</strong></td></tr>${balanceRows(charges)}
+        <tr><td><strong>Total des charges</strong></td><td class="align-right"><strong class="red">${money(m.totalCharges,2)}</strong></td></tr>
+        </tbody><tfoot><tr><td><strong>Résultat de la période</strong></td><td class="align-right"><strong class="${resultColor}">${money(m.result,2)}</strong></td></tr></tfoot></table></div>`;
+    let finIn=[...m.finIn.entries()],finOut=[...m.finOut.entries()];
+    let financing=(finIn.length||finOut.length)?`<div class="notice" style="margin-top:14px"><strong>Opérations de financement exclues du résultat</strong><ul style="margin:9px 0 0;padding-left:18px;line-height:1.65">${finIn.map(([k,v])=>`<li>${esc(k)} encaissé : ${money(v,2)}</li>`).join('')}${finOut.map(([k,v])=>`<li>${esc(k)} décaissé : ${money(v,2)}</li>`).join('')}</ul></div>`:'';
+    let construction=`<div class="table-wrap"><table><tbody>
+        <tr><td>Solde d’ouverture déclaré${m.openingDate?' au '+date(m.openingDate):''}</td><td class="align-right">${money(m.opening,2)}</td></tr>
+        <tr><td>Mouvements antérieurs à la période</td><td class="align-right">${money(m.beforeMoves,2)}</td></tr>
+        <tr><td>Mouvements de la période</td><td class="align-right">${money(m.periodMoves,2)}</td></tr>
+        </tbody><tfoot><tr><td><strong>Trésorerie au ${date(m.period.end)}</strong></td><td class="align-right"><strong class="${m.cash<0?'red':''}">${money(m.cash,2)}</strong></td></tr></tfoot></table></div>`;
+    let compare=years.slice(0,5).map(y=>{
+        let start=y+'-01-01',end=y+'-12-31';if(end>today())end=today();
+        let mm=balanceModel(s,{start,end,label:''});
+        return `<tr><td><strong>${y}</strong><span class="cell-sub">du ${date(start)} au ${date(end)}</span></td><td class="align-right">${money(mm.totalProducts,2)}</td><td class="align-right">${money(mm.totalCharges,2)}</td><td class="align-right"><span class="${mm.result<0?'red':'green'}">${money(mm.result,2)}</span></td><td class="align-right">${money(mm.cash,2)}</td><td class="align-right">${money(mm.totalActif,2)}</td><td class="align-right">${money(mm.totalPassif,2)}</td><td class="align-right">${Math.abs(mm.gap)<0.005?'<span class="green">0,00 €</span>':'<span class="red">'+money(mm.gap,2)+'</span>'}</td></tr>`;
+    }).join('');
+    return `${controls}${cards}
+    <div class="settings-grid" style="margin-bottom:20px">
+      <div class="panel"><div class="panel-head"><h2>Actif</h2><span class="pill">${m.props.length} bien${m.props.length>1?'s':''}</span></div><div class="panel-body">${actifTable}<p class="sub" style="margin-top:12px">Immobilisations reprises à leur valeur estimée ; les amortissements ne sont pas saisis dans Dominis et figurent donc en « — ».</p></div></div>
+      <div class="panel"><div class="panel-head"><h2>Passif</h2><span class="pill gold">Capitaux propres ${money(r2(m.capital+m.prior+m.result),2)}</span></div><div class="panel-body">${passifTable}
+        <div class="${gapOk?'notice':'notice'}" style="margin-top:14px;border-left:3px solid ${gapOk?'var(--green)':'var(--red)'}"><strong>${gapOk?'Bilan équilibré':'Écart actif − passif : '+money(m.gap,2)}</strong><p class="sub" style="margin-top:6px">${gapOk?'Le total de l’actif est égal au total du passif.':'Cet écart n’est pas corrigé automatiquement. Il provient des éléments non renseignés (valeur comptable des biens, amortissements, apports, dettes fournisseurs). Complétez la fiche société, les biens et les emprunts pour le réduire.'}</p></div>
+      </div></div>
+    </div>
+    <div class="settings-grid" style="margin-bottom:20px">
+      <div class="panel"><div class="panel-head"><h2>Compte de résultat</h2><span class="pill">${esc(period.label)}</span></div><div class="panel-body">${resultatTable}${financing}</div></div>
+      <div class="panel"><div class="panel-head"><h2>Construction de la trésorerie</h2></div><div class="panel-body">${construction}<p class="sub" style="margin-top:12px">Le solde de trésorerie suit les mêmes règles que la trésorerie : solde d’ouverture de la société, puis mouvements datés jusqu’au ${date(m.period.end)}. Les mouvements antérieurs au solde d’ouverture sont exclus.</p></div></div>
+    </div>
+    <div class="panel"><div class="panel-head"><h2>Comparaison des exercices</h2><span class="sub">Un bilan par année existante</span></div><div class="panel-body"><div class="table-wrap"><table><thead><tr><th>Exercice</th><th class="align-right">Produits</th><th class="align-right">Charges</th><th class="align-right">Résultat</th><th class="align-right">Trésorerie</th><th class="align-right">Actif</th><th class="align-right">Passif</th><th class="align-right">Écart</th></tr></thead><tbody>${compare}</tbody></table></div>
+      <p class="sub" style="margin-top:12px">Chaque colonne reprend les règles du bilan affiché : produits et charges hors opérations de financement, trésorerie à la clôture, créances de loyers et valeur estimée des biens. Le format (actif brut / amortissements / net, passif par rubriques) suit la présentation légale du bilan ; les rubriques sans donnée ne sont pas affichées pour ne pas inventer de montant.</p>
+    </div></div>`;
+}
+
 function identity(s){let openTxt=s.opening&&Number(s.opening)!==0?money(s.opening,2)+(s.opening_date?' au '+date(s.opening_date):''):'—';return `<div class="settings-grid"><div class="panel"><div class="panel-head"><h2>Identité de la société</h2><button data-action="edit-sci">${icon('edit')} Modifier</button></div><div class="panel-body info-grid">${[['Dénomination',s.name],['SIREN',s.siren||'Non renseigné'],['Gérant',s.manager||'Non renseigné'],['Siège social',s.address||'Non renseigné'],['Capital social',money(s.capital,2)],['Régime fiscal',s.regime||'IR'],['Clôture de l’exercice',s.closing||'31/12'],['Solde d’ouverture',openTxt]].map(([k,v])=>`<div class="info-item"><label>${k}</label><span>${esc(v)}</span></div>`).join('')}<div class="info-item" style="grid-column:1/-1"><label>Notes de gestion</label><span style="white-space:pre-wrap">${esc(s.notes||'Aucune note.')}</span></div></div></div><div class="stack"><div class="panel"><div class="panel-head"><h2>Repères de gestion · ${esc(s.regime||'IR')}</h2></div><div class="panel-body stack"><p class="sub">${s.regime==='IS'?'Préparer la déclaration 2065 et ses annexes avec une comptabilité d’engagement, les immobilisations et les amortissements. Dominis ne produit pas de liasse fiscale ni de FEC.':'Préparer les informations de la déclaration 2072 selon votre situation. Les recettes et dépenses enregistrées ne déterminent pas automatiquement le résultat foncier imposable.'}</p><p class="sub">Le gérant doit rendre compte annuellement de sa gestion aux associés (article 1856 du Code civil). Les modalités de décision dépendent notamment des statuts.</p><button data-add="tasks">${icon('calendar')} Ajouter une échéance de suivi</button><button data-action="annual-report">${icon('file')} Préparer une synthèse annuelle</button><p class="sub">Les dates fiscales sont à vérifier chaque année. Aucun calendrier légal automatique n’est imposé par l’application.</p></div></div><div class="panel"><div class="panel-body"><h3 class="red">Suppression de la SCI</h3><p class="sub" style="margin:8px 0 15px">Cette action supprime la société et toutes ses données liées. Exportez une sauvegarde complète auparavant.</p><button class="danger" data-action="delete-sci">${icon('trash')} Supprimer cette SCI</button><button class="danger" data-action="manage-deletions" style="margin-top:8px">${icon('trash')} Gérer la suppression</button><p class="compact-note" style="margin-top:10px">Vider une seule page de cette SCI, sans toucher aux autres sociétés.</p></div></div></div></div>`;}
 function settingsGeneral(){return `<div class="settings-grid"><div class="stack"><section class="panel"><div class="panel-head"><h2>Apparence & préférences</h2>${icon('sun')}</div><div class="panel-body"><div class="setting-row"><div><h3>Thème de l’interface</h3><p>Le même soin, de jour comme de nuit.</p></div><div class="theme-choice"><button data-theme="dark" class="${S.settings.theme==='dark'?'active':''}">${icon('moon')} Sombre</button><button data-theme="light" class="${S.settings.theme==='light'?'active':''}">${icon('sun')} Clair</button></div></div><div class="setting-row"><div><h3>Navigation compacte</h3><p>Une barre latérale discrète, plus d’espace.</p></div><button class="toggle ${S.settings.collapsed?'on':''}" data-action="collapse" aria-label="Navigation compacte" aria-pressed="${!!S.settings.collapsed}"></button></div><div class="setting-row"><div><h3>Nom de votre espace</h3><p>Affiché dans la barre latérale.</p></div><button data-action="rename-space">${icon('edit')} Modifier</button></div><div class="setting-row"><div><h3>Sauvegarde à la fermeture</h3><p>Copie complète dans le dossier sauvegardes/.</p></div><button class="toggle ${S.settings.auto_backup?'on':''}" data-action="auto-backup" aria-label="Sauvegarde à la fermeture" aria-pressed="${!!S.settings.auto_backup}"></button></div><div class="setting-row"><div><h3>Sauvegarde hebdomadaire</h3><p>Copie de data.db au premier lancement de la semaine ; deux fichiers maximum dans auto-save/.</p></div><button class="toggle ${S.settings.weekly_auto_save?'on':''}" data-action="weekly-auto-save" aria-label="Sauvegarde hebdomadaire" aria-pressed="${!!S.settings.weekly_auto_save}"></button></div></div></section><section class="panel"><div class="panel-head"><h2>Ordre de navigation</h2>${icon('panel')}</div><div class="panel-body"><p class="sub">Déplacez les pages avec les flèches. Vos nouvelles SCI apparaissent automatiquement.</p><div class="order-item locked">${icon('grid')} Tableau de bord <span style="margin-left:auto">${icon('lock')}</span></div>${navOrder().map((id,i,a)=>`<div class="order-item">${navIcon(id)}${esc(navName(id))}<div class="actions"><button data-move="${id}" data-dir="-1" ${!i?'disabled':''} title="Monter">${icon('up')}</button><button data-move="${id}" data-dir="1" ${i===a.length-1?'disabled':''} title="Descendre">${icon('down')}</button></div></div>`).join('')}<div class="order-item locked">${icon('settings')} Paramètres <span style="margin-left:auto">${icon('lock')}</span></div><p class="compact-note">Tableau de bord reste en premier, Paramètres en dernier. Quitter est une action distincte.</p></div></section></div><div class="stack"><section class="panel"><div class="panel-head"><h2>Vos données vous appartiennent</h2>${icon('database')}</div><div class="panel-body"><div class="setting-row"><div><h3>Importer des données</h3><p>JSON Dominis, CSV ou Excel (.xlsx) de mouvements multi-SCI.<br>Aperçu et destinations avant validation.</p></div><button data-action="import">${icon('upload')} Importer</button></div><div class="setting-row"><div><h3>Exporter une sélection</h3><p>Choisissez les SCI, les données et le format.</p></div><button data-action="export">${icon('download')} Exporter</button></div><div class="setting-row"><div><h3>Sauvegarde complète</h3><p>Toutes les SCI, pièces jointes et préférences.<br>${S.settings.last_backup?'Dernière : '+new Date(S.settings.last_backup).toLocaleString('fr-FR'):'Aucune sauvegarde manuelle enregistrée.'}</p></div><button class="primary" data-action="backup">${icon('database')} Sauvegarder</button></div><div class="setting-row"><div><h3>Restaurer une sauvegarde</h3><p>Remplace l’ensemble de l’espace. Une copie<br>de sécurité est créée avant restauration.</p></div><button data-action="restore">${icon('clock')} Restaurer</button></div></div></section><section class="panel"><div class="panel-head"><h2>Stockage & confidentialité</h2>${icon('lock')}</div><div class="panel-body stack"><div class="row between"><span class="sub">Base locale</span><span class="pill green"><span class="status-dot"></span>data.db · ${num(S.db_size/1024/1024)} Mo</span></div><p class="sub">Aucune télémétrie. La gestion de vos données fonctionne hors ligne. Seule la vérification des versions contacte GitHub, sans transmettre vos données patrimoniales. Documents, réglages et historique sont stockés dans SQLite. La base n’est pas chiffrée : protégez votre session et vos sauvegardes.</p><p class="sub">Usage local, mono-utilisateur. Ne placez pas une base ouverte sur un partage réseau ou dans une synchronisation cloud.</p>${S.preview?'<div class="notice" style="margin:0">Aperçu hébergé : utilisez des données fictives uniquement. Le téléchargement et les lanceurs sont destinés à l’usage local.</div>':''}</div></section>${S.settings.demo?`<section class="panel"><div class="panel-body"><h3>Données de démonstration</h3><p class="sub" style="margin:8px 0 14px">Efface toutes les données de cet espace démo, y compris vos ajouts. Sauvegardez-les avant de repartir d’un espace vierge.</p><button class="danger" data-action="reset-demo">${icon('trash')} Vider l’espace de démonstration</button></div></section>`:''}</div><section class="panel" style="grid-column:1/-1"><div class="panel-head"><h2>Journal d’activité</h2><span class="sub">80 dernières actions</span></div><div class="panel-body audit-list">${S.audit.map(r=>`<div class="audit-line"><time>${esc(new Date(r.at).toLocaleString('fr-FR'))}</time><strong style="min-width:90px">${esc(r.action)}</strong><span class="muted">${esc(r.detail)}</span></div>`).join('')||'<p class="sub">Aucune action enregistrée.</p>'}</div></section></div>`;}
 function render(){if(!['dashboard','settings',...Object.keys(navs),...S.scis.map(s=>s.id)].includes(page))page='dashboard';yearSelectSeq=0;renderShell();let content='';if(page==='dashboard'){content=head('Votre patrimoine, en perspective.','L’essentiel de vos sociétés, réuni au même endroit.',yearSelect()+exportBtn()+`<button class="primary" data-action="new-sci">${icon('plus')} Nouvelle SCI</button>`,'Tableau de bord général')+(S.scis.length?dashboard():empty('Bienvenue dans votre espace patrimonial','Créez votre première SCI. Son espace de gestion apparaîtra automatiquement dans la navigation.',`<button class="primary" data-action="new-sci">${icon('plus')} Créer ma première SCI</button>`));}
-else if(page==='settings')content=settingsPage();else if(navs[page])content=listPage({treasury:'entries',agenda:'tasks',documents:'documents'}[page]);else{let s=currentSCI();content=head(s.name,(s.city||s.address||'Société civile immobilière')+' · Régime '+(s.regime||'IR'),yearSelect(s.id)+`<button data-action="edit-sci">${icon('edit')} Société</button>`+`<button class="primary" data-action="quick">${icon('plus')} Ajouter</button>`,'Espace société')+`<nav class="tabs" aria-label="Gestion de la SCI">${tabs.map(([t,n])=>`<button class="tab ${tab===t?'active':''}" data-tab="${t}">${n}</button>`).join('')}</nav>`+(tab==='overview'?dashboard(s.id):tab==='identity'?identity(s):listPage(tab,s.id));}
+else if(page==='settings')content=settingsPage();else if(navs[page])content=listPage({treasury:'entries',agenda:'tasks',documents:'documents'}[page]);else{let s=currentSCI();content=head(s.name,(s.city||s.address||'Société civile immobilière')+' · Régime '+(s.regime||'IR'),yearSelect(s.id)+`<button data-action="edit-sci">${icon('edit')} Société</button>`+`<button class="primary" data-action="quick">${icon('plus')} Ajouter</button>`,'Espace société')+`<nav class="tabs" aria-label="Gestion de la SCI">${tabs.map(([t,n])=>`<button class="tab ${tab===t?'active':''}" data-tab="${t}">${n}</button>`).join('')}</nav>`+(tab==='overview'?dashboard(s.id):tab==='balance'?balancePage(s):tab==='identity'?identity(s):listPage(tab,s.id));}
 const recoveryNotice=S.primary_db_missing?`<div class="notice" role="alert" style="border-left-color:var(--red)"><strong>La base principale data.db était absente.</strong> Dominis a créé une base vide ; les fichiers de auto-save/ ne sont pas utilisés comme base. Avant toute nouvelle saisie, restaurez une copie dans data.db.<div style="margin-top:10px"><button class="danger" data-action="restore">${icon('clock')} Restaurer une sauvegarde</button></div></div>`:'';$('#main').innerHTML=recoveryNotice+content+`<div class="footer"><span>DOMINIS <span style="opacity:.5;margin:0 7px">/</span> Votre patrimoine, en toute clarté.</span><span class="row gap8">${icon('lock')} Enregistrement local · Outil de gestion, hors comptabilité certifiée</span></div>`;updateCount();checkTaskNotifications();}
 function currentListKind(){return navs[page]?{treasury:'entries',agenda:'tasks',documents:'documents'}[page]:tab;}
 function visibleCount(kind,id){let list=filtered(kind,id);if(kind==='documents')list=list.filter(inDocFolder);return list.length}
@@ -9363,8 +9648,11 @@ function quickModal(){openModal('Une action, sans détour',`<div class="checks">
 async function handleAction(a){switch(a){case'collapse':await setPref({collapsed:!S.settings.collapsed});document.body.classList.toggle('collapsed',!!S.settings.collapsed);if(page==='settings')render();break;case'bell':openBellModal();break;case'new-sci':editForm('sci');break;case'edit-sci':editForm('sci',currentSCI());break;case'delete-sci':deletion('sci',page);break;case'manage-deletions':manageDeletions();break;case'close-modal':closeModal();break;case'export':exportModal();break;case'import':importModal();break;case'backup':await settingsQueue;await download(await api('backup',{}),'dominis-sauvegarde-'+today()+'.db');await refresh();notify('Sauvegarde complète téléchargée. Conservez-la sur un support sûr.');break;case'restore':restoreModal();break;case'generate-calls':callsModal();break;case'search':searchModal();break;case'quick':quickModal();break;case'annual-report':annualReport();break;case'doc-folder-reset':await restoreDefaultDocFolders();break;case'doc-folder-new':newDocFolderModal();break;case'quit':await quit();break;case'auto-backup':await setPref({auto_backup:!S.settings.auto_backup});render();break;case'weekly-auto-save':await setPref({weekly_auto_save:!S.settings.weekly_auto_save});render();break;case'rename-space':openModal('Nom de votre espace',field('owner','Nom affiché','text',S.settings.owner),`<button data-action="close-modal">Annuler</button><button class="primary" id="save-owner">Enregistrer</button>`);$('#save-owner').onclick=async()=>{try{let v=$('#f-owner').value.trim();if(!v||v.length>45)throw new Error('Choisissez un nom de 1 à 45 caractères.');await setPref({owner:v});closeModal(true);render();}catch(e){modalError(e)}};break;case'reset-demo':openModal('Repartir d’un espace vierge',`<p class="sub">Toutes les SCI et données de cette démonstration seront supprimées, y compris vos ajouts. Vos préférences d’apparence sont conservées. Créez une sauvegarde avant de continuer.</p><div style="margin-top:15px">${field('confirm-demo','Saisissez EFFACER pour confirmer')}</div>`,`<button data-action="close-modal">Annuler</button><button class="danger" id="reset-confirm">Vider la démonstration</button>`);$('#reset-confirm').onclick=async()=>{try{await api('reset-demo',{confirmation:$('#f-confirm-demo').value});closeModal(true);page='dashboard';await refresh();notify('Votre espace est maintenant vierge.');}catch(e){modalError(e)}};break;}}
 document.addEventListener('click',async ev=>{let el=ev.target.closest('button,[data-nav],[data-doc-open],[data-doc-folder]');if(!el)return;if(Date.now()<folderDragSuppressUntil)return;try{if(updateInstalling)return;if(el.dataset.folderNew){newDocFolderModal(el.dataset.folderParent||'');return;}if(el.dataset.folderRename){renameDocFolderModal(el.dataset.folderRename);return;}if(el.dataset.folderMove){await moveDocFolder(docScope(),el.dataset.folderMove,Number(el.dataset.dir));return;}if(el.dataset.docFolder!==undefined&&el.dataset.docFolder!==null&&el.dataset.docOpen===undefined){docFolder=el.dataset.docFolder;docYear='';renderListing();return;}if(el.dataset.docOpen){await documentPreview(el.dataset.docOpen);return;}if(el.dataset.documentPreview){await documentPreview(el.dataset.documentPreview);return;}if(el.dataset.docZoom){let v=el.dataset.docZoom;if(v==='in')docPreviewStageZoom(docPreviewZoom+0.25);else if(v==='out')docPreviewStageZoom(docPreviewZoom-0.25);else docPreviewStageZoom(Number(v)/100);return;}if(el.dataset.docSheet!==undefined&&el.dataset.docSheet!==null){docPreviewSheetSelect(Number(el.dataset.docSheet));return;}if(el.dataset.macClose){dismissMacNotification(el.dataset.macClose);return;}if(el.dataset.macView){let id=el.dataset.macView,r=rec(id);await markTaskRemindersRead(id);if(r){closeModal(true);navigate(r.sci,'tasks');editForm('tasks',r);}return;}if(el.dataset.bellView){let id=el.dataset.bellView,r=rec(id);await markTaskRemindersRead(id);closeModal(true);if(r){navigate(r.sci,'tasks');editForm('tasks',r);}return;}if(el.dataset.bellRead){await markTaskRemindersRead(el.dataset.bellRead);if($('#bell-modal-body'))openBellModal();return;}if(el.dataset.bellReadAll){for(let r of unreadReminderTasks())await markTaskRemindersRead(r.id);if($('#bell-modal-body'))openBellModal();return;}if(el.dataset.bellAgenda){closeModal(true);navigate('agenda');return;}if(el.dataset.tableConfig){openTableColumnsModal(el.dataset.tableConfig);return;}
 if(el.dataset.tableDensity){await saveTableView(el.dataset.tableKind,{density:el.dataset.tableDensity});refreshTableViewUi(el.dataset.tableKind);return;}
-if(el.dataset.tableOpt){let tk=el.dataset.tableKind,cur=tableView(tk);await saveTableView(tk,{[el.dataset.tableOpt]:!cur[el.dataset.tableOpt]});refreshTableViewUi(tk);return;}if(el.dataset.colToggle){let k=el.dataset.colKind,cid=el.dataset.colToggle,cols=getTableColumns(k),c=cols.find(x=>x.id===cid);if(c){if(c.visible&&cols.filter(x=>x.visible).length<=1)return;c.visible=!c.visible;await saveTableColumns(k,cols);if(k==='entries_preview')render();else renderListing();if($('#col-config-wrap'))$('#col-config-wrap').innerHTML=renderTableColumnsList(k);}return;}if(el.dataset.colMove){let k=el.dataset.colKind,cid=el.dataset.colMove,dir=Number(el.dataset.dir),cols=getTableColumns(k),i=cols.findIndex(x=>x.id===cid),j=i+dir;if(i>=0&&j>=0&&j<cols.length){[cols[i],cols[j]]=[cols[j],cols[i]];await saveTableColumns(k,cols);if(k==='entries_preview')render();else renderListing();if($('#col-config-wrap'))$('#col-config-wrap').innerHTML=renderTableColumnsList(k);}return;}if(el.dataset.colReset){let k=el.dataset.colReset,all={...(S.settings.table_columns||{})};delete all[k];await setPref({table_columns:all});if(k==='entries_preview')render();else renderListing();if($('#col-config-wrap'))$('#col-config-wrap').innerHTML=renderTableColumnsList(k);return;}if(el.dataset.settingsSection){settingsSection=el.dataset.settingsSection;render();return;}if(el.dataset.updateAction){let a=el.dataset.updateAction;if(a==='check'){updateInfo=await (await api('update/check',{})).json();render();}else if(a==='offer')showUpdateOffer();else if(a==='install')await beginUpdate();else if(a==='force')await forceUpdate();else if(a==='force-install')await beginUpdate(true);return;}if(el.dataset.nav){navigate(el.dataset.nav,el.dataset.tab||'overview');return;}if(el.dataset.tab){tab=el.dataset.tab;query='';filter='';setPref({last_tab:tab});render();return;}if(el.dataset.action){await handleAction(el.dataset.action);return;}if(el.dataset.add){editForm(el.dataset.add);return;}if(el.dataset.edit){let r=rec(el.dataset.edit);editForm(r.kind,r);return;}if(el.dataset.delete){let r=rec(el.dataset.delete);deletion(r.kind,r.id);return;}if(el.dataset.pay){let c=rec(el.dataset.pay);editForm('entries',null,{sci:c.sci,label:'Loyer '+label(rec(c.lease_id))+' · '+c.period,call_id:c.id,amount:due(c),direction:'Recette',category:'Loyers'});$('#f-sci').value=c.sci;$('#f-sci').disabled=true;return;}if(el.dataset.receipt){receipt(el.dataset.receipt);return;}if(el.dataset.document){let r=rec(el.dataset.document);await download(await api('document?id='+r.id),r.filename||'document');return;}if(el.dataset.complete){let r=rec(el.dataset.complete);dismissMacNotification(r.id);let reached=taskReminderDates(r).filter(d=>d&&d<=today());let read=[...new Set([...(Array.isArray(r.read_reminders)?r.read_reminders:[]),...reached])];await api('save',{kind:r.kind,id:r.id,sci:r.sci,data:{...r,status:'Terminé',read_reminders:read}});await refresh();notify('Échéance terminée.');return;}if(el.dataset.theme){await setPref({theme:el.dataset.theme});render();return;}if(el.dataset.move){let o=navOrder(),i=o.indexOf(el.dataset.move),j=i+Number(el.dataset.dir);if(j>=0&&j<o.length){[o[i],o[j]]=[o[j],o[i]];await setPref({order:o});render();}return;}if(el.dataset.searchGo){let id=el.dataset.searchGo,kind=el.dataset.searchKind;closeModal(true);if(kind==='sci')navigate(id);else{let r=rec(id);navigate(r.sci,kind);editForm(kind,r);}return;}}catch(e){notify(e.message,true);}});
+if(el.dataset.tableOpt){let tk=el.dataset.tableKind,cur=tableView(tk);await saveTableView(tk,{[el.dataset.tableOpt]:!cur[el.dataset.tableOpt]});refreshTableViewUi(tk);return;}if(el.dataset.colToggle){let k=el.dataset.colKind,cid=el.dataset.colToggle,cols=getTableColumns(k),c=cols.find(x=>x.id===cid);if(c){if(c.visible&&cols.filter(x=>x.visible).length<=1)return;c.visible=!c.visible;await saveTableColumns(k,cols);if(tableKindOf(k)==='entries_preview')render();else renderListing();if($('#col-config-wrap'))$('#col-config-wrap').innerHTML=renderTableColumnsList(k);}return;}if(el.dataset.colMove){let k=el.dataset.colKind,cid=el.dataset.colMove,dir=Number(el.dataset.dir),cols=getTableColumns(k),i=cols.findIndex(x=>x.id===cid),j=i+dir;if(i>=0&&j>=0&&j<cols.length){[cols[i],cols[j]]=[cols[j],cols[i]];await saveTableColumns(k,cols);if(tableKindOf(k)==='entries_preview')render();else renderListing();if($('#col-config-wrap'))$('#col-config-wrap').innerHTML=renderTableColumnsList(k);}return;}if(el.dataset.colReset){// Réinitialisation explicite : ce tableau retrouve l'ordre et la visibilité par défaut, sans toucher aux autres tableaux (même ceux du même type).
+let k=el.dataset.colReset,all={...(S.settings.table_columns||{})};all[k]={order:[],hidden:[]};await setPref({table_columns:all});if(tableKindOf(k)==='entries_preview')render();else renderListing();if($('#col-config-wrap'))$('#col-config-wrap').innerHTML=renderTableColumnsList(k);return;}if(el.dataset.settingsSection){settingsSection=el.dataset.settingsSection;render();return;}if(el.dataset.updateAction){let a=el.dataset.updateAction;if(a==='check'){updateInfo=await (await api('update/check',{})).json();render();}else if(a==='offer')showUpdateOffer();else if(a==='install')await beginUpdate();else if(a==='force')await forceUpdate();else if(a==='force-install')await beginUpdate(true);return;}if(el.dataset.nav){navigate(el.dataset.nav,el.dataset.tab||'overview');return;}if(el.dataset.tab){tab=el.dataset.tab;query='';filter='';setPref({last_tab:tab});render();return;}if(el.dataset.action){await handleAction(el.dataset.action);return;}if(el.dataset.add){editForm(el.dataset.add);return;}if(el.dataset.edit){let r=rec(el.dataset.edit);editForm(r.kind,r);return;}if(el.dataset.delete){let r=rec(el.dataset.delete);deletion(r.kind,r.id);return;}if(el.dataset.pay){let c=rec(el.dataset.pay);editForm('entries',null,{sci:c.sci,label:'Loyer '+label(rec(c.lease_id))+' · '+c.period,call_id:c.id,amount:due(c),direction:'Recette',category:'Loyers'});$('#f-sci').value=c.sci;$('#f-sci').disabled=true;return;}if(el.dataset.receipt){receipt(el.dataset.receipt);return;}if(el.dataset.document){let r=rec(el.dataset.document);await download(await api('document?id='+r.id),r.filename||'document');return;}if(el.dataset.complete){let r=rec(el.dataset.complete);dismissMacNotification(r.id);let reached=taskReminderDates(r).filter(d=>d&&d<=today());let read=[...new Set([...(Array.isArray(r.read_reminders)?r.read_reminders:[]),...reached])];await api('save',{kind:r.kind,id:r.id,sci:r.sci,data:{...r,status:'Terminé',read_reminders:read}});await refresh();notify('Échéance terminée.');return;}if(el.dataset.theme){await setPref({theme:el.dataset.theme});render();return;}if(el.dataset.move){let o=navOrder(),i=o.indexOf(el.dataset.move),j=i+Number(el.dataset.dir);if(j>=0&&j<o.length){[o[i],o[j]]=[o[j],o[i]];await setPref({order:o});render();}return;}if(el.dataset.searchGo){let id=el.dataset.searchGo,kind=el.dataset.searchKind;closeModal(true);if(kind==='sci')navigate(id);else{let r=rec(id);navigate(r.sci,kind);editForm(kind,r);}return;}}catch(e){notify(e.message,true);}});
 document.addEventListener('change',async ev=>{let el=ev.target;try{if(el.classList&&el.classList.contains('year-select')){let v=el.value===YEAR_ALL?YEAR_ALL:Number(el.value);syncYearSelects(el.value);await setPref({year:v});render();}if(el.id==='scope'){scope=el.value;render();}if(el.id==='status-filter'){filter=el.value;renderListing();}if(el.id==='doc-year-filter'){docYear=el.value;renderListing();}
+if(el.id==='balance-year'){let s=currentSCI();if(s){let p=balancePeriod(s);if(el.value==='custom'){balanceView={mode:'custom',year:p.year,start:p.start,end:p.end};}else{balanceView={mode:'year',year:Number(el.value),start:'',end:''};}render();}}
+if(el.id==='balance-start'||el.id==='balance-end'){let s=currentSCI();if(s){let p=balancePeriod(s);balanceView={mode:'custom',year:p.year,start:el.id==='balance-start'?el.value:p.start,end:el.id==='balance-end'?el.value:p.end};render();}}
 if(el.id==='doc-preview-folder'){moveDocToFolder(docPreviewId,el.value);}}catch(e){notify(e.message,true)}});
 document.addEventListener('input',ev=>{if(ev.target.id==='filter-search'){query=ev.target.value;renderListing();}if(ev.target.id==='doc-zoom-range'){docPreviewStageZoom((Number(ev.target.value)||100)/100);}if(ev.target.closest('#modal')&&!['global-search'].includes(ev.target.id)&&!ev.target.closest('#col-config-wrap')&&!ev.target.closest('#bell-modal-body')&&!ev.target.closest('#doc-preview-body'))modalDirty=true;});
 document.addEventListener('submit',ev=>{if(ev.target.id==='edit-form'){ev.preventDefault();submitForm(ev.target);}});
