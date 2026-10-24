@@ -219,15 +219,31 @@ Date | Libellé | Débit | Crédit | Solde
 
 ## Tableaux, synthèses et suppressions ciblées
 
-- **Réglages de tableau** : l’engrenage d’un tableau ouvre une fenêtre
-  **« Réglages du tableau »** qui règle la **densité** (Confort, Compact, Très
-  compact — densité tableur), l’**ajustement à la largeur**, l’**en-tête fixe**,
-  la **ligne de totaux** et les colonnes affichées et leur ordre. Ces réglages
-  sont enregistrés pour chaque tableau. Le panneau graphique est **facultatif et
-  désactivé par défaut** : lorsqu’il est activé, il n’apparaît qu’à côté d’un
-  tableau encore lisible (au moins 1 560 px de fenêtre) et **passe sous le
-  tableau** sinon. Il ne montre jamais deux fois la même donnée : flux mensuels
-  et structure des dépenses, deux graphiques au maximum.
+- **Réglages de tableau, cloisonnés** : l’engrenage d’un tableau ouvre une
+  fenêtre **« Réglages du tableau »** qui règle la **densité** (Confort, Compact,
+  Très compact — densité tableur), l’**ajustement à la largeur**, l’**en-tête
+  fixe**, la **ligne de totaux** et les colonnes affichées et leur ordre.
+  Chaque tableau possède **sa propre clé de réglages** : la trésorerie générale,
+  la trésorerie d’une SCI, les documents, l’échéancier et l’aperçu du tableau de
+  bord sont réglés séparément. Une modification ne s’applique **qu’au tableau
+  modifié** ; la fenêtre rappelle la portée (« Trésorerie · toutes les SCI »,
+  « SCI · Les Oliviers », « Tableau de bord »). Les réglages enregistrés avant
+  ce cloisonnement servent seulement de valeurs de départ : ils ne sont jamais
+  réécrits par un autre tableau. L’aperçu « Dernières opérations » du tableau de
+  bord applique désormais ses propres réglages (ils étaient enregistrés mais
+  jamais appliqués). Le panneau graphique est **facultatif et désactivé par
+  défaut** : lorsqu’il est activé, il n’apparaît qu’à côté d’un tableau encore
+  lisible (au moins 1 560 px de fenêtre) et **passe sous le tableau** sinon. Il
+  ne montre jamais deux fois la même donnée : flux mensuels et structure des
+  dépenses, deux graphiques au maximum.
+- **Ligne de totaux de la trésorerie** : l’option n’existe que pour la
+  trésorerie et les loyers. Activée, elle conserve les **totaux en bas** du
+  tableau **et** insère, à chaque fin de mois, une **ligne de totaux** qui
+  reprend les totaux cumulés depuis la première opération affichée, y ajoute le
+  mois et indique le **solde de fin de mois** ; le libellé rappelle les montants
+  du mois. Désactivée, **aucune ligne de totaux** n’est affichée, ni en bas, ni
+  dans le tableau. Les lignes mensuelles n’existent donc **que dans la
+  trésorerie**.
 - **Synthèse annuelle en PDF** : deux présentations au choix — **Classique**
   (tableaux détaillés) ou **Graphique** (indicateurs, flux mensuels, répartition
   des dépenses) — puis, dans les deux cas, patrimoine, associés et **analyse
@@ -248,6 +264,47 @@ Date | Libellé | Débit | Crédit | Solde
   leurs appels et encaissements, vider les loyers leurs encaissements. Les
   autres sociétés, les préférences et les documents non concernés restent
   intacts, et chaque suppression est inscrite au journal d’activité.
+
+## Bilan de la SCI
+
+L’onglet **Bilan** se place **entre « Documents » et « Société »** dans l’espace
+d’une SCI. Il présente la présentation légale du bilan (actif brut /
+amortissements / net, passif par rubriques) et un compte de résultat, construits
+avec les données de **la société affichée** :
+
+- **Période** : une **année existante** (exercice complet, arrêté à ce jour pour
+  l’année en cours) ou une **période personnalisée** (deux dates).
+- **Actif** : immobilisations corporelles (valeur estimée des biens),
+  créances (loyers échus non encaissés à la date de clôture), disponibilités
+  (solde de trésorerie calculé au même titre que l’onglet Trésorerie).
+- **Passif** : capital social, report à nouveau (résultats antérieurs),
+  résultat de la période, emprunts déclarés, comptes courants d’associés,
+  dépôts de garantie reçus.
+- **Compte de résultat** : produits et charges par catégorie. Les opérations de
+  financement (**Apport associé**, **Emprunt (capital + intérêts)**,
+  **Dépôt de garantie**, **Remboursement associé**) sont **exclues du résultat**
+  et listées à part : un remboursement d’emprunt ne doit pas diminuer un résultat.
+- **Contrôles** : le total de l’actif, le total du passif et l’**écart** sont
+  affichés. L’écart n’est **jamais corrigé automatiquement** (pas d’écriture
+  inventée) : il est expliqué, et la page indique les éléments à compléter.
+- **Comparaison des exercices** : un bilan par année existante, avec produits,
+  charges, résultat, trésorerie, actif, passif et écart.
+- Aucun montant n’est extrapolé : les amortissements ne sont pas saisis dans
+  Dominis et figurent en « — » ; les rubriques sans donnée ne sont pas affichées.
+
+## Zoom de l’aperçu des documents
+
+Le zoom de l’aperçu (boutons − / +, curseur 25 % à 400 %, retour à ×1) agit
+désormais réellement sur le contenu :
+
+- **Feuilles de calcul et texte** (xlsx, csv, docx, txt) : la taille du texte et
+  les marges des cellules suivent le facteur de zoom (elles étaient en pixels
+  fixes, seuls le cadre et la largeur changeaient).
+- **PDF** : l’aperçu garde sa taille de mise en page et est agrandi
+  visuellement ; la zone de défilement suit le facteur, sans dérive du document.
+- **Images** : la zone d’aperçu grandit avec le facteur, l’image reste entière.
+- Le contenu est aligné en haut : le début d’un long document n’est plus coupé
+  et reste accessible au défilement.
 
 ## Vérifications
 
