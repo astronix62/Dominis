@@ -268,29 +268,51 @@ Date | Libellé | Débit | Crédit | Solde
 ## Bilan de la SCI
 
 L’onglet **Bilan** se place **entre « Documents » et « Société »** dans l’espace
-d’une SCI. Il présente la présentation légale du bilan (actif brut /
-amortissements / net, passif par rubriques) et un compte de résultat, construits
-avec les données de **la société affichée** :
+d’une SCI. Il présente trois lectures des **mêmes** données, sans jamais inventer
+de montant manquant :
+
+| Onglet | Contenu |
+| --- | --- |
+| **Tableau de la société** | le tableau du classeur : une ligne par catégorie, une colonne par adresse, montants exacts et arrondis |
+| **Formulaire 2072-C-A1** | l’annexe officielle, cadre VII, **lignes 1 à 26** dans la numérotation 2025-2026 |
+| **Bilan comptable** | actif brut / amortissements / net, passif par rubriques, compte de résultat (bilan simplifié 2033-A / 2033-B pour une SCI à l’IS) |
 
 - **Période** : une **année existante** (exercice complet, arrêté à ce jour pour
   l’année en cours) ou une **période personnalisée** (deux dates).
-- **Actif** : immobilisations corporelles (valeur estimée des biens),
-  créances (loyers échus non encaissés à la date de clôture), disponibilités
-  (solde de trésorerie calculé au même titre que l’onglet Trésorerie).
-- **Passif** : capital social, report à nouveau (résultats antérieurs),
-  résultat de la période, emprunts déclarés, comptes courants d’associés,
-  dépôts de garantie reçus.
-- **Compte de résultat** : produits et charges par catégorie. Les opérations de
-  financement (**Apport associé**, **Emprunt (capital + intérêts)**,
-  **Dépôt de garantie**, **Remboursement associé**) sont **exclues du résultat**
-  et listées à part : un remboursement d’emprunt ne doit pas diminuer un résultat.
-- **Contrôles** : le total de l’actif, le total du passif et l’**écart** sont
-  affichés. L’écart n’est **jamais corrigé automatiquement** (pas d’écriture
-  inventée) : il est expliqué, et la page indique les éléments à compléter.
+- **Une colonne par immeuble** : l’immeuble est un **lieu**. Deux biens à la même
+  adresse forment une seule colonne, deux adresses différentes en forment deux.
+  Les mouvements sans bien apparaissent en « Non affecté ».
+- **Arrondis** : tous les montants publiés sont arrondis à l’euro **colonne par
+  colonne, puis additionnés**. Le total affiché est donc toujours exactement la
+  somme des colonnes ; la colonne « Exact » conserve les centimes pour contrôle.
+- **Ligne 21 → 24** : le revenu ou déficit de l’immeuble (ligne 21) devient le
+  revenu net (ligne 24), puis le montant à répartir entre les associés (ligne 26).
+  La ligne 10 est un **« dont »** : elle est déjà comprise dans la ligne 9 et ne
+  s’ajoute jamais au total. La ligne 15 se déduit.
+- **Forfait de la ligne 7** : la règle légale est de **20 € par local et par an**
+  (article 31, I, 1°, e du CGI). Dominis applique un **montant unique**, modifiable
+  librement dans le champ de la ligne 7 et mémorisé par SCI et par exercice. Le
+  forfait n’est jamais ajouté deux fois : si des mouvements sont classés en
+  ligne 7, le montant manuel n’est pas appliqué.
+- **Classement** : chaque catégorie peut être épinglée à une ligne du formulaire
+  (**Classer les catégories**). Le classement est mémorisé par SCI ; une catégorie
+  non classée est **exclue** des totaux officiels et signalée, jamais corrigée en
+  silence. De même, une échéance d’emprunt est signalée « à ventiler » : seule la
+  part d’intérêts est déductible en ligne 20.
+- **Affectation** : **Affecter les mouvements** rattache un mouvement sans bien à
+  son immeuble. La fiche d’un mouvement comporte aussi un champ **Bien /
+  immeuble** ; la trésorerie affiche la colonne **Immeuble**.
+- **SCI à l’IS** : l’annexe 2072 ne s’applique pas. La page le signale, renvoie à
+  la liasse **2033-A** (bilan simplifié, cases 028 à 180) et **2033-B** (compte de
+  résultat, case 310), et propose d’ouvrir directement le bilan comptable.
+- **Contrôles** : le total de l’actif (**case 112**) et le total du passif
+  (**case 180**) sont affichés avec leur **écart**. Cet écart n’est **jamais
+  corrigé automatiquement** : il est expliqué, et la page indique les éléments à
+  compléter (valeur comptable des biens, amortissements, apports, dettes).
 - **Comparaison des exercices** : un bilan par année existante, avec produits,
   charges, résultat, trésorerie, actif, passif et écart.
 - Aucun montant n’est extrapolé : les amortissements ne sont pas saisis dans
-  Dominis et figurent en « — » ; les rubriques sans donnée ne sont pas affichées.
+  Dominis et figurent en « — » ; une valeur nulle s’affiche « — ».
 
 ## Zoom de l’aperçu des documents
 
