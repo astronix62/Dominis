@@ -5525,7 +5525,7 @@ def purge_tab(c, sci_id, tab):
         props={r['id'] for r in by['properties']}
         leases={r['id'] for r in by['leases'] if r.get('property_id') in props}
         calls={r['id'] for r in by['calls'] if r.get('lease_id') in leases}
-        entries={r['id'] for r in by['entries'] if r.get('call_id') in calls}
+        entries={r['id'] for r in by['entries'] if r.get('call_id') in calls or r.get('property_id') in props}
         targets=props|leases|calls|entries
     elif tab=='leases':
         leases={r['id'] for r in by['leases']}
@@ -7609,8 +7609,18 @@ class Handler(BaseHTTPRequestHandler):
                         else:
                             if kind not in KINDS: raise ValueError('Type invalide.')
                             for r in c.execute('SELECT * FROM records'):
+                                # Un mouvement de trésorerie peut citer le bien qui l'a
+                                # occasionné : ce lien est facultatif et n'empêche pas la
+                                # suppression. Il est retiré juste après (le mouvement reste).
+                                if kind=='properties' and r['kind']=='entries' and json.loads(r['data']).get('property_id')==ident: continue
                                 if any(json.loads(r['data']).get(f)==ident for f in REFS): raise ValueError('Cet élément est utilisé. Supprimez d’abord les éléments liés (baux, appels ou paiements).')
                             c.execute('DELETE FROM records WHERE id=? AND kind=?',(ident,kind))
+                            if kind=='properties':
+                                for r in c.execute("SELECT id,data FROM records WHERE kind='entries'"):
+                                    d=json.loads(r['data'])
+                                    if d.get('property_id')==ident:
+                                        d.pop('property_id',None)
+                                        c.execute('UPDATE records SET data=? WHERE id=?',(json.dumps(d,ensure_ascii=False),r['id']))
                         audit(c,'Suppression',kind+' / '+ident); c.commit(); return self.reply({'ok':True})
                     if path=='/api/purge':
                         if p.get('confirm') is not True: raise ValueError('Confirmation requise.')
@@ -7683,6 +7693,15 @@ HTML = r'''<!doctype html>
 .tv-fit .doc-folder-name{white-space:nowrap;min-width:0}.doc-folder-name>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.doc-folder-name svg{flex:none}
 .tv-sticky thead th{position:sticky;top:0;background:var(--panel);z-index:2;box-shadow:inset 0 -1px 0 var(--line)}
 tfoot td{border-top:1px solid var(--line);border-bottom:0;background:var(--panel2);font-weight:600}
+/* Bilan : une colonne par adresse distincte, montants arrondis à l'euro. */
+.balance-table th,.balance-table td{padding:7px 10px;font-size:11px;vertical-align:top}
+.balance-table thead th{font-size:8px;letter-spacing:.5px}
+.balance-table .balance-section td{background:var(--panel2);border-top:1px solid var(--line);padding-top:9px;padding-bottom:9px}
+.balance-table .balance-subtotal td{border-top:2px solid var(--line);background:var(--goldbg);font-weight:600}
+.balance-table .balance-dont td{color:var(--muted);font-style:italic;padding-top:2px;padding-bottom:2px}
+.balance-table td:first-child{white-space:normal;overflow-wrap:anywhere}
+.balance-2072 td:first-child{max-width:420px}
+.balance-table tfoot td{background:var(--goldbg)}
 .month-total-row td{background:var(--panel2);border-top:1px solid var(--line);border-bottom:1px solid var(--line);font-weight:500}
 .month-total-row td:first-child{border-left:2px solid var(--gold)}
 .month-total-row .cell-sub{display:block;font-weight:400;color:var(--muted);font-size:9px;margin-top:2px;margin-left:0}
@@ -7906,7 +7925,7 @@ const yr=r=>isAllYears()||String(r.date||'').startsWith(String(activeYear()));
 // doit rester visible.
 const yearMatches=(r,kind)=>isAllYears()||(kind==='entries'?String(r.date||'').slice(0,4)===String(activeYear()):kind==='calls'?(String(r.period||'').slice(0,4)===String(activeYear())||String(r.due||'').slice(0,4)===String(activeYear())):true);
 const defaultTableColumns={
-entries:[{id:'label',label:'Opération'},{id:'sci',label:'SCI'},{id:'date',label:'Date'},{id:'category',label:'Catégorie'},{id:'credit',label:'Crédit'},{id:'debit',label:'Débit'},{id:'solde',label:'Solde'},{id:'amount',label:'Montant'}],
+entries:[{id:'label',label:'Opération'},{id:'sci',label:'SCI'},{id:'date',label:'Date'},{id:'category',label:'Catégorie'},{id:'property',label:'Immeuble'},{id:'credit',label:'Crédit'},{id:'debit',label:'Débit'},{id:'solde',label:'Solde'},{id:'amount',label:'Montant'}],
 leases:[{id:'tenant',label:'Locataire'},{id:'property',label:'Bien'},{id:'bail',label:'Bail'},{id:'rent',label:'Loyer / charges'},{id:'status',label:'Statut'}],
 calls:[{id:'tenant',label:'Locataire / période'},{id:'due',label:'Échéance'},{id:'called',label:'Appelé'},{id:'paid',label:'Encaissé'},{id:'status',label:'Statut'}],
 partners:[{id:'name',label:'Associé'},{id:'role',label:'Fonction'},{id:'shares',label:'Parts sociales'},{id:'participation',label:'Participation'},{id:'cca',label:'Compte courant déclaré'}],
@@ -9166,6 +9185,7 @@ let rowParts=list.map(r=>{
         cellMap={
             label:`${esc(r.label)}${r.call_id?'<span class="cell-sub">Liée à un appel de loyer</span>':''}`,
             sci:`<span class="sci-cell"><span class="sci-dot" style="background:${sciColor(r.sci)}" aria-hidden="true"></span>${esc(sciname(r.sci))}</span>`,date:date(r.date),category:esc(r.category),
+            property:entryBuildingLabel(r),
             credit:r.direction==='Recette'?`<span class="green">${money(r.amount,2)}</span>`:'<span class="muted">—</span>',
             debit:r.direction==='Dépense'?`<span class="red">${money(r.amount,2)}</span>`:'<span class="muted">—</span>',
             solde:soldeCell,
@@ -9404,18 +9424,24 @@ function balanceModel(s,period){
     let capital=r2(toNum(s.capital));
     let cca=r2(rows('partners',s.id).reduce((a,p)=>a+toNum(p.cca),0));
     let deposits=r2(entries.filter(r=>entryDate(r)<=period.end&&catOf(r)===BALANCE_DEPOSIT).reduce((a,r)=>a+entrySigned(r),0));
+    // Cases officielles du bilan simplifié 2033-A (liasse RSI) : 028/030 pour
+    // les immobilisations corporelles, 068/070 pour les créances clients,
+    // 084/086 pour les disponibilités, 110/112 pour le total de l'actif.
     let actif=[
-        {code:'AJ',label:'Immobilisations corporelles',detail:props.length+' bien'+(props.length>1?'s':'')+' · valeur estimée',amount:assets},
-        {code:'BK',label:'Créances · loyers échus non encaissés',detail:'au '+date(period.end),amount:receivables},
-        {code:'BU',label:'Disponibilités · trésorerie',detail:'solde calculé au '+date(period.end),amount:cash}
+        {code:'028',label:'Immobilisations corporelles',detail:props.length+' bien'+(props.length>1?'s':'')+' · valeur estimée · amortissements en 030',amount:assets},
+        {code:'068',label:'Créances · clients et comptes rattachés',detail:'loyers échus non encaissés au '+date(period.end),amount:receivables},
+        {code:'084',label:'Disponibilités',detail:'solde de trésorerie calculé au '+date(period.end),amount:cash}
     ];
+    // Passif du 2033-A : 120 capital, 134 report à nouveau, 136 résultat de
+    // l'exercice, 164 emprunts et dettes assimilées, 169 comptes courants
+    // d'associés (renvoi « dont » de la case 174 « autres dettes »).
     let passif=[
-        {code:'DA',label:'Capital social',detail:'fiche société',amount:capital},
-        {code:'DJ',label:'Report à nouveau',detail:'résultats antérieurs au '+date(period.start),amount:prior},
-        {code:'DL',label:'Résultat de la période',detail:'produits − charges',amount:result},
-        {code:'DS',label:'Emprunts et dettes financières',detail:loanDates.length?'situation au '+loanDates.join(', '):'aucun emprunt déclaré',amount:loanTotal},
-        {code:'DU',label:'Comptes courants d’associés',detail:'associés',amount:cca},
-        {code:'DZ',label:'Dépôts de garantie reçus',detail:'locataires',amount:deposits}
+        {code:'120',label:'Capital social ou individuel',detail:'fiche société',amount:capital},
+        {code:'134',label:'Report à nouveau',detail:'résultats antérieurs au '+date(period.start),amount:prior},
+        {code:'136',label:'Résultat de l’exercice',detail:'produits − charges de la période',amount:result},
+        {code:'164',label:'Emprunts et dettes assimilées',detail:loanDates.length?'situation au '+loanDates.map(d=>date(d)).join(', '):'aucun emprunt déclaré',amount:loanTotal},
+        {code:'169',label:'Comptes courants d’associés',detail:'dont « autres dettes » (case 174)',amount:cca},
+        {code:'174',label:'Dépôts de garantie reçus',detail:'autres dettes · locataires',amount:deposits}
     ];
     let totalActif=r2(actif.reduce((a,l)=>a+l.amount,0));
     let totalPassif=r2(passif.reduce((a,l)=>a+l.amount,0));
@@ -9452,18 +9478,401 @@ function balanceTable(sections,withAmort,totalLabel){
     let foot=totalLabel?`<tfoot><tr><td><strong>${esc(totalLabel)}</strong></td>${amountCells(grand,true)}</tr></tfoot>`:'';
     return `<div class="table-wrap"><table><thead><tr><th>Poste</th>${head}</tr></thead><tbody>${body}</tbody>${foot}</table></div>`;
 }
-function balancePage(s){
-    let period=balancePeriod(s),m=balanceModel(s,period),years=balanceYears(s);
+// --- Bilan : immeubles, lignes officielles et arrondis --------------------
+// Le formulaire officiel d'une SCI à l'IR est l'annexe 1 de la déclaration
+// 2072-C (cadre VII, lignes 1 à 26), une annexe par immeuble. Dominis reprend
+// cette numérotation telle quelle : chaque mouvement est rattaché à une ligne
+// officielle et à un immeuble, entendu comme un LIEU : deux biens à la même
+// adresse forment une seule colonne, deux adresses différentes en forment deux.
+let balanceTab='societe';
+const BALANCE_TABS=[['societe','Tableau de la société'],['formulaire','Formulaire 2072-C-A1'],['comptable','Bilan comptable']];
+const BALANCE_2072_LINES=[
+    [1,'Montant brut des fermages ou des loyers encaissés','recette'],
+    [2,'Dépenses par nature déductibles incombant normalement à la société et mises par convention à la charge des locataires','recette'],
+    [3,'Recettes brutes diverses. Subventions ANAH, indemnités d’assurance','recette'],
+    [4,'Recettes qu’aurait pu produire la location des propriétés réservées ou mises gratuitement à disposition','recette'],
+    [5,'TOTAL DES RECETTES','total'],
+    [6,'Frais d’administration et de gestion','charge'],
+    [7,'Autres frais de gestion non déductibles pour leur montant réel (montant forfaitaire fixé à 20 € par local)','charge'],
+    [8,'Primes d’assurance','charge'],
+    [9,'Dépenses de réparation, d’entretien et d’amélioration','charge'],
+    [10,'dont dépenses de travaux de rénovation énergétique (classe E, F ou G vers A à D)','dont'],
+    [11,'Charges récupérables non récupérées au départ du locataire','charge'],
+    [12,'Indemnités d’éviction, frais de relogement','charge'],
+    [13,'Impositions (y compris la CRL payée au titre de l’année considérée)','charge'],
+    [14,'Provisions pour charges de copropriété payées au titre de l’année considérée','charge'],
+    [15,'Régularisation des provisions pour charges de copropriété déduites au titre de l’année antérieure','deduction'],
+    [16,'Montant de la déduction spécifique','charge'],
+    [17,'TOTAL DES DÉDUCTIONS, FRAIS ET CHARGES','total'],
+    [18,'Dépenses spécifiques relatives aux immeubles spéciaux','charge'],
+    [19,'Amortissement au titre de l’année','charge'],
+    [20,'Intérêts des emprunts contractés pour l’acquisition, la reconstruction, l’agrandissement, la réparation, l’amélioration ou la conservation des immeubles','charge'],
+    [21,'REVENU (+) OU DÉFICIT (-) DE L’IMMEUBLE','total'],
+    [22,'Réintégration du supplément de déduction','charge'],
+    [23,'Rémunérations et avantages en nature attribués aux associés','charge'],
+    [24,'REVENU NET (+) OU DÉFICIT (-)','total'],
+    [25,'Revenus ou déficits relatifs aux parts détenues dans d’autres sociétés immobilières non passibles de l’impôt sur les sociétés','charge'],
+    [26,'REVENU NET (+) OU DÉFICIT (-) À RÉPARTIR ENTRE LES ASSOCIÉS','total']
+];
+const BALANCE_LINE_LABELS=Object.fromEntries(BALANCE_2072_LINES.map(([n,l])=>[n,l]));
+function balanceNorm(v){return String(v||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,' ').trim();}
+function balanceAddressKey(p){
+    let base=String((p&&p.address)||'').trim();
+    if(!base)return '';
+    return balanceNorm(base).replace(/\b(cedex|france)\b/g,'').replace(/\s+/g,' ').trim();
+}
+// Regroupement par adresse : le lieu compte, pas la fiche du bien. Deux lots
+// d'un même immeuble partagent donc une seule colonne du bilan.
+function balanceBuildings(s){
+    let groups=new Map();
+    rows('properties',s.id).forEach(p=>{
+        let key=balanceAddressKey(p)||'__sans_adresse__';
+        if(!groups.has(key))groups.set(key,{key,label:'',propertyIds:[],properties:[]});
+        let g=groups.get(key);
+        g.propertyIds.push(p.id);g.properties.push(p);
+        let lbl=String(p.address||'').trim();
+        if(!lbl)lbl='Adresse non renseignée';
+        if(!g.label||lbl.length<g.label.length)g.label=lbl;
+    });
+    return [...groups.values()].sort((a,b)=>a.label.localeCompare(b.label,'fr'));
+}
+// Libellé de la colonne « Immeuble » de la trésorerie : le bien rattaché,
+// puis le bail et enfin l'adresse de l'appel de loyer. Jamais inventé.
+function entryBuilding(r){
+    if(!r)return null;
+    if(r.property_id){let p=rec(r.property_id);if(p)return p;}
+    if(r.call_id){let c=rec(r.call_id);let l=c&&c.lease_id?rec(c.lease_id):null;if(l&&l.property_id){let p=rec(l.property_id);if(p)return p;}}
+    return null;
+}
+function entryBuildingLabel(r){
+    let p=entryBuilding(r);
+    if(!p)return '<span class="muted">Non affecté</span>';
+    return `<span class="sci-cell"><span class="sci-dot" style="background:${sciColor(r.sci)}" aria-hidden="true"></span>${esc(p.name)}</span>`;
+}
+function balanceEntryBuilding(r){
+    if(!r)return '';
+    let p=r.property_id?rec(r.property_id):null;
+    if(!p&&r.call_id){
+        let c=rec(r.call_id);
+        let l=c&&c.lease_id?rec(c.lease_id):null;
+        p=l&&l.property_id?rec(l.property_id):null;
+    }
+    if(!p)return '';
+    return balanceAddressKey(p)||'__sans_adresse__';
+}
+function balanceLineMap(s){
+    let all=S.settings.balance_line_map;
+    let m=all&&typeof all==='object'?all[s.id]:null;
+    return m&&typeof m==='object'?m:{};
+}
+// Classement d'une catégorie : choix explicite de l'utilisateur, sinon règles
+// de lecture du libellé. Rien n'est supprimé en silence : ce qui n'est pas
+// reconnu reste « à classer » et bloque le total officiel.
+function balanceAutoClass(r){
+    let isRec=r.direction==='Recette';
+    let txt=balanceNorm(r.category)+' '+balanceNorm(r.label);
+    if(/apport|remboursement (d )?associe|depot de garantie|compte courant/.test(txt))return {line:'finance',group:'finance'};
+    // « Emprunt (capital + intérêts) » mélange une charge déductible et un
+    // remboursement de capital : la ligne 20 n'accepte que les intérêts.
+    if(/capital/.test(txt)&&/interet/.test(txt))return {line:'ventiler',group:'ventiler'};
+    if(/interet|assurance emprunteur/.test(txt))return {line:20,group:'charge'};
+    if(/emprunt|echeance|capital restant|amortissement du capital/.test(txt))return {line:'ventiler',group:'ventiler'};
+    if(/autres frais de gestion|forfait/.test(txt))return {line:7,group:'charge'};
+    if(/regularisation/.test(txt))return {line:15,group:'charge'};
+    if(/copropriet|syndic/.test(txt))return {line:14,group:'charge'};
+    if(/assurance|axa|maif|mma|pno|generali|allianz|groupama|aviva/.test(txt))return {line:8,group:'charge'};
+    if(/travaux|entretien|reparation|bricoman|leroy|castorama|maintenance|renovation|ravalement|chaudiere|toiture/.test(txt))return {line:9,group:'charge'};
+    if(/taxe|foncier|impot|imposition|cfe|crl|ordures/.test(txt))return {line:13,group:'charge'};
+    if(/tenue de compte|frais bancaire|banque|commission|agios|frais de gestion|honoraire|comptable|avocat|procedure|gestion/.test(txt))return {line:6,group:'charge'};
+    if(/recuperable/.test(txt))return {line:11,group:'charge'};
+    if(/eviction|relogement|indemnite/.test(txt))return {line:12,group:'charge'};
+    if(isRec&&/loyer|fermage|recette|location/.test(txt))return {line:1,group:'recette'};
+    if(isRec&&/provision/.test(txt))return {line:2,group:'recette'};
+    if(isRec)return {line:3,group:'recette'};
+    return {line:'classer',group:'classer'};
+}
+function balanceClassOf(r,map){
+    let cat=String(r.category||'').trim()||'Autre';
+    let ov=map&&Object.prototype.hasOwnProperty.call(map,cat)?map[cat]:null;
+    if(ov!==null&&ov!==undefined&&ov!==''){
+        if(ov==='finance')return {line:'finance',group:'finance',manual:true};
+        if(ov==='ventiler')return {line:'ventiler',group:'ventiler',manual:true};
+        if(ov==='classer')return {line:'classer',group:'classer',manual:true};
+        if(String(ov)==='10')return {line:9,group:'charge',manual:true,dont:10};
+        let n=Number(ov);
+        if(n>=1&&n<=4)return {line:n,group:'recette',manual:true};
+        if((n>=6&&n<=16)||n===18||n===19||n===20||n===22||n===23||n===25)return {line:n,group:'charge',manual:true};
+    }
+    return balanceAutoClass(r);
+}
+function balanceForfaitSetting(s,year,hasBuildings){
+    let all=S.settings.balance_forfait;
+    let perSci=all&&typeof all==='object'?all[s.id]:null;
+    let v=perSci&&typeof perSci==='object'?perSci[String(year)]:null;
+    // 20 € est le montant forfaitaire légal ; sans aucune adresse renseignée,
+    // aucun local n'existe et le forfait reste à 0.
+    if(v===null||v===undefined||v==='')return hasBuildings?20:0;
+    return Number(v)||0;
+}
+// Modèle du bilan : chaque mouvement est rattaché à une ligne officielle et à
+// un immeuble. Les montants restent exacts ici ; l'arrondi à l'euro est fait
+// au rendu, colonne par colonne, puis additionné (jamais l'inverse).
+function balance2072Model(s,period){
+    let buildings=balanceBuildings(s);
+    let map=balanceLineMap(s);
+    let byKey=new Map(buildings.map(b=>[b.key,b]));
+    let lines=new Map(),cats=new Map(),dontBy=new Map();
+    let unassigned=[],unclassified=[],toSplit=[],financing=[];
+    let entries=rows('entries',s.id).filter(r=>entryDate(r)&&entryDate(r)>=period.start&&entryDate(r)<=period.end);
+    entries.forEach(r=>{
+        let amt=r2(Math.abs(entrySigned(r)));
+        let cls=balanceClassOf(r,map);
+        let key=balanceEntryBuilding(r);
+        if(!byKey.has(key)){key='__none__';unassigned.push(r);}
+        let rec={entry:r,amount:amt,cls,key};
+        if(cls.group==='finance'){financing.push(rec);return;}
+        if(cls.group==='ventiler'){toSplit.push(rec);return;}
+        if(cls.group==='classer'){unclassified.push(rec);return;}
+        let line=cls.line;
+        if(cls.dont){
+            if(!dontBy.has(cls.dont))dontBy.set(cls.dont,{exact:0,by:{}});
+            let D=dontBy.get(cls.dont);
+            D.exact=r2(D.exact+amt);
+            D.by[key]=r2((D.by[key]||0)+amt);
+        }
+        if(!lines.has(line))lines.set(line,{exact:0,by:{}});
+        let L=lines.get(line);
+        L.exact=r2(L.exact+amt);
+        L.by[key]=r2((L.by[key]||0)+amt);
+        let cat=String(r.category||'').trim()||'Autre';
+        if(!cats.has(cat))cats.set(cat,{cat,line,group:cls.group,exact:0,by:{},count:0});
+        let C=cats.get(cat);
+        C.exact=r2(C.exact+amt);
+        C.by[key]=r2((C.by[key]||0)+amt);
+        C.count+=1;
+    });
+    let forfaitSetting=balanceForfaitSetting(s,period.year||Number(String(period.start).slice(0,4)),buildings.length>0);
+    let line7=lines.get(7);
+    let line7Exact=line7?line7.exact:0;
+    // Le forfait est manuel et unique. Il n'est ajouté que si aucun mouvement
+    // n'est déjà classé en ligne 7 : jamais deux fois le même montant.
+    let forfaitManual=line7Exact<=0.004;
+    return {buildings,lines,cats,dontBy,entries,unassigned,unclassified,toSplit,financing,
+        forfaitSetting,forfaitManual,forfaitExact:forfaitManual?r2(forfaitSetting):0};
+}
+function balanceColumns(m){
+    let cols=m.buildings.map(b=>({key:b.key,label:b.label,short:b.label.length>26?b.label.slice(0,24)+'…':b.label}));
+    let needNone=m.unassigned.length>0||m.forfaitManual||m.toSplit.length>0||m.unclassified.length>0||m.financing.length>0;
+    if(needNone)cols.push({key:'__none__',label:'Non affecté',short:'Non affecté'});
+    return cols;
+}
+function balanceLineAmount(m,line,key){
+    if(line===7&&key==='__none__')return m.forfaitExact;
+    let L=m.lines.get(line);
+    return L&&L.by[key]?L.by[key]:0;
+}
+function balanceLineTotal(m,line,keys){
+    return r2(keys.reduce((a,k)=>a+balanceLineAmount(m,line,k),0));
+}
+function balanceLineExact(m,line){
+    if(line===7)return r2((m.lines.get(7)?.exact||0)+m.forfaitExact);
+    let L=m.lines.get(line);
+    return L?L.exact:0;
+}
+// Rendu d'une ligne du formulaire officiel : arrondi par colonne puis somme.
+function balance2072Row(m,line,cols,kind,label){
+    let cells=cols.map(c=>Math.round(balanceLineAmount(m,line,c.key)));
+    let total=cells.reduce((a,b)=>a+b,0);
+    return {cells,total,exact:balanceLineExact(m,line)};
+}
+function balanceTableHead(cols,extra=''){
+    return `<thead><tr><th style="min-width:250px">${extra||'Poste'}</th><th class="align-right" style="min-width:64px">Ligne</th><th class="align-right">Exact</th><th class="align-right">Arrondi</th>${cols.map(c=>`<th class="align-right" title="${esc(c.label)}">${esc(c.short)}</th>`).join('')}<th class="align-right">Total</th></tr></thead>`;
+}
+function balanceAmountCells(exact,rounded,cells,total){
+    return `<td class="align-right muted">${money(exact,2)}</td><td class="align-right">${money(rounded,0)}</td>${cells.map(v=>`<td class="align-right">${v?money(v,0):'<span class="muted">—</span>'}</td>`).join('')}<td class="align-right"><strong class="${total<0?'red':''}">${money(total,0)}</strong></td>`;
+}
+
+// --- 1. Tableau de la société, construit comme le classeur ---------------
+function balanceSocieteView(s,period,m){
+    let cols=balanceColumns(m);
+    let keys=cols.map(c=>c.key);
+    let isIS=s.regime==='IS';
+    if(m.forfaitExact>0.004){
+        // Le forfait de la ligne 7 est une déduction fiscale, pas un mouvement :
+        // il apparaît comme une ligne à part, pour que le total affiché soit
+        // exactement la somme des colonnes.
+        m.cats.set('__forfait__',{cat:'Autres frais de gestion (forfait)',line:7,group:'charge',exact:m.forfaitExact,by:{__none__:m.forfaitExact},count:0,forfait:true});
+    }
+    let recettes=[...m.cats.values()].filter(c=>c.group==='recette').sort((a,b)=>a.line-b.line||a.cat.localeCompare(b.cat,'fr'));
+    let depenses=[...m.cats.values()].filter(c=>c.group==='charge').sort((a,b)=>a.line-b.line||a.cat.localeCompare(b.cat,'fr'));
+    let hors=[...m.cats.values()].filter(c=>['finance','ventiler','classer'].includes(c.group)).sort((a,b)=>a.cat.localeCompare(b.cat,'fr'));
+    let year=period.year||Number(String(period.start).slice(0,4));
+    let catRow=c=>{
+        let cells=keys.map(k=>Math.round(c.by[k]||0));
+        let exact=c.exact,rounded=cells.reduce((a,b)=>a+b,0);
+        return `<tr><td>${esc(c.cat)}<span class="cell-sub">${c.forfait?'Montant forfaitaire manuel':c.count+' mouvement'+(c.count>1?'s':'')}</span></td><td class="align-right"><span class="pill${c.forfait?' gold':''}">${esc(String(c.line))}</span></td>${balanceAmountCells(exact,rounded,cells,rounded)}</tr>`;
+    };
+    let section=(title,list,lineFilter)=>{
+        if(!list.length)return '';
+        let body=list.map(catRow).join('');
+        let exactHeader={'recette':'5','charge':'17'}[lineFilter]||'';
+        let exact=r2(list.reduce((a,c)=>a+c.exact,0));
+        let perCol=keys.map(k=>list.reduce((a,c)=>a+Math.round(c.by[k]||0),0));
+        let total=perCol.reduce((a,b)=>a+b,0);
+        return `<tr class="balance-section"><td colspan="${5+cols.length}"><strong>${esc(title)}</strong></td></tr>${body}
+        <tr class="balance-subtotal"><td><strong>Total ${esc(title.toLowerCase())}</strong>${exactHeader?`<span class="cell-sub">Ligne ${exactHeader}</span>`:''}</td><td class="align-right"><span class="pill">${exactHeader||'—'}</span></td><td class="align-right muted">${money(exact,2)}</td><td class="align-right">${total?money(total,0):'<span class="muted">—</span>'}</td>${perCol.map(v=>`<td class="align-right">${v?money(v,0):'<span class="muted">—</span>'}</td>`).join('')}<td class="align-right"><strong>${total?money(total,0):'<span class="muted">—</span>'}</strong></td></tr>`;
+    };
+    let recExact=r2(recettes.reduce((a,c)=>a+c.exact,0));
+    let depExact=r2(depenses.reduce((a,c)=>a+c.exact,0));
+    let recRounded=keys.reduce((a,k)=>a+recettes.reduce((b,c)=>b+Math.round(c.by[k]||0),0),0);
+    let depRounded=keys.reduce((a,k)=>a+depenses.reduce((b,c)=>b+Math.round(c.by[k]||0),0),0);
+    let resultExact=r2(recExact-depExact),resultRounded=recRounded-depRounded;
+    let perColResult=keys.map(k=>{
+        let r=recettes.reduce((a,c)=>a+Math.round(c.by[k]||0),0);
+        let d=depenses.reduce((a,c)=>a+Math.round(c.by[k]||0),0);
+        return r-d;
+    });
+    let forfaitNote=m.forfaitManual
+        ?`Ligne 7 : forfait manuel de <strong>${money(m.forfaitExact,2)}</strong> (aucun mouvement n’est classé sur cette ligne).`
+        :`Ligne 7 : <strong>${money(m.lines.get(7)?.exact||0,2)}</strong> de mouvements classés ; le forfait manuel n’est pas ajouté.`;
+    let controls=[];
+    if(m.unclassified.length){
+        let total=r2(m.unclassified.reduce((a,u)=>a+u.amount,0));
+        controls.push(`<div class="notice" style="border-left:3px solid var(--gold)"><strong>${m.unclassified.length} mouvement${m.unclassified.length>1?'s':''} non classé${m.unclassified.length>1?'s':''} · ${money(total,2)}</strong><p class="sub" style="margin-top:6px">Ils ne sont pas repris dans les totaux officiels. Classez leur catégorie sur une ligne du formulaire pour compléter le bilan.</p><button data-action="balance-mapping">${icon('settings')} Classer les catégories</button></div>`);
+    }
+    if(m.toSplit.length){
+        let total=r2(m.toSplit.reduce((a,u)=>a+u.amount,0));
+        controls.push(`<div class="notice" style="border-left:3px solid var(--gold)"><strong>${m.toSplit.length} échéance${m.toSplit.length>1?'s':''} d’emprunt · ${money(total,2)} à ventiler</strong><p class="sub" style="margin-top:6px">Seuls les intérêts sont déductibles (ligne 20) : le capital remboursé ne l’est pas. Dominis ne connaît pas encore la ventilation de chaque échéance ; renseignez les intérêts dans une catégorie dédiée (« Intérêts ») pour les voir apparaître en ligne 20.</p></div>`);
+    }
+    if(m.financing.length){
+        let total=r2(m.financing.reduce((a,u)=>a+u.amount,0));
+        controls.push(`<div class="notice"><strong>${m.financing.length} opération${m.financing.length>1?'s':''} de financement · ${money(total,2)}</strong><p class="sub" style="margin-top:6px">Apports, comptes courants et dépôts de garantie ne sont ni des recettes ni des charges : ils figurent au bilan comptable, pas dans le résultat.</p></div>`);
+    }
+    if(m.unassigned.length){
+        controls.push(`<div class="notice" style="border-left:3px solid var(--gold)"><strong>${m.unassigned.length} mouvement${m.unassigned.length>1?'s':''} sans immeuble</strong><p class="sub" style="margin-top:6px">Ils apparaissent en « Non affecté ». Rattachez-les à un bien pour obtenir une colonne par adresse exacte.</p><button data-action="balance-assign">${icon('building')} Affecter les mouvements</button></div>`);
+    }
+    return `<div class="panel" style="margin-bottom:18px"><div class="panel-head"><h2>Tableau de la société · ${esc(String(year))}</h2><span class="pill gold">${m.buildings.length} adresse${m.buildings.length>1?'s':''} distincte${m.buildings.length>1?'s':''}</span></div>
+    <div class="panel-body">
+      <p class="sub" style="margin-bottom:12px">Chaque mouvement est classé sur sa ligne du formulaire officiel et sur l’immeuble de son adresse. Les montants sont arrondis à l’euro colonne par colonne, puis additionnés : le total est toujours la somme des colonnes affichées. La colonne « Exact » conserve les centimes pour le contrôle.</p>
+      <div class="table-wrap"><table class="balance-table">${balanceTableHead(cols,'Catégorie')}<tbody>
+        ${section('Recettes '+year,recettes,'recette')}
+        ${section('Dépenses '+year,depenses,'charge')}
+        ${hors.length?`<tr class="balance-section"><td colspan="${5+cols.length}"><strong>Hors formulaire</strong></td></tr>${hors.map(catRow).join('')}`:''}
+      </tbody><tfoot>
+        <tr><td><strong>Résultat de la société</strong><span class="cell-sub">${isIS?'Recettes − dépenses de l’exercice · compte de résultat 2033-B (case 310)':'Recettes − dépenses (ligne 21 → 24)'}</span></td><td class="align-right"><span class="pill gold">${isIS?'2033-B':'21 / 24'}</span></td><td class="align-right muted">${money(resultExact,2)}</td><td class="align-right"><strong class="${resultRounded<0?'red':'green'}">${resultRounded?money(resultRounded,0):'<span class="muted">—</span>'}</strong></td>${perColResult.map(v=>`<td class="align-right">${v?money(v,0):'<span class="muted">—</span>'}</td>`).join('')}<td class="align-right"><strong class="${resultRounded<0?'red':'green'}">${resultRounded?money(resultRounded,0):'<span class="muted">—</span>'}</strong></td></tr>
+      </tfoot></table></div>
+      <p class="sub" style="margin-top:12px">${forfaitNote} ${isIS?'Cette SCI relève de l’impôt sur les sociétés : la numérotation 2072 ci-dessus n’est qu’un repère de classement. Le résultat comptable se reporte à la ligne 136 du bilan (2033-A) et à la case 310 du compte de résultat (2033-B).':'Le déficit éventuel se reporte en ligne 21 (revenu ou déficit de l’immeuble) puis en ligne 24 (revenu net), et enfin en ligne 26 (montant à répartir entre les associés).'}</p>
+      ${controls.join('')}
+    </div></div>`;
+}
+
+// --- 2. Formulaire officiel 2072-C-A1 -------------------------------------
+function balance2072View(s,period,m){
+    let cols=balanceColumns(m);
+    let keys=cols.map(c=>c.key);
+    let rows=new Map();
+    BALANCE_2072_LINES.forEach(([n,label,kind])=>rows.set(n,{n,label,kind}));
+    let prev={};
+    let get=(n)=>{let r=rows.get(n);return r;};
+    let cellsFor=(n)=>{
+        if(n===10)return null; // « dont » : calculé depuis le classement explicite
+        if([5,17,21,24].includes(n))return null; // calculés
+        if(n===26)return null;
+        if(n===25)return null;
+        let cells=keys.map(k=>Math.round(balanceLineAmount(m,n,k)));
+        if(n===7&&m.forfaitManual)cells=keys.map(k=>k==='__none__'?Math.round(m.forfaitExact):0);
+        if(n===15)cells=cells.map(v=>-Math.abs(v));
+        return {cells};
+    };
+    let body='';
+    let totalCol=(perCol)=>perCol.reduce((a,b)=>a+b,0);
+    let sumRows=(list)=>{
+        let cells=keys.map(()=>0);
+        list.forEach(n=>{
+            let row=prev[n];if(!row)return;
+            row.cells.forEach((v,i)=>cells[i]+=v);
+        });
+        return cells;
+    };
+    let pushRow=(n,cells,opts={})=>{
+        prev[n]={cells};
+        let r=get(n);
+        let total=totalCol(cells);
+        let sign=cells.some(v=>v<0);
+        body+=`<tr class="${r.kind==='total'?'balance-subtotal':r.kind==='dont'?'balance-dont':''}">
+            <td>${r.kind==='total'?'<strong>':''}${esc(r.label)}${r.kind==='total'?'</strong>':''}${n===7&&m.forfaitManual?'<span class="cell-sub">Montant manuel, 20 € par défaut</span>':''}</td>
+            <td class="align-right"><span class="pill ${r.kind==='total'?'gold':''}">${n}</span></td>
+            ${cells.map(v=>`<td class="align-right">${v?money(v,0):'<span class="muted">—</span>'}</td>`).join('')}
+            <td class="align-right"><strong class="${total<0?'red':''}">${money(total,0)}</strong></td></tr>`;
+    };
+    // Recettes 1 à 5
+    [1,2,3,4].forEach(n=>pushRow(n,cellsFor(n).cells));
+    pushRow(5,sumRows([1,2,3,4]));
+    // Charges 6 à 16 (10 = « dont », 15 = déduction)
+    [6,7,8,9,10,11,12,13,14,15,16].forEach(n=>{
+        if(n===10){
+            // « dont » ne s'ajoute pas au total 17 : ces montants sont déjà
+            // compris dans la ligne 9. Il reste vide tant qu'aucune catégorie
+            // n'y est explicitement classée.
+            let D=m.dontBy.get(10);
+            let cells=keys.map(k=>Math.round(D&&D.by[k]?D.by[k]:0));
+            prev[10]={cells};
+            body+=`<tr class="balance-dont"><td>${esc(get(10).label)}</td><td class="align-right"><span class="pill">10</span></td>${cells.map(v=>`<td class="align-right muted">${v?money(v,0):'—'}</td>`).join('')}<td class="align-right muted">${totalCol(cells)?money(totalCol(cells),0):'—'}</td></tr>`;
+            return;
+        }
+        pushRow(n,cellsFor(n).cells);
+    });
+    // 17 = 6+7+8+9+11+12+13+14−15+16
+    let l17=keys.map(()=>0);
+    [6,7,8,9,11,12,13,14,15,16].forEach(n=>{
+        prev[n].cells.forEach((v,i)=>l17[i]+=v);
+    });
+    pushRow(17,l17);
+    // 18 à 20
+    [18,19,20].forEach(n=>pushRow(n,cellsFor(n).cells));
+    // 21 = 5 − 17 − 18 − 19 − 20
+    let l21=keys.map((_,i)=>prev[5].cells[i]-prev[17].cells[i]-prev[18].cells[i]-prev[19].cells[i]-prev[20].cells[i]);
+    pushRow(21,l21);
+    // 22 et 23
+    [22,23].forEach(n=>pushRow(n,cellsFor(n).cells));
+    // 24 = 21 + 22 − 23
+    let l24=keys.map((_,i)=>prev[21].cells[i]+prev[22].cells[i]-prev[23].cells[i]);
+    pushRow(24,l24);
+    // 25 reste au niveau de la société
+    pushRow(25,keys.map(()=>0));
+    // 26 = somme des colonnes de la ligne 24 + ligne 25, colonne par colonne
+    let l26cells=keys.map((_,i)=>prev[24].cells[i]+prev[25].cells[i]);
+    let l26=totalCol(l26cells);
+    body+=`<tr class="balance-subtotal"><td><strong>${esc(get(26).label)}</strong><span class="cell-sub">Somme des colonnes de la ligne 24 + ligne 25</span></td><td class="align-right"><span class="pill gold">26</span></td>${l26cells.map(v=>`<td class="align-right"><strong class="${l26<0?'red':'green'}">${v?money(v,0):'<span class="muted">—</span>'}</strong></td>`).join('')}<td class="align-right"><strong class="${l26<0?'red':'green'}">${money(l26,0)}</strong></td></tr>`;
+    let head=`<thead><tr><th style="min-width:300px">Cadre VII · détermination des revenus selon la règle des revenus fonciers</th><th class="align-right" style="min-width:56px">Ligne</th>${cols.map(c=>`<th class="align-right" title="${esc(c.label)}">${esc(c.short)}</th>`).join('')}<th class="align-right">Total</th></tr></thead>`;
+    let regimeNote=s.regime==='IS'
+        ?`<div class="notice" style="border-left:3px solid var(--red);margin-bottom:14px"><strong>Cette SCI relève de l’impôt sur les sociétés.</strong><p class="sub" style="margin-top:6px">Le formulaire officiel est alors la liasse <strong>2033-A</strong> (bilan simplifié) et <strong>2033-B</strong> (compte de résultat), jointes à la déclaration 2065 — et non la 2072, réservée aux SCI à l’IR. Le cadre ci-dessous reste affiché à titre indicatif : c’est la vue « Bilan comptable » qui correspond à votre régime.</p><button type="button" data-balance-tab="comptable" style="margin-top:10px">Ouvrir le bilan comptable (2033-A / 2033-B)</button></div>`
+        :'';
+    return `${regimeNote}<div class="panel" style="margin-bottom:18px"><div class="panel-head"><h2>Formulaire 2072-C-A1 · annexe 1</h2><span class="pill gold">${esc(period.label)}</span></div>
+    <div class="panel-body">
+      <p class="sub" style="margin-bottom:12px">Une colonne par immeuble, c’est-à-dire par <strong>adresse distincte</strong> : deux biens au même endroit partagent une colonne, deux lieux différents en ont deux. Les montants sont arrondis à l’euro. La ligne 10 est un « dont » : elle est déjà comprise dans la ligne 9 et ne s’ajoute pas au total 17. La ligne 15 se déduit.</p>
+      <div class="table-wrap"><table class="balance-table balance-2072">${head}<tbody>${body}</tbody></table></div>
+      <div class="row gap8 wrap" style="margin-top:14px">
+        <label class="sub" for="balance-forfait">Ligne 7 · forfait autres frais de gestion</label>
+        <input id="balance-forfait" type="number" step="0.01" min="0" value="${Number(m.forfaitSetting).toFixed(2)}" style="width:120px" aria-label="Forfait autres frais de gestion">
+        <button type="button" data-action="balance-forfait-local">Appliquer le forfait de 20 €</button>
+        <span class="pill ${m.forfaitManual?'gold':''}">${m.forfaitManual?'Montant manuel appliqué':'Mouvements classés en ligne 7'}</span>
+      </div>
+      <p class="sub" style="margin-top:10px">La règle officielle (article 31, I, 1°, e du CGI) fixe ce forfait à 20 € par local et par an. Dominis applique un montant unique, librement modifiable : à vous de choisir entre le forfait légal et un montant adapté à votre situation.</p>
+      ${m.unclassified.length?`<div class="notice" style="margin-top:12px;border-left:3px solid var(--gold)"><strong>${m.unclassified.length} mouvement${m.unclassified.length>1?'s':''} non classé${m.unclassified.length>1?'s':''}</strong><p class="sub" style="margin-top:6px">Ils ne sont pas comptés dans ce formulaire. <button class="text-link" data-action="balance-mapping">Classer les catégories →</button></p></div>`:''}
+      ${m.toSplit.length?`<div class="notice" style="margin-top:12px"><strong>${m.toSplit.length} échéance${m.toSplit.length>1?'s':''} d’emprunt non ventilée${m.toSplit.length>1?'s':''}</strong><p class="sub" style="margin-top:6px">La ligne 20 n’accepte que les intérêts. Utilisez la catégorie « Intérêts » pour les échéances dont vous connaissez la part d’intérêts.</p></div>`:''}
+    </div></div>`;
+}
+
+// --- 3. Bilan comptable (actif / passif) ----------------------------------
+function balanceComptableView(s,period,m,years){
     let gapOk=Math.abs(m.gap)<0.005;
-    let custom=period.mode==='custom';
-    let yearOptions=years.map(y=>`<option value="${y}" ${!custom&&y===period.year?'selected':''}>Exercice ${y}</option>`).join('');
-    let controls=`<div class="row gap8 wrap" style="margin-bottom:16px"><label class="sub" for="balance-year">Période du bilan</label><select id="balance-year" style="width:auto;min-width:190px">${yearOptions}<option value="custom" ${custom?'selected':''}>Période personnalisée</option></select>${custom?`<input id="balance-start" type="date" value="${esc(period.start)}" aria-label="Début de la période"><span class="muted">→</span><input id="balance-end" type="date" value="${esc(period.end)}" aria-label="Fin de la période">`:''}<span class="pill gold">${esc(period.label)}</span><span class="pill">Clôture statutaire ${esc(s.closing||'31/12')}</span></div>`;
-    let resultColor=m.result<0?'red':'green';
-    let cards=`<div class="settings-grid" style="margin-bottom:20px"><div class="panel"><div class="panel-body"><div class="eyebrow">Total actif</div><div style="font-size:24px;margin-top:6px">${money(m.totalActif,2)}</div><p class="sub" style="margin-top:6px">Biens ${money(m.assets,2)} · créances ${money(m.receivables,2)} · trésorerie ${money(m.cash,2)}</p></div></div><div class="panel"><div class="panel-body"><div class="eyebrow">Total passif</div><div style="font-size:24px;margin-top:6px">${money(m.totalPassif,2)}</div><p class="sub" style="margin-top:6px">Capitaux propres ${money(r2(m.capital+m.prior+m.result),2)} · dettes ${money(r2(m.loanTotal+Math.max(0,m.cca)+m.deposits),2)}</p></div></div></div>`;
-    let actifTable=balanceTable([{title:'Actif immobilisé',lines:m.actif.slice(0,1)},{title:'Actif circulant',lines:m.actif.slice(1)}],true,'Total de l’actif');
-    let passifTable=balanceTable([{title:'Capitaux propres',lines:m.passif.slice(0,3),total:'DP · Total des capitaux propres'},{title:'Dettes',lines:m.passif.slice(3),total:'EA · Total des dettes'}],false,'Total du passif');
+    let cards=`<div class="settings-grid" style="margin-bottom:20px"><div class="panel"><div class="panel-body"><div class="eyebrow">Total de l’actif · case 112</div><div style="font-size:24px;margin-top:6px">${money(m.totalActif,2)}</div><p class="sub" style="margin-top:6px">Biens ${money(m.assets,2)} · créances ${money(m.receivables,2)} · trésorerie ${money(m.cash,2)}</p></div></div><div class="panel"><div class="panel-body"><div class="eyebrow">Total du passif · case 180</div><div style="font-size:24px;margin-top:6px">${money(m.totalPassif,2)}</div><p class="sub" style="margin-top:6px">Capitaux propres ${money(r2(m.capital+m.prior+m.result),2)} · dettes ${money(r2(m.loanTotal+Math.max(0,m.cca)+m.deposits),2)}</p></div></div></div>`;
+    let actifTable=balanceTable([{title:'Actif immobilisé',lines:m.actif.slice(0,1),total:'Total I · 044 (brut) / 048 (amortissements)'},{title:'Actif circulant',lines:m.actif.slice(1),total:'Total II · 096 (brut) / 098 (amortissements)'}],true,'Total général de l’actif · 110 (brut) / 112 (net)');
+    let passifTable=balanceTable([{title:'Capitaux propres',lines:m.passif.slice(0,3),total:'Total I · capitaux propres (142)'},{title:'Dettes',lines:m.passif.slice(3),total:'Total III · dettes (176)'}],false,'Total général du passif · 180');
     let produits=[...m.products.entries()].sort((a,b)=>b[1]-a[1]);
     let charges=[...m.charges.entries()].sort((a,b)=>b[1]-a[1]);
+    let resultColor=m.result<0?'red':'green';
     let resultatTable=`<div class="table-wrap"><table><thead><tr><th>Compte de résultat</th><th class="align-right">Montant</th></tr></thead><tbody>
         <tr><td colspan="2" class="sub"><strong>Produits</strong></td></tr>${balanceRows(produits)}
         <tr><td><strong>Total des produits</strong></td><td class="align-right"><strong class="green">${money(m.totalProducts,2)}</strong></td></tr>
@@ -9482,20 +9891,78 @@ function balancePage(s){
         let mm=balanceModel(s,{start,end,label:''});
         return `<tr><td><strong>${y}</strong><span class="cell-sub">du ${date(start)} au ${date(end)}</span></td><td class="align-right">${money(mm.totalProducts,2)}</td><td class="align-right">${money(mm.totalCharges,2)}</td><td class="align-right"><span class="${mm.result<0?'red':'green'}">${money(mm.result,2)}</span></td><td class="align-right">${money(mm.cash,2)}</td><td class="align-right">${money(mm.totalActif,2)}</td><td class="align-right">${money(mm.totalPassif,2)}</td><td class="align-right">${Math.abs(mm.gap)<0.005?'<span class="green">0,00 €</span>':'<span class="red">'+money(mm.gap,2)+'</span>'}</td></tr>`;
     }).join('');
-    return `${controls}${cards}
+    return `${cards}
     <div class="settings-grid" style="margin-bottom:20px">
-      <div class="panel"><div class="panel-head"><h2>Actif</h2><span class="pill">${m.props.length} bien${m.props.length>1?'s':''}</span></div><div class="panel-body">${actifTable}<p class="sub" style="margin-top:12px">Immobilisations reprises à leur valeur estimée ; les amortissements ne sont pas saisis dans Dominis et figurent donc en « — ».</p></div></div>
+      <div class="panel"><div class="panel-head"><h2>Actif</h2><span class="pill">${s.regime==='IS'?'2033-A · cases 028 à 112':m.props.length+' bien'+(m.props.length>1?'s':'')}</span></div><div class="panel-body">${actifTable}<p class="sub" style="margin-top:12px">Immobilisations reprises à leur valeur estimée ; les amortissements ne sont pas saisis dans Dominis et figurent donc en « — ».</p></div></div>
       <div class="panel"><div class="panel-head"><h2>Passif</h2><span class="pill gold">Capitaux propres ${money(r2(m.capital+m.prior+m.result),2)}</span></div><div class="panel-body">${passifTable}
-        <div class="${gapOk?'notice':'notice'}" style="margin-top:14px;border-left:3px solid ${gapOk?'var(--green)':'var(--red)'}"><strong>${gapOk?'Bilan équilibré':'Écart actif − passif : '+money(m.gap,2)}</strong><p class="sub" style="margin-top:6px">${gapOk?'Le total de l’actif est égal au total du passif.':'Cet écart n’est pas corrigé automatiquement. Il provient des éléments non renseignés (valeur comptable des biens, amortissements, apports, dettes fournisseurs). Complétez la fiche société, les biens et les emprunts pour le réduire.'}</p></div>
+        <div class="notice" style="margin-top:14px;border-left:3px solid ${gapOk?'var(--green)':'var(--red)'}"><strong>${gapOk?'Bilan équilibré':'Écart actif − passif : '+money(m.gap,2)}</strong><p class="sub" style="margin-top:6px">${gapOk?'Le total de l’actif est égal au total du passif.':'Cet écart n’est pas corrigé automatiquement. Il provient des éléments non renseignés (valeur comptable des biens, amortissements, apports, dettes fournisseurs). Complétez la fiche société, les biens et les emprunts pour le réduire.'}</p></div>
       </div></div>
     </div>
     <div class="settings-grid" style="margin-bottom:20px">
-      <div class="panel"><div class="panel-head"><h2>Compte de résultat</h2><span class="pill">${esc(period.label)}</span></div><div class="panel-body">${resultatTable}${financing}</div></div>
+      <div class="panel"><div class="panel-head"><h2>Compte de résultat</h2><span class="pill">${s.regime==='IS'?'2033-B · case 310':'comptable'}</span></div><div class="panel-body">${resultatTable}<p class="sub" style="margin-top:10px">${s.regime==='IS'?'Résultat comptable à reporter à la case 136 du bilan 2033-A et à la case 310 du compte de résultat 2033-B.':'Résultat comptable. Le forfait de la ligne 7 du 2072 est une déduction fiscale, pas une charge : le résultat fiscal peut donc en différer.'}</p>${financing}</div></div>
       <div class="panel"><div class="panel-head"><h2>Construction de la trésorerie</h2></div><div class="panel-body">${construction}<p class="sub" style="margin-top:12px">Le solde de trésorerie suit les mêmes règles que la trésorerie : solde d’ouverture de la société, puis mouvements datés jusqu’au ${date(m.period.end)}. Les mouvements antérieurs au solde d’ouverture sont exclus.</p></div></div>
     </div>
     <div class="panel"><div class="panel-head"><h2>Comparaison des exercices</h2><span class="sub">Un bilan par année existante</span></div><div class="panel-body"><div class="table-wrap"><table><thead><tr><th>Exercice</th><th class="align-right">Produits</th><th class="align-right">Charges</th><th class="align-right">Résultat</th><th class="align-right">Trésorerie</th><th class="align-right">Actif</th><th class="align-right">Passif</th><th class="align-right">Écart</th></tr></thead><tbody>${compare}</tbody></table></div>
       <p class="sub" style="margin-top:12px">Chaque colonne reprend les règles du bilan affiché : produits et charges hors opérations de financement, trésorerie à la clôture, créances de loyers et valeur estimée des biens. Le format (actif brut / amortissements / net, passif par rubriques) suit la présentation légale du bilan ; les rubriques sans donnée ne sont pas affichées pour ne pas inventer de montant.</p>
     </div></div>`;
+}
+
+// --- Classement des catégories sur les lignes officielles -----------------
+function balanceMappingModal(){
+    let s=currentSCI();if(!s)return;
+    let period=balancePeriod(s),m=balance2072Model(s,period),map=balanceLineMap(s);
+    let cats=[...new Set(rows('entries',s.id).filter(r=>entryDate(r)).map(r=>String(r.category||'').trim()||'Autre'))].sort((a,b)=>a.localeCompare(b,'fr'));
+    let options=(sel)=>{
+        let out=`<option value="" ${sel==='' ?'selected':''}>Classement automatique</option>`;
+        out+=`<option value="finance" ${sel==='finance'?'selected':''}>Hors formulaire · opération de financement</option>`;
+        out+=`<option value="ventiler" ${sel==='ventiler'?'selected':''}>À ventiler (capital d’emprunt, non déductible)</option>`;
+        out+=`<option value="classer" ${sel==='classer'?'selected':''}>Non classé (exclu du bilan)</option>`;
+        BALANCE_2072_LINES.filter(([n,k])=>!['total'].includes(k)).forEach(([n,label])=>{
+            out+=`<option value="${n}" ${String(sel)===String(n)?'selected':''}>Ligne ${n} · ${esc(label.length>70?label.slice(0,68)+'…':label)}</option>`;
+        });
+        return out;
+    };
+    let automap={};
+    rows('entries',s.id).filter(r=>entryDate(r)).forEach(r=>{let c=String(r.category||'').trim()||'Autre';if(!automap[c])automap[c]=balanceAutoClass(r);});
+    let body=cats.map(c=>{
+        let ov=map&&Object.prototype.hasOwnProperty.call(map,c)?map[c]:'';
+        let auto=automap[c]||{line:'classer'};
+        return `<div class="col-config-item" style="align-items:flex-start"><div style="flex:1;min-width:0"><strong>${esc(c)}</strong><span class="cell-sub" style="display:block">Lecture automatique : ${auto.line==='finance'?'hors formulaire':auto.line==='ventiler'?'à ventiler':auto.line==='classer'?'non classé':'ligne '+esc(String(auto.line))+' — '+esc((BALANCE_LINE_LABELS[auto.line]||'').slice(0,60))}</span></div><select data-balance-map="${esc(c)}" style="width:auto;min-width:290px;max-width:48%" aria-label="Ligne officielle de la catégorie ${esc(c)}">${options(ov)}</select></div>`;
+    }).join('');
+    openModal('Classer les catégories · formulaire 2072-C-A1',`<p class="sub" style="margin-bottom:12px">Chaque catégorie de trésorerie est rattachée à une ligne du formulaire officiel. Sans choix explicite, Dominis applique une lecture automatique du libellé, rappelée sous chaque catégorie. Ce classement ne modifie ni les montants ni la trésorerie : il ne change que la présentation du bilan.</p>${cats.length?body:'<p class="sub">Aucune catégorie à classer.</p>'}<p class="compact-note">Les échéances d’emprunt ne contiennent qu’une part d’intérêts déductibles : classez la catégorie « Emprunt (capital + intérêts) » sur la ligne 20 uniquement si vous y avez isolé les intérêts, sinon laissez-la « à ventiler ».</p>`,`<button data-action="close-modal">Fermer</button><button class="primary" data-action="balance-map-save">${icon('check')} Enregistrer le classement</button>`,true);
+}
+function balanceAssignModal(){
+    let s=currentSCI();if(!s)return;
+    let period=balancePeriod(s),m=balance2072Model(s,period);
+    if(!m.unassigned.length)return notify('Tous les mouvements de la période sont rattachés à un bien.');
+    let opts=(sel)=>`<option value="">Sans bien (non affecté)</option>`+rows('properties',s.id).map(p=>`<option value="${esc(p.id)}" ${sel===p.id?'selected':''}>${esc(p.name)} · ${esc(p.address||'adresse non renseignée')}</option>`).join('');
+    let props=rows('properties',s.id);
+    let sameAddress=(r)=>{
+        // Proposition : la catégorie « travaux » ne dit pas le bien ; on propose
+        // le bien quand la société n'en a qu'un, sinon l'utilisateur choisit.
+        return props.length===1?props[0].id:'';
+    };
+    let body=m.unassigned.slice(0,60).map(r=>`<tr><td>${date(r.date)}<span class="cell-sub">${esc(truncate(r.label,48))}</span></td><td class="align-right">${money(Math.abs(entrySigned(r)),2)}</td><td><select data-balance-assign="${esc(r.id)}" style="width:100%;min-width:220px">${opts(sameAddress(r))}</select></td></tr>`).join('');
+    openModal('Affecter les mouvements · colonnes par immeuble',`<p class="sub" style="margin-bottom:12px">${m.unassigned.length} mouvement${m.unassigned.length>1?'s':''} de la période n’${m.unassigned.length>1?'ont':'a'} pas de bien rattaché. Les colonnes du bilan sont des <strong>adresses distinctes</strong> : rattacher un mouvement à un bien le range dans la colonne de l’adresse de ce bien.</p><div class="table-wrap"><table><thead><tr><th>Mouvement</th><th class="align-right">Montant</th><th>Bien / immeuble</th></tr></thead><tbody>${body}</tbody></table></div>${m.unassigned.length>60?`<p class="sub" style="margin-top:10px">Seuls les 60 premiers mouvements sont affichés.</p>`:''}`,`<button data-action="close-modal">Annuler</button><button class="primary" data-action="balance-assign-save">${icon('check')} Enregistrer les affectations</button>`,true);
+}
+function truncate(t,n){t=String(t||'');return t.length>n?t.slice(0,n-1)+'…':t;}
+
+// --- Page « Bilan » -------------------------------------------------------
+function balancePage(s){
+    let period=balancePeriod(s),years=balanceYears(s);
+    let custom=period.mode==='custom';
+    let yearOptions=years.map(y=>`<option value="${y}" ${!custom&&y===period.year?'selected':''}>Exercice ${y}</option>`).join('');
+    let controls=`<div class="row gap8 wrap" style="margin-bottom:16px"><label class="sub" for="balance-year">Période du bilan</label><select id="balance-year" style="width:auto;min-width:190px">${yearOptions}<option value="custom" ${custom?'selected':''}>Période personnalisée</option></select>${custom?`<input id="balance-start" type="date" value="${esc(period.start)}" aria-label="Début de la période"><span class="muted">→</span><input id="balance-end" type="date" value="${esc(period.end)}" aria-label="Fin de la période">`:''}<span class="pill gold">${esc(period.label)}</span><span class="pill">Clôture statutaire ${esc(s.closing||'31/12')}</span><span class="pill">${s.regime==='IS'?'Régime IS · liasse 2033':'Régime IR · formulaire 2072'}</span><span style="flex:1"></span><button type="button" data-action="balance-mapping">${icon('settings')} Classer les catégories</button><button type="button" data-action="balance-assign">${icon('building')} Affecter les mouvements</button></div>`;
+    let tabs=`<nav class="tabs" role="tablist" aria-label="Présentation du bilan" style="margin-top:6px">${BALANCE_TABS.map(([id,label])=>`<button type="button" class="tab ${balanceTab===id?'active':''}" data-balance-tab="${id}" role="tab" aria-selected="${balanceTab===id}">${label}</button>`).join('')}</nav>`;
+    let content='';
+    if(balanceTab==='societe'){
+        content=balanceSocieteView(s,period,balance2072Model(s,period));
+    }else if(balanceTab==='formulaire'){
+        content=balance2072View(s,period,balance2072Model(s,period));
+    }else{
+        content=balanceComptableView(s,period,balanceModel(s,period),years);
+    }
+    return `${controls}${tabs}${content}`;
 }
 
 function identity(s){let openTxt=s.opening&&Number(s.opening)!==0?money(s.opening,2)+(s.opening_date?' au '+date(s.opening_date):''):'—';return `<div class="settings-grid"><div class="panel"><div class="panel-head"><h2>Identité de la société</h2><button data-action="edit-sci">${icon('edit')} Modifier</button></div><div class="panel-body info-grid">${[['Dénomination',s.name],['SIREN',s.siren||'Non renseigné'],['Gérant',s.manager||'Non renseigné'],['Siège social',s.address||'Non renseigné'],['Capital social',money(s.capital,2)],['Régime fiscal',s.regime||'IR'],['Clôture de l’exercice',s.closing||'31/12'],['Solde d’ouverture',openTxt]].map(([k,v])=>`<div class="info-item"><label>${k}</label><span>${esc(v)}</span></div>`).join('')}<div class="info-item" style="grid-column:1/-1"><label>Notes de gestion</label><span style="white-space:pre-wrap">${esc(s.notes||'Aucune note.')}</span></div></div></div><div class="stack"><div class="panel"><div class="panel-head"><h2>Repères de gestion · ${esc(s.regime||'IR')}</h2></div><div class="panel-body stack"><p class="sub">${s.regime==='IS'?'Préparer la déclaration 2065 et ses annexes avec une comptabilité d’engagement, les immobilisations et les amortissements. Dominis ne produit pas de liasse fiscale ni de FEC.':'Préparer les informations de la déclaration 2072 selon votre situation. Les recettes et dépenses enregistrées ne déterminent pas automatiquement le résultat foncier imposable.'}</p><p class="sub">Le gérant doit rendre compte annuellement de sa gestion aux associés (article 1856 du Code civil). Les modalités de décision dépendent notamment des statuts.</p><button data-add="tasks">${icon('calendar')} Ajouter une échéance de suivi</button><button data-action="annual-report">${icon('file')} Préparer une synthèse annuelle</button><p class="sub">Les dates fiscales sont à vérifier chaque année. Aucun calendrier légal automatique n’est imposé par l’application.</p></div></div><div class="panel"><div class="panel-body"><h3 class="red">Suppression de la SCI</h3><p class="sub" style="margin:8px 0 15px">Cette action supprime la société et toutes ses données liées. Exportez une sauvegarde complète auparavant.</p><button class="danger" data-action="delete-sci">${icon('trash')} Supprimer cette SCI</button><button class="danger" data-action="manage-deletions" style="margin-top:8px">${icon('trash')} Gérer la suppression</button><p class="compact-note" style="margin-top:10px">Vider une seule page de cette SCI, sans toucher aux autres sociétés.</p></div></div></div></div>`;}
@@ -9529,7 +9996,7 @@ if(kind==='leases')body+=f('tenant','Locataire / raison sociale','text','',null,
 if(kind==='partners')body+=f('name','Nom de l’associé','text','',null,true,true)+f('email','E-mail','email')+f('role','Fonction','select','Associé',['Associé','Gérant associé','Personne morale'])+f('shares','Nombre de parts sociales','number',0)+f('cca','Solde déclaré du compte courant (€)','number',0)+f('address','Adresse','text','',null,false,true);
 if(kind==='loans')body+=f('name','Nom du financement','text','',null,true,true)+f('bank','Établissement prêteur')+f('principal','Capital initial (€)','number',0)+f('balance','Capital restant dû (€)','number',0)+f('balance_date','Date du capital restant dû','date',today())+f('rate','Taux nominal annuel (%)','number',0)+f('monthly','Mensualité totale (€)','number',0)+f('start','Début','date')+f('end','Fin','date');
 if(kind==='calls')body+=f('lease_id','Bail / locataire','select','',[['','Sélectionner un bail'],...rows('leases',sid).map(l=>[l.id,l.tenant+' · '+label(rec(l.property_id))])],true,true)+f('period','Mois concerné','month',today().slice(0,7),null,true)+f('due','Date d’exigibilité','date',today(),null,true)+f('rent','Loyer appelé hors charges (€)','number',0)+f('charges','Charges appelées (€)','number',0);
-if(kind==='entries')body+=f('label','Libellé de l’opération','text','',null,true,true)+f('date','Date du mouvement','date',today(),null,true)+f('direction','Sens','select','Recette',['Recette','Dépense'],true)+f('amount','Montant (€)','number',0,null,true)+f('category','Catégorie','select','Autre',['Loyers','Provisions de charges','Entretien','Travaux','Assurance','Taxe foncière','Frais de gestion','Intérêts','Emprunt (capital + intérêts)','Apport associé','Remboursement associé','Dépôt de garantie','Autre'])+f('call_id','Rattacher à un appel de loyer (facultatif)','select','',[['','Sans rattachement'],...rows('calls',sid).map(c=>[c.id,label(rec(c.lease_id))+' · '+c.period+' · restant '+money(due(c),2)])],false,true);
+if(kind==='entries')body+=f('label','Libellé de l’opération','text','',null,true,true)+f('date','Date du mouvement','date',today(),null,true)+f('direction','Sens','select','Recette',['Recette','Dépense'],true)+f('amount','Montant (€)','number',0,null,true)+f('category','Catégorie','select','Autre',['Loyers','Provisions de charges','Entretien','Travaux','Assurance','Taxe foncière','Frais de gestion','Intérêts','Emprunt (capital + intérêts)','Apport associé','Remboursement associé','Dépôt de garantie','Autre'])+f('property_id','Bien / immeuble concerné (facultatif)','select','',[['','Sans bien (non affecté)'],...rows('properties',sid).map(p=>[p.id,p.name+' · '+(p.address||'adresse non renseignée')])],false,true)+f('call_id','Rattacher à un appel de loyer (facultatif)','select','',[['','Sans rattachement'],...rows('calls',sid).map(c=>[c.id,label(rec(c.lease_id))+' · '+c.period+' · restant '+money(due(c),2)])],false,true);
 if(kind==='tasks'){
     let isImp=!!d.important,remOn=!!d.reminders_enabled,remDates=Array.isArray(d.reminders)&&d.reminders.length?d.reminders:[d.due||today()],remCount=remOn?Math.max(1,Math.min(30,Number(d.reminder_count)||remDates.length||1)):1;
     body+=f('name','Objet de l’échéance','text','',null,true,true)+f('due','Date prévue','date',today(),null,true)+f('category','Catégorie','select','Juridique',['Juridique','Fiscalité','Assurance','Bail','DPE / diagnostics','Travaux','Autre'])+f('status','Statut','select','À faire',['À faire','En cours','Terminé']);
@@ -9645,12 +10112,12 @@ function receipt(id){let c=rec(id),l=rec(c.lease_id),s=sci(c.sci),p=rec(l?.prope
 function searchModal(){openModal('Retrouver l’essentiel',`<input id="global-search" type="search" placeholder="Une SCI, un locataire, un bien, un document…" aria-label="Recherche globale"><div id="search-results" class="search-results" style="margin-top:15px"></div>`);let search=()=>{let q=$('#global-search').value.toLowerCase().trim();let list=[...S.scis.map(s=>({...s,kind:'sci'})),...S.records].filter(r=>q&&Object.values(r).some(v=>typeof v==='string'&&v.toLowerCase().includes(q))).slice(0,30);$('#search-results').innerHTML=list.map(r=>`<button class="search-result" data-search-go="${r.id}" data-search-kind="${r.kind}">${icon(r.kind==='sci'?'building':'file')}<span>${esc(label(r))}<small>${r.kind==='sci'?'Société':esc(sciname(r.sci))+' · '+kindNames[r.kind]}</small></span></button>`).join('')||`<p class="sub">${q?'Aucun résultat.':'La recherche porte sur toutes les SCI et les métadonnées des documents.'}</p>`;};$('#global-search').oninput=search;search();}
 async function quit(){if(closing||updateInstalling)return;if($('#modal').innerHTML&&modalDirty&&!confirm('Des modifications de formulaire ne sont pas enregistrées. Les abandonner et quitter ?'))return;openModal('Quitter en toute sérénité',`<p>Les écritures enregistrées et les réglages seront synchronisés, puis l’intégrité de la base sera vérifiée.</p><p class="sub" style="margin-top:12px">${S.settings.auto_backup?'Une sauvegarde complète sera créée dans sauvegardes/. ':''}${S.preview?'Mode aperçu : le service de démonstration restera disponible.':S.native?'La fenêtre et le processus local seront fermés.':'En mode navigateur, la fermeture automatique de l’onglet peut être bloquée ; le serveur sera bien arrêté.'}</p>`,`<button data-action="close-modal">Rester dans Dominis</button><button class="primary" id="confirm-quit">${icon('exit')} Enregistrer et quitter</button>`);$('#confirm-quit').onclick=async()=>{closing=true;$('#confirm-quit').disabled=true;try{await settingsQueue;await api('quit',{});closeModal(true);if(S.preview){notify('Intégrité vérifiée, données sauvegardées. Le service reste actif dans cet aperçu.');await refresh();}else{$('#main').innerHTML=empty('Votre espace est fermé.','Toutes les données enregistrées ont été sauvegardées. Vous pouvez fermer cet onglet.');setTimeout(()=>window.close(),400);}}catch(e){modalError(e);$('#confirm-quit')&&($('#confirm-quit').disabled=false);}finally{closing=false;}};}
 function quickModal(){openModal('Une action, sans détour',`<div class="checks">${Object.entries(kindNames).map(([k,n])=>`<button data-add="${k}" style="justify-content:flex-start">${icon('plus')}${n}</button>`).join('')}</div>`);}
-async function handleAction(a){switch(a){case'collapse':await setPref({collapsed:!S.settings.collapsed});document.body.classList.toggle('collapsed',!!S.settings.collapsed);if(page==='settings')render();break;case'bell':openBellModal();break;case'new-sci':editForm('sci');break;case'edit-sci':editForm('sci',currentSCI());break;case'delete-sci':deletion('sci',page);break;case'manage-deletions':manageDeletions();break;case'close-modal':closeModal();break;case'export':exportModal();break;case'import':importModal();break;case'backup':await settingsQueue;await download(await api('backup',{}),'dominis-sauvegarde-'+today()+'.db');await refresh();notify('Sauvegarde complète téléchargée. Conservez-la sur un support sûr.');break;case'restore':restoreModal();break;case'generate-calls':callsModal();break;case'search':searchModal();break;case'quick':quickModal();break;case'annual-report':annualReport();break;case'doc-folder-reset':await restoreDefaultDocFolders();break;case'doc-folder-new':newDocFolderModal();break;case'quit':await quit();break;case'auto-backup':await setPref({auto_backup:!S.settings.auto_backup});render();break;case'weekly-auto-save':await setPref({weekly_auto_save:!S.settings.weekly_auto_save});render();break;case'rename-space':openModal('Nom de votre espace',field('owner','Nom affiché','text',S.settings.owner),`<button data-action="close-modal">Annuler</button><button class="primary" id="save-owner">Enregistrer</button>`);$('#save-owner').onclick=async()=>{try{let v=$('#f-owner').value.trim();if(!v||v.length>45)throw new Error('Choisissez un nom de 1 à 45 caractères.');await setPref({owner:v});closeModal(true);render();}catch(e){modalError(e)}};break;case'reset-demo':openModal('Repartir d’un espace vierge',`<p class="sub">Toutes les SCI et données de cette démonstration seront supprimées, y compris vos ajouts. Vos préférences d’apparence sont conservées. Créez une sauvegarde avant de continuer.</p><div style="margin-top:15px">${field('confirm-demo','Saisissez EFFACER pour confirmer')}</div>`,`<button data-action="close-modal">Annuler</button><button class="danger" id="reset-confirm">Vider la démonstration</button>`);$('#reset-confirm').onclick=async()=>{try{await api('reset-demo',{confirmation:$('#f-confirm-demo').value});closeModal(true);page='dashboard';await refresh();notify('Votre espace est maintenant vierge.');}catch(e){modalError(e)}};break;}}
-document.addEventListener('click',async ev=>{let el=ev.target.closest('button,[data-nav],[data-doc-open],[data-doc-folder]');if(!el)return;if(Date.now()<folderDragSuppressUntil)return;try{if(updateInstalling)return;if(el.dataset.folderNew){newDocFolderModal(el.dataset.folderParent||'');return;}if(el.dataset.folderRename){renameDocFolderModal(el.dataset.folderRename);return;}if(el.dataset.folderMove){await moveDocFolder(docScope(),el.dataset.folderMove,Number(el.dataset.dir));return;}if(el.dataset.docFolder!==undefined&&el.dataset.docFolder!==null&&el.dataset.docOpen===undefined){docFolder=el.dataset.docFolder;docYear='';renderListing();return;}if(el.dataset.docOpen){await documentPreview(el.dataset.docOpen);return;}if(el.dataset.documentPreview){await documentPreview(el.dataset.documentPreview);return;}if(el.dataset.docZoom){let v=el.dataset.docZoom;if(v==='in')docPreviewStageZoom(docPreviewZoom+0.25);else if(v==='out')docPreviewStageZoom(docPreviewZoom-0.25);else docPreviewStageZoom(Number(v)/100);return;}if(el.dataset.docSheet!==undefined&&el.dataset.docSheet!==null){docPreviewSheetSelect(Number(el.dataset.docSheet));return;}if(el.dataset.macClose){dismissMacNotification(el.dataset.macClose);return;}if(el.dataset.macView){let id=el.dataset.macView,r=rec(id);await markTaskRemindersRead(id);if(r){closeModal(true);navigate(r.sci,'tasks');editForm('tasks',r);}return;}if(el.dataset.bellView){let id=el.dataset.bellView,r=rec(id);await markTaskRemindersRead(id);closeModal(true);if(r){navigate(r.sci,'tasks');editForm('tasks',r);}return;}if(el.dataset.bellRead){await markTaskRemindersRead(el.dataset.bellRead);if($('#bell-modal-body'))openBellModal();return;}if(el.dataset.bellReadAll){for(let r of unreadReminderTasks())await markTaskRemindersRead(r.id);if($('#bell-modal-body'))openBellModal();return;}if(el.dataset.bellAgenda){closeModal(true);navigate('agenda');return;}if(el.dataset.tableConfig){openTableColumnsModal(el.dataset.tableConfig);return;}
+async function handleAction(a){switch(a){case'collapse':await setPref({collapsed:!S.settings.collapsed});document.body.classList.toggle('collapsed',!!S.settings.collapsed);if(page==='settings')render();break;case'bell':openBellModal();break;case'new-sci':editForm('sci');break;case'edit-sci':editForm('sci',currentSCI());break;case'delete-sci':deletion('sci',page);break;case'manage-deletions':manageDeletions();break;case'close-modal':closeModal();break;case'export':exportModal();break;case'import':importModal();break;case'backup':await settingsQueue;await download(await api('backup',{}),'dominis-sauvegarde-'+today()+'.db');await refresh();notify('Sauvegarde complète téléchargée. Conservez-la sur un support sûr.');break;case'restore':restoreModal();break;case'generate-calls':callsModal();break;case'search':searchModal();break;case'quick':quickModal();break;case'annual-report':annualReport();break;case'balance-mapping':balanceMappingModal();break;case'balance-assign':balanceAssignModal();break;case'balance-forfait-local':{let s=currentSCI();if(s){let p=balancePeriod(s),v='20';let all={...(S.settings.balance_forfait||{})};let per={...(all[s.id]||{})};per[String(p.year||Number(String(p.start).slice(0,4)))]=Number(v);all[s.id]=per;setPref({balance_forfait:all}).then(()=>render());}break;}case'balance-map-save':{let s=currentSCI();if(!s)break;let map={...balanceLineMap(s)};$$('[data-balance-map]').forEach(sel=>{let c=sel.dataset.balanceMap,v=sel.value;if(v)map[c]=v;else delete map[c];});let all={...(S.settings.balance_line_map||{})};all[s.id]=map;setPref({balance_line_map:all}).then(()=>{closeModal(true);render();notify('Classement enregistré pour '+s.name+'.');});break;}case'balance-assign-save':{let s=currentSCI();if(!s)break;let changes=[...$$('[data-balance-assign]')].map(sel=>[sel.dataset.balanceAssign,sel.value]);let todo=changes.filter(([id,pid])=>pid);for(const [id,pid] of todo){let r=rec(id);if(!r)continue;await api('save',{kind:'entries',id,sci:r.sci,data:{...r,property_id:pid}});}await load();closeModal(true);render();notify(todo.length+' mouvement'+(todo.length>1?'s':'')+' rattaché'+(todo.length>1?'s':'')+' à un bien.');break;}case'doc-folder-reset':await restoreDefaultDocFolders();break;case'doc-folder-new':newDocFolderModal();break;case'quit':await quit();break;case'auto-backup':await setPref({auto_backup:!S.settings.auto_backup});render();break;case'weekly-auto-save':await setPref({weekly_auto_save:!S.settings.weekly_auto_save});render();break;case'rename-space':openModal('Nom de votre espace',field('owner','Nom affiché','text',S.settings.owner),`<button data-action="close-modal">Annuler</button><button class="primary" id="save-owner">Enregistrer</button>`);$('#save-owner').onclick=async()=>{try{let v=$('#f-owner').value.trim();if(!v||v.length>45)throw new Error('Choisissez un nom de 1 à 45 caractères.');await setPref({owner:v});closeModal(true);render();}catch(e){modalError(e)}};break;case'reset-demo':openModal('Repartir d’un espace vierge',`<p class="sub">Toutes les SCI et données de cette démonstration seront supprimées, y compris vos ajouts. Vos préférences d’apparence sont conservées. Créez une sauvegarde avant de continuer.</p><div style="margin-top:15px">${field('confirm-demo','Saisissez EFFACER pour confirmer')}</div>`,`<button data-action="close-modal">Annuler</button><button class="danger" id="reset-confirm">Vider la démonstration</button>`);$('#reset-confirm').onclick=async()=>{try{await api('reset-demo',{confirmation:$('#f-confirm-demo').value});closeModal(true);page='dashboard';await refresh();notify('Votre espace est maintenant vierge.');}catch(e){modalError(e)}};break;}}
+document.addEventListener('click',async ev=>{let el=ev.target.closest('button,[data-nav],[data-doc-open],[data-doc-folder]');if(!el)return;if(Date.now()<folderDragSuppressUntil)return;try{if(updateInstalling)return;if(el.dataset.folderNew){newDocFolderModal(el.dataset.folderParent||'');return;}if(el.dataset.folderRename){renameDocFolderModal(el.dataset.folderRename);return;}if(el.dataset.folderMove){await moveDocFolder(docScope(),el.dataset.folderMove,Number(el.dataset.dir));return;}if(el.dataset.docFolder!==undefined&&el.dataset.docFolder!==null&&el.dataset.docOpen===undefined){docFolder=el.dataset.docFolder;docYear='';renderListing();return;}if(el.dataset.docOpen){await documentPreview(el.dataset.docOpen);return;}if(el.dataset.documentPreview){await documentPreview(el.dataset.documentPreview);return;}if(el.dataset.docZoom){let v=el.dataset.docZoom;if(v==='in')docPreviewStageZoom(docPreviewZoom+0.25);else if(v==='out')docPreviewStageZoom(docPreviewZoom-0.25);else docPreviewStageZoom(Number(v)/100);return;}if(el.dataset.docSheet!==undefined&&el.dataset.docSheet!==null){docPreviewSheetSelect(Number(el.dataset.docSheet));return;}if(el.dataset.macClose){dismissMacNotification(el.dataset.macClose);return;}if(el.dataset.macView){let id=el.dataset.macView,r=rec(id);await markTaskRemindersRead(id);if(r){closeModal(true);navigate(r.sci,'tasks');editForm('tasks',r);}return;}if(el.dataset.bellView){let id=el.dataset.bellView,r=rec(id);await markTaskRemindersRead(id);closeModal(true);if(r){navigate(r.sci,'tasks');editForm('tasks',r);}return;}if(el.dataset.bellRead){await markTaskRemindersRead(el.dataset.bellRead);if($('#bell-modal-body'))openBellModal();return;}if(el.dataset.bellReadAll){for(let r of unreadReminderTasks())await markTaskRemindersRead(r.id);if($('#bell-modal-body'))openBellModal();return;}if(el.dataset.bellAgenda){closeModal(true);navigate('agenda');return;}if(el.dataset.balanceTab){balanceTab=el.dataset.balanceTab;render();return;}if(el.dataset.tableConfig){openTableColumnsModal(el.dataset.tableConfig);return;}
 if(el.dataset.tableDensity){await saveTableView(el.dataset.tableKind,{density:el.dataset.tableDensity});refreshTableViewUi(el.dataset.tableKind);return;}
 if(el.dataset.tableOpt){let tk=el.dataset.tableKind,cur=tableView(tk);await saveTableView(tk,{[el.dataset.tableOpt]:!cur[el.dataset.tableOpt]});refreshTableViewUi(tk);return;}if(el.dataset.colToggle){let k=el.dataset.colKind,cid=el.dataset.colToggle,cols=getTableColumns(k),c=cols.find(x=>x.id===cid);if(c){if(c.visible&&cols.filter(x=>x.visible).length<=1)return;c.visible=!c.visible;await saveTableColumns(k,cols);if(tableKindOf(k)==='entries_preview')render();else renderListing();if($('#col-config-wrap'))$('#col-config-wrap').innerHTML=renderTableColumnsList(k);}return;}if(el.dataset.colMove){let k=el.dataset.colKind,cid=el.dataset.colMove,dir=Number(el.dataset.dir),cols=getTableColumns(k),i=cols.findIndex(x=>x.id===cid),j=i+dir;if(i>=0&&j>=0&&j<cols.length){[cols[i],cols[j]]=[cols[j],cols[i]];await saveTableColumns(k,cols);if(tableKindOf(k)==='entries_preview')render();else renderListing();if($('#col-config-wrap'))$('#col-config-wrap').innerHTML=renderTableColumnsList(k);}return;}if(el.dataset.colReset){// Réinitialisation explicite : ce tableau retrouve l'ordre et la visibilité par défaut, sans toucher aux autres tableaux (même ceux du même type).
 let k=el.dataset.colReset,all={...(S.settings.table_columns||{})};all[k]={order:[],hidden:[]};await setPref({table_columns:all});if(tableKindOf(k)==='entries_preview')render();else renderListing();if($('#col-config-wrap'))$('#col-config-wrap').innerHTML=renderTableColumnsList(k);return;}if(el.dataset.settingsSection){settingsSection=el.dataset.settingsSection;render();return;}if(el.dataset.updateAction){let a=el.dataset.updateAction;if(a==='check'){updateInfo=await (await api('update/check',{})).json();render();}else if(a==='offer')showUpdateOffer();else if(a==='install')await beginUpdate();else if(a==='force')await forceUpdate();else if(a==='force-install')await beginUpdate(true);return;}if(el.dataset.nav){navigate(el.dataset.nav,el.dataset.tab||'overview');return;}if(el.dataset.tab){tab=el.dataset.tab;query='';filter='';setPref({last_tab:tab});render();return;}if(el.dataset.action){await handleAction(el.dataset.action);return;}if(el.dataset.add){editForm(el.dataset.add);return;}if(el.dataset.edit){let r=rec(el.dataset.edit);editForm(r.kind,r);return;}if(el.dataset.delete){let r=rec(el.dataset.delete);deletion(r.kind,r.id);return;}if(el.dataset.pay){let c=rec(el.dataset.pay);editForm('entries',null,{sci:c.sci,label:'Loyer '+label(rec(c.lease_id))+' · '+c.period,call_id:c.id,amount:due(c),direction:'Recette',category:'Loyers'});$('#f-sci').value=c.sci;$('#f-sci').disabled=true;return;}if(el.dataset.receipt){receipt(el.dataset.receipt);return;}if(el.dataset.document){let r=rec(el.dataset.document);await download(await api('document?id='+r.id),r.filename||'document');return;}if(el.dataset.complete){let r=rec(el.dataset.complete);dismissMacNotification(r.id);let reached=taskReminderDates(r).filter(d=>d&&d<=today());let read=[...new Set([...(Array.isArray(r.read_reminders)?r.read_reminders:[]),...reached])];await api('save',{kind:r.kind,id:r.id,sci:r.sci,data:{...r,status:'Terminé',read_reminders:read}});await refresh();notify('Échéance terminée.');return;}if(el.dataset.theme){await setPref({theme:el.dataset.theme});render();return;}if(el.dataset.move){let o=navOrder(),i=o.indexOf(el.dataset.move),j=i+Number(el.dataset.dir);if(j>=0&&j<o.length){[o[i],o[j]]=[o[j],o[i]];await setPref({order:o});render();}return;}if(el.dataset.searchGo){let id=el.dataset.searchGo,kind=el.dataset.searchKind;closeModal(true);if(kind==='sci')navigate(id);else{let r=rec(id);navigate(r.sci,kind);editForm(kind,r);}return;}}catch(e){notify(e.message,true);}});
-document.addEventListener('change',async ev=>{let el=ev.target;try{if(el.classList&&el.classList.contains('year-select')){let v=el.value===YEAR_ALL?YEAR_ALL:Number(el.value);syncYearSelects(el.value);await setPref({year:v});render();}if(el.id==='scope'){scope=el.value;render();}if(el.id==='status-filter'){filter=el.value;renderListing();}if(el.id==='doc-year-filter'){docYear=el.value;renderListing();}
+document.addEventListener('change',async ev=>{let el=ev.target;try{if(el.classList&&el.classList.contains('year-select')){let v=el.value===YEAR_ALL?YEAR_ALL:Number(el.value);syncYearSelects(el.value);await setPref({year:v});render();}if(el.id==='scope'){scope=el.value;render();}if(el.id==='status-filter'){filter=el.value;renderListing();}if(el.id==='doc-year-filter'){docYear=el.value;renderListing();}if(el.id==='balance-forfait'){let s=currentSCI();if(s){let p=balancePeriod(s),all={...(S.settings.balance_forfait||{})},per={...(all[s.id]||{})};let v=Math.max(0,Number(el.value)||0);per[String(p.year||Number(String(p.start).slice(0,4)))]=v;all[s.id]=per;await setPref({balance_forfait:all});render();}}
 if(el.id==='balance-year'){let s=currentSCI();if(s){let p=balancePeriod(s);if(el.value==='custom'){balanceView={mode:'custom',year:p.year,start:p.start,end:p.end};}else{balanceView={mode:'year',year:Number(el.value),start:'',end:''};}render();}}
 if(el.id==='balance-start'||el.id==='balance-end'){let s=currentSCI();if(s){let p=balancePeriod(s);balanceView={mode:'custom',year:p.year,start:el.id==='balance-start'?el.value:p.start,end:el.id==='balance-end'?el.value:p.end};render();}}
 if(el.id==='doc-preview-folder'){moveDocToFolder(docPreviewId,el.value);}}catch(e){notify(e.message,true)}});

@@ -123,12 +123,18 @@ class BalancePageTests(unittest.TestCase):
         self.assertIn('Période personnalisée', HTML)
 
     def test_balance_uses_the_legal_presentation(self):
-        for label in ('Actif', 'Passif', 'Compte de résultat', 'Capital social',
-                      'Report à nouveau', 'Résultat de la période',
-                      'Immobilisations corporelles', 'Créances · loyers échus non encaissés',
-                      'Disponibilités · trésorerie', 'Emprunts et dettes financières',
+        for label in ('Actif', 'Passif', 'Compte de résultat', 'Capital social ou individuel',
+                      'Report à nouveau', 'Résultat de l’exercice',
+                      'Immobilisations corporelles', 'Créances · clients et comptes rattachés',
+                      'Disponibilités', 'Emprunts et dettes assimilées',
                       'Comptes courants d’associés', 'Dépôts de garantie reçus'):
             self.assertIn(label, HTML)
+        # Cases officielles du bilan simplifié 2033-A.
+        for code in ("code:'028'", "code:'068'", "code:'084'", "code:'120'",
+                     "code:'134'", "code:'136'", "code:'164'", "code:'169'", "code:'174'"):
+            self.assertIn(code, HTML)
+        self.assertIn('Total général de l’actif · 110 (brut) / 112 (net)', HTML)
+        self.assertIn('Total général du passif · 180', HTML)
         self.assertIn('<th class="align-right">Brut</th><th class="align-right">Amortissements</th>', HTML)
 
     def test_financing_flows_are_excluded_from_the_result(self):
@@ -149,6 +155,64 @@ class BalancePageTests(unittest.TestCase):
     def test_comparison_covers_each_existing_year(self):
         self.assertIn('Comparaison des exercices', HTML)
         self.assertIn('let compare=years.slice(0,5).map(y=>{', HTML)
+
+
+class Balance2072Tests(unittest.TestCase):
+    """Formulaire 2072-C-A1 : numérotation officielle, arrondis, adresses.
+
+    Le classeur de référence portait « L136 = 21/24 » : le revenu ou déficit de
+    l'immeuble (ligne 21) devient le revenu net (ligne 24) réparti entre les
+    associés. Les montants sont arrondis à l'euro colonne par colonne, jamais
+    après addition, et deux biens à la même adresse ne forment qu'une colonne.
+    """
+
+    def test_official_lines_are_listed_in_order(self):
+        block = between('const BALANCE_2072_LINES=[', '];')
+        numbers = [int(n) for n in re.findall(r'\[(\d+),', block)]
+        self.assertEqual(numbers, list(range(1, 27)))
+        self.assertIn('REVENU (+) OU DÉFICIT (-) DE L’IMMEUBLE', block)
+        self.assertIn('REVENU NET (+) OU DÉFICIT (-)', block)
+        self.assertIn('À RÉPARTIR ENTRE LES ASSOCIÉS', block)
+
+    def test_result_is_carried_to_lines_21_and_24(self):
+        block = between('// 21 = 5 − 17 − 18 − 19 − 20', 'pushRow(25,')
+        self.assertIn('prev[5].cells[i]-prev[17].cells[i]', block)
+        self.assertIn('prev[21].cells[i]+prev[22].cells[i]-prev[23].cells[i]', block)
+        self.assertIn('21 / 24', HTML)
+
+    def test_amounts_are_rounded_per_column_before_summing(self):
+        self.assertIn('let cells=keys.map(k=>Math.round(balanceLineAmount(m,n,k)));', HTML)
+        self.assertIn('rounded=cells.reduce((a,b)=>a+b,0);', HTML)
+        self.assertIn('arrondis à l’euro colonne par colonne, puis additionnés', HTML)
+
+    def test_buildings_are_grouped_by_distinct_address(self):
+        self.assertIn('function balanceAddressKey', HTML)
+        self.assertIn('__sans_adresse__', HTML)
+        block = between('function balanceBuildings(', 'function balanceEntryBuilding(')
+        self.assertIn('balanceAddressKey', block)
+
+    def test_forfait_is_a_single_editable_amount(self):
+        self.assertIn('function balanceForfaitSetting(s,year,hasBuildings)', HTML)
+        self.assertIn('return hasBuildings?20:0;', HTML)
+        self.assertIn('data-action="balance-forfait-local"', HTML)
+        self.assertIn('Appliquer le forfait de 20 €', HTML)
+        # Le forfait ne dépend pas du nombre d'adresses.
+        self.assertNotIn('20*m.buildings.length', HTML)
+
+    def test_line_mapping_and_assignment_are_persisted(self):
+        self.assertIn("case'balance-map-save'", HTML)
+        self.assertIn('balance_line_map', HTML)
+        self.assertIn("case'balance-assign-save'", HTML)
+        self.assertIn("data-balance-assign", HTML)
+
+    def test_is_company_is_pointed_to_the_2033_bundle(self):
+        self.assertIn('2033-A', HTML)
+        self.assertIn('2033-B', HTML)
+        self.assertIn('data-balance-tab="comptable"', HTML)
+
+    def test_unassigned_and_unclassified_are_never_silently_reused(self):
+        self.assertIn('Ils ne sont pas repris dans les totaux officiels.', HTML)
+        self.assertIn('Ils apparaissent en « Non affecté ».', HTML)
 
 
 if __name__ == '__main__':
