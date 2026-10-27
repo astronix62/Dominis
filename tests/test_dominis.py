@@ -413,8 +413,13 @@ class DominisTests(unittest.TestCase):
         self.assertIn('documentPreview', app.HTML)
         self.assertIn('doc-preview-stage', app.HTML)
         self.assertIn('docPreviewStageZoom', app.HTML)
-        # Zoom recentré : le point central est conservé après redimensionnement.
-        self.assertIn("vp.scrollLeft=Math.max(0,cx*stage.offsetWidth-vp.clientWidth/2)", app.HTML)
+        # Zoom recentré : le point du document placé au centre de la zone reste
+        # au centre après redimensionnement, et la zone de visualisation garde
+        # sa taille (seul le document est mis à l'échelle).
+        self.assertIn('function docPreviewAnchor(', app.HTML)
+        self.assertIn('vp.scrollLeft=Math.max(0,vp.scrollLeft+(dr.left+anchor.x*dr.width)-(vr.left+vr.width/2));', app.HTML)
+        self.assertIn('.doc-preview-stage{width:100%;height:100%;min-width:100%;min-height:100%', app.HTML)
+        self.assertIn('id="doc-preview-doc"', app.HTML)
         # Une seule colonne « SCI » avec pastille de couleur : la colonne
         # « Société » séparée faisait doublon et gaspillait de la largeur.
         self.assertNotIn("id:'society',label:'Société'", app.HTML)

@@ -78,12 +78,18 @@ class MonthlyTotalsTests(unittest.TestCase):
 
 
 class DocumentZoomTests(unittest.TestCase):
-    def test_viewport_no_longer_centres_and_clips_the_content(self):
+    def test_the_viewport_keeps_its_size(self):
+        # Le cadre d'aperçu garde sa taille : zoomer ne rétrécit plus la zone
+        # de visualisation, seul le document change d'échelle.
         viewport = between('.doc-preview-viewport{', '}')
-        self.assertNotIn('display:flex', viewport)
+        self.assertIn('height:64vh', viewport)
         stage = between('.doc-preview-stage{', '}')
-        self.assertIn('align-items:flex-start', stage)
-        self.assertIn('width:calc(100% * var(--doc-zoom,1))', stage)
+        self.assertIn('width:100%', stage)
+        self.assertIn('height:100%', stage)
+        self.assertNotIn('--doc-zoom', stage)
+        # Centrage sûr : margin:auto tombe à zéro quand le document déborde,
+        # ce qui laisse le défilement atteindre le début du contenu.
+        self.assertIn('.doc-preview-stage>*{margin:auto}', HTML)
 
     def test_sheet_text_follows_the_zoom(self):
         # Les cellules avaient une taille en pixels fixes : le zoom ne changeait
@@ -92,19 +98,38 @@ class DocumentZoomTests(unittest.TestCase):
         self.assertIn('.doc-preview-sheet td{font-size:calc(11px * var(--doc-zoom,1));padding:calc(14px * var(--doc-zoom,1)) calc(20px * var(--doc-zoom,1))}', HTML)
         self.assertIn('doc-preview-sheet-stage', HTML)
 
-    def test_pdf_is_really_scaled(self):
+    def test_the_document_is_resized_not_transformed(self):
+        # Un cadre mis à l'échelle par transform restait flou et débordait du
+        # conteneur : le document est désormais une boîte réelle, dimensionnée
+        # par le facteur de zoom, que le navigateur redessine à la bonne taille.
+        doc = between('.doc-preview-doc{', '}')
+        self.assertIn('width:calc(100% * var(--doc-zoom,1))', doc)
+        self.assertIn('height:calc(100% * var(--doc-zoom,1))', doc)
         frame = between('.doc-preview-frame{', '}')
-        self.assertIn('transform:scale(var(--doc-zoom,1))', frame)
-        self.assertIn('width:calc(100% / var(--doc-zoom,1))', frame)
-        self.assertIn('.doc-preview-stage.doc-preview-pdf{width:calc(100% * var(--doc-zoom,1))', HTML)
+        self.assertIn('width:100%', frame)
+        self.assertIn('height:100%', frame)
+        self.assertNotIn('transform:scale', frame)
+        self.assertIn('<div class="doc-preview-doc" id="doc-preview-doc">', HTML)
+
+    def test_zoom_stays_centred_on_the_same_document_point(self):
+        # Le point du document placé au centre de la zone avant le zoom est
+        # ramené au centre après redimensionnement : plus de dérive à gauche.
+        self.assertIn('function docPreviewAnchor(', HTML)
+        self.assertIn('vp.scrollLeft=Math.max(0,vp.scrollLeft+(dr.left+anchor.x*dr.width)-(vr.left+vr.width/2));', HTML)
+        self.assertIn('vp.scrollTop=Math.max(0,vp.scrollTop+(dr.top+anchor.y*dr.height)-(vr.top+vr.height/2));', HTML)
+        self.assertIn('let anchor=docPreviewAnchor(opts.x,opts.y);', HTML)
 
     def test_zoom_controls_and_bounds(self):
         self.assertIn('function docPreviewClampZoom(z){', HTML)
         self.assertIn('return Math.min(4,Math.max(0.25,Math.round(n*100)/100));', HTML)
-        self.assertIn("if(ev.target.id==='doc-zoom-range'){docPreviewStageZoom((Number(ev.target.value)||100)/100);}", HTML)
+        # Le curseur applique la valeur immédiatement, les boutons l'animent.
+        self.assertIn("if(ev.target.id==='doc-zoom-range'){docPreviewStageZoom((Number(ev.target.value)||100)/100,{instant:true});}", HTML)
         self.assertIn("if(v==='in')docPreviewStageZoom(docPreviewZoom+0.25);else if(v==='out')docPreviewStageZoom(docPreviewZoom-0.25);", HTML)
         # Le libellé et le curseur suivent toujours le facteur réellement appliqué.
-        self.assertIn("label.textContent='×'+next.toFixed(2).replace('.',',')", HTML)
+        self.assertIn("label.textContent='×'+zoom.toFixed(2).replace('.',',')", HTML)
+        # Ctrl + molette : le zoom suit le curseur.
+        self.assertIn('function docPreviewWheel(ev){', HTML)
+        self.assertIn("document.addEventListener('wheel',docPreviewWheel,{passive:false});", HTML)
 
 
 class BalancePageTests(unittest.TestCase):
@@ -170,9 +195,9 @@ class Declaration2072STests(unittest.TestCase):
         self.assertEqual(numbers, ['1', '2', '3', '4', '5', '6', '7', '8', '9',
                                    '9bis', '10', '11', '12', '13', '14', '15', '16',
                                    '17', '18', '19', '20', '21', '22', '23'])
-        self.assertIn('REVENU (+) OU DÉFICIT (−) DE L’IMMEUBLE (lignes 5 − 16 − 17)', block)
-        self.assertIn('REVENU NET (+) OU DÉFICIT (−) (lignes 18 + 19 − 20)', block)
-        self.assertIn('À RÉPARTIR ENTRE LES ASSOCIÉS (lignes 21 + 22)', block)
+        self.assertIn('REVENU (+) OU DÉFICIT (−) DE L’IMMEUBLE (5 − 16 − 17)', block)
+        self.assertIn('REVENU NET (+) OU DÉFICIT (−) (18 + 19 − 20)', block)
+        self.assertIn('À RÉPARTIR ENTRE LES ASSOCIÉS (21 + 22)', block)
 
     def test_totals_follow_the_official_formulas(self):
         block = between('function declA1Rows(', 'return rowsOut;')
@@ -194,7 +219,7 @@ class Declaration2072STests(unittest.TestCase):
     def test_amounts_are_rounded_per_column_before_summing(self):
         self.assertIn('return keys.map(k=>Math.round(L&&L.by[k]?L.by[k]:0));', HTML)
         self.assertIn('function declSum(cells)', HTML)
-        self.assertIn("Arrondi à l'euro de chaque colonne, puis seulement ensuite addition.", HTML)
+        self.assertIn("Arrondi à l'euro de chaque colonne, puis seulement ensuite addition", HTML)
 
     def test_buildings_are_grouped_by_distinct_address(self):
         self.assertIn('function balanceAddressKey', HTML)
