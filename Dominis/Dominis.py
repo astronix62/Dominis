@@ -7693,6 +7693,18 @@ HTML = r'''<!doctype html>
 .tv-fit .doc-folder-name{white-space:nowrap;min-width:0}.doc-folder-name>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.doc-folder-name svg{flex:none}
 .tv-sticky thead th{position:sticky;top:0;background:var(--panel);z-index:2;box-shadow:inset 0 -1px 0 var(--line)}
 tfoot td{border-top:1px solid var(--line);border-bottom:0;background:var(--panel2);font-weight:600}
+/* Déclaration : montants copiables, contrôles et cases officielles. */
+.decl-cell{background:none;border:0;padding:2px 5px;color:inherit;font:inherit;font-variant-numeric:tabular-nums;cursor:copy;border-radius:4px;text-align:right}
+.decl-cell:hover,.decl-cell:focus-visible{background:var(--goldbg);color:var(--gold)}
+.decl-cell.decl-total{font-weight:600}
+.decl-line-label{background:none;border:0;padding:0;color:inherit;font:inherit;text-align:left;cursor:pointer;text-decoration:underline dotted var(--line);text-underline-offset:3px}
+.decl-line-label:hover{color:var(--gold);text-decoration-color:var(--gold)}
+.decl-check{border:1px solid var(--line);border-radius:8px;padding:12px 15px;margin-bottom:10px;background:var(--panel2)}
+.decl-check:last-child{margin-bottom:0}
+.decl-cases .setting-row{padding:10px 0}
+.decl-cases .setting-row h3{font-size:12px}
+.decl-cases .setting-row p{font-size:10px}
+.decl-cases .setting-row:first-child{padding-top:0}
 /* Bilan : une colonne par adresse distincte, montants arrondis à l'euro. */
 .balance-table th,.balance-table td{padding:7px 10px;font-size:11px;vertical-align:top}
 .balance-table thead th{font-size:8px;letter-spacing:.5px}
@@ -7755,7 +7767,7 @@ const today=()=>new Date().getFullYear()+'-'+String(new Date().getMonth()+1).pad
 const palette=['#c7ad77','#879ad8','#70b7a6','#ce9683','#a08dcc','#7bb5c8'];
 const kindNames={properties:'Biens immobiliers',leases:'Baux & locataires',calls:'Appels de loyers',entries:'Trésorerie',partners:'Associés',loans:'Emprunts',tasks:'Échéances',documents:'Documents'};
 const navs={treasury:['Trésorerie','wallet'],agenda:['Échéancier','calendar'],documents:['Documents','folder']};
-const tabs=[['overview','Vue d’ensemble'],['properties','Biens'],['leases','Baux & locataires'],['calls','Loyers'],['entries','Trésorerie'],['partners','Associés'],['loans','Emprunts'],['tasks','Échéances'],['documents','Documents'],['balance','Bilan'],['identity','Société']];
+const tabs=[['overview','Vue d’ensemble'],['properties','Biens'],['leases','Baux & locataires'],['calls','Loyers'],['entries','Trésorerie'],['partners','Associés'],['loans','Emprunts'],['tasks','Échéances'],['documents','Documents'],['balance','Déclaration'],['identity','Société']];
 let S={scis:[],records:[],settings:{},audit:[]}, page='dashboard',tab='overview',query='',scope='',filter='',docFolder='',docYear='',modalDirty=false,previousFocus=null,settingsQueue=Promise.resolve(),closing=false,importData=null;
 let settingsSection='general', updateInfo={status:'checking',current:'',message:'Vérification sur GitHub…'}, updateInstalling=false, updateRequestPending=false, updatePrompted=false, updateInstance=null, restartSince=0, restartNotified=false;
 const updateLabels={idle:'En attente',checking:'Vérification en cours',available:'Mise à jour disponible',current:'À jour',unavailable:'Vérification impossible',disabled:'Aperçu',downloading:'Téléchargement en cours',installing:'Installation en cours',restarting:'Redémarrage automatique',failed:'Installation annulée'};
@@ -9478,43 +9490,48 @@ function balanceTable(sections,withAmort,totalLabel){
     let foot=totalLabel?`<tfoot><tr><td><strong>${esc(totalLabel)}</strong></td>${amountCells(grand,true)}</tr></tfoot>`:'';
     return `<div class="table-wrap"><table><thead><tr><th>Poste</th>${head}</tr></thead><tbody>${body}</tbody>${foot}</table></div>`;
 }
-// --- Bilan : immeubles, lignes officielles et arrondis --------------------
-// Le formulaire officiel d'une SCI à l'IR est l'annexe 1 de la déclaration
-// 2072-C (cadre VII, lignes 1 à 26), une annexe par immeuble. Dominis reprend
-// cette numérotation telle quelle : chaque mouvement est rattaché à une ligne
-// officielle et à un immeuble, entendu comme un LIEU : deux biens à la même
-// adresse forment une seule colonne, deux adresses différentes en forment deux.
-let balanceTab='societe';
-const BALANCE_TABS=[['societe','Tableau de la société'],['formulaire','Formulaire 2072-C-A1'],['comptable','Bilan comptable']];
-const BALANCE_2072_LINES=[
+// --- Déclaration : 2072-S, annexes A1/A2 et 2044 des associés --------------
+// La page ne présente pas un bilan « maison » : elle reproduit les documents
+// que la SCI dépose réellement. Une SCI à l'IR souscrit la 2072-S (cadres I à
+// IV) avec l'annexe A1 (cadre VII, lignes 1 à 23, une colonne par immeuble) et
+// l'annexe A2 (cadre IX, une colonne par associé). Chaque associé recopie
+// ensuite sa quote-part sur sa 2044 (rubrique 110, lignes 111 à 115) puis
+// reporte une case 4BA, 4BB, 4BC ou 4BD sur sa 2042.
+// Une SCI à l'IS dépose la 2065 et la liasse 2033 : la page présente alors le
+// bilan comptable, et rien d'autre.
+let declTab='checks';
+const DECL_IR_TABS=[['checks','À vérifier'],['main','2072-S'],['a1','Annexe A1'],['a2','Annexe A2'],['p2044','2044 des associés']];
+const DECL_IS_TABS=[['is','2065 · 2033-A/B']];
+// Numérotation exacte de l'annexe 2072-S-A1 (cadre VII). Elle diffère de celle
+// de la 2072-C : pas de ligne « immeubles spéciaux » ni « amortissement ».
+const DECL_A1_LINES=[
     [1,'Montant brut des fermages ou des loyers encaissés','recette'],
     [2,'Dépenses par nature déductibles incombant normalement à la société et mises par convention à la charge des locataires','recette'],
     [3,'Recettes brutes diverses. Subventions ANAH, indemnités d’assurance','recette'],
     [4,'Recettes qu’aurait pu produire la location des propriétés réservées ou mises gratuitement à disposition','recette'],
-    [5,'TOTAL DES RECETTES','total'],
+    [5,'TOTAL DES RECETTES (lignes 1 + 2 + 3 + 4)','total'],
     [6,'Frais d’administration et de gestion','charge'],
-    [7,'Autres frais de gestion non déductibles pour leur montant réel (montant forfaitaire fixé à 20 € par local)','charge'],
+    [7,'Autres frais de gestion non déductibles pour leur montant réel','charge'],
     [8,'Primes d’assurance','charge'],
     [9,'Dépenses de réparation, d’entretien et d’amélioration','charge'],
-    [10,'dont dépenses de travaux de rénovation énergétique (classe E, F ou G vers A à D)','dont'],
-    [11,'Charges récupérables non récupérées au départ du locataire','charge'],
-    [12,'Indemnités d’éviction, frais de relogement','charge'],
-    [13,'Impositions (y compris la CRL payée au titre de l’année considérée)','charge'],
-    [14,'Provisions pour charges de copropriété payées au titre de l’année considérée','charge'],
-    [15,'Régularisation des provisions pour charges de copropriété déduites au titre de l’année antérieure','deduction'],
-    [16,'Montant de la déduction spécifique','charge'],
-    [17,'TOTAL DES DÉDUCTIONS, FRAIS ET CHARGES','total'],
-    [18,'Dépenses spécifiques relatives aux immeubles spéciaux','charge'],
-    [19,'Amortissement au titre de l’année','charge'],
-    [20,'Intérêts des emprunts contractés pour l’acquisition, la reconstruction, l’agrandissement, la réparation, l’amélioration ou la conservation des immeubles','charge'],
-    [21,'REVENU (+) OU DÉFICIT (-) DE L’IMMEUBLE','total'],
-    [22,'Réintégration du supplément de déduction','charge'],
-    [23,'Rémunérations et avantages en nature attribués aux associés','charge'],
-    [24,'REVENU NET (+) OU DÉFICIT (-)','total'],
-    [25,'Revenus ou déficits relatifs aux parts détenues dans d’autres sociétés immobilières non passibles de l’impôt sur les sociétés','charge'],
-    [26,'REVENU NET (+) OU DÉFICIT (-) À RÉPARTIR ENTRE LES ASSOCIÉS','total']
+    ['9bis','dont dépenses de travaux de rénovation énergétique (classe E, F ou G vers A à D)','dont'],
+    [10,'Charges récupérables non récupérées au départ du locataire','charge'],
+    [11,'Indemnités d’éviction, frais de relogement','charge'],
+    [12,'Impositions (y compris la CRL payée au titre de l’année considérée)','charge'],
+    [13,'Provisions pour charges de copropriété payées au titre de l’année','charge'],
+    [14,'Régularisation des provisions pour charges déduites au titre de l’année antérieure','deduction'],
+    [15,'Montant de la déduction spécifique','charge'],
+    [16,'TOTAL DES DÉDUCTIONS, FRAIS ET CHARGES (6+7+8+9+10+11+12+13−14+15)','total'],
+    [17,'Intérêts des emprunts contractés pour l’acquisition, la réparation, l’amélioration ou la conservation des immeubles','charge'],
+    [18,'REVENU (+) OU DÉFICIT (−) DE L’IMMEUBLE (lignes 5 − 16 − 17)','total'],
+    [19,'Réintégration du supplément de déduction','charge'],
+    [20,'Rémunérations et avantages en nature attribués aux associés','charge'],
+    [21,'REVENU NET (+) OU DÉFICIT (−) (lignes 18 + 19 − 20)','total'],
+    [22,'Revenus ou déficits relatifs aux parts détenues dans d’autres sociétés immobilières non passibles de l’impôt sur les sociétés','charge'],
+    [23,'REVENU NET (+) OU DÉFICIT (−) À RÉPARTIR ENTRE LES ASSOCIÉS (lignes 21 + 22)','total']
 ];
-const BALANCE_LINE_LABELS=Object.fromEntries(BALANCE_2072_LINES.map(([n,l])=>[n,l]));
+const DECL_A1_LABELS=Object.fromEntries(DECL_A1_LINES.map(([n,l])=>[String(n),l]));
+const DECL_SELECTABLE=DECL_A1_LINES.filter(l=>!['total','dont'].includes(l[2]));
 function balanceNorm(v){return String(v||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,' ').trim();}
 function balanceAddressKey(p){
     let base=String((p&&p.address)||'').trim();
@@ -9522,16 +9539,17 @@ function balanceAddressKey(p){
     return balanceNorm(base).replace(/\b(cedex|france)\b/g,'').replace(/\s+/g,' ').trim();
 }
 // Regroupement par adresse : le lieu compte, pas la fiche du bien. Deux lots
-// d'un même immeuble partagent donc une seule colonne du bilan.
+// d'un même immeuble partagent donc une seule colonne de l'annexe A1.
 function balanceBuildings(s){
     let groups=new Map();
     rows('properties',s.id).forEach(p=>{
         let key=balanceAddressKey(p)||'__sans_adresse__';
-        if(!groups.has(key))groups.set(key,{key,label:'',propertyIds:[],properties:[]});
+        if(!groups.has(key))groups.set(key,{key,label:'',propertyIds:[],properties:[],locaux:0,locauxSet:false});
         let g=groups.get(key);
         g.propertyIds.push(p.id);g.properties.push(p);
-        let lbl=String(p.address||'').trim();
-        if(!lbl)lbl='Adresse non renseignée';
+        g.locaux+=Math.max(1,Number(p.locaux)||1);
+        if(Number(p.locaux)>0)g.locauxSet=true;
+        let lbl=String(p.address||'').trim()||'Adresse non renseignée';
         if(!g.label||lbl.length<g.label.length)g.label=lbl;
     });
     return [...groups.values()].sort((a,b)=>a.label.localeCompare(b.label,'fr'));
@@ -9549,75 +9567,62 @@ function entryBuildingLabel(r){
     if(!p)return '<span class="muted">Non affecté</span>';
     return `<span class="sci-cell"><span class="sci-dot" style="background:${sciColor(r.sci)}" aria-hidden="true"></span>${esc(p.name)}</span>`;
 }
-function balanceEntryBuilding(r){
-    if(!r)return '';
-    let p=r.property_id?rec(r.property_id):null;
-    if(!p&&r.call_id){
-        let c=rec(r.call_id);
-        let l=c&&c.lease_id?rec(c.lease_id):null;
-        p=l&&l.property_id?rec(l.property_id):null;
-    }
+function declEntryBuilding(r){
+    let p=entryBuilding(r);
     if(!p)return '';
     return balanceAddressKey(p)||'__sans_adresse__';
 }
+// Le classement est mémorisé par société et par catégorie. La clé de réglage est
+// propre à la 2072-S : un classement enregistré pour l'ancienne numérotation
+// 2072-C n'est jamais réutilisé de travers.
 function balanceLineMap(s){
-    let all=S.settings.balance_line_map;
+    let all=S.settings.decl_line_map;
     let m=all&&typeof all==='object'?all[s.id]:null;
     return m&&typeof m==='object'?m:{};
 }
-// Classement d'une catégorie : choix explicite de l'utilisateur, sinon règles
-// de lecture du libellé. Rien n'est supprimé en silence : ce qui n'est pas
-// reconnu reste « à classer » et bloque le total officiel.
-function balanceAutoClass(r){
+// Lecture du libellé : proposition, jamais décision. Ce qui n'est pas reconnu
+// reste « à classer » et sort des totaux officiels.
+function declAutoClass(r){
     let isRec=r.direction==='Recette';
     let txt=balanceNorm(r.category)+' '+balanceNorm(r.label);
     if(/apport|remboursement (d )?associe|depot de garantie|compte courant/.test(txt))return {line:'finance',group:'finance'};
     // « Emprunt (capital + intérêts) » mélange une charge déductible et un
-    // remboursement de capital : la ligne 20 n'accepte que les intérêts.
+    // remboursement de capital : la ligne 17 n'accepte que les intérêts.
     if(/capital/.test(txt)&&/interet/.test(txt))return {line:'ventiler',group:'ventiler'};
-    if(/interet|assurance emprunteur/.test(txt))return {line:20,group:'charge'};
+    if(/interet|assurance emprunteur/.test(txt))return {line:17,group:'charge'};
     if(/emprunt|echeance|capital restant|amortissement du capital/.test(txt))return {line:'ventiler',group:'ventiler'};
-    if(/autres frais de gestion|forfait/.test(txt))return {line:7,group:'charge'};
-    if(/regularisation/.test(txt))return {line:15,group:'charge'};
-    if(/copropriet|syndic/.test(txt))return {line:14,group:'charge'};
+    if(/regularisation|regularisee?/.test(txt))return {line:14,group:'deduction'};
+    if(/copropriet|syndic/.test(txt))return {line:13,group:'charge'};
     if(/assurance|axa|maif|mma|pno|generali|allianz|groupama|aviva/.test(txt))return {line:8,group:'charge'};
     if(/travaux|entretien|reparation|bricoman|leroy|castorama|maintenance|renovation|ravalement|chaudiere|toiture/.test(txt))return {line:9,group:'charge'};
-    if(/taxe|foncier|impot|imposition|cfe|crl|ordures/.test(txt))return {line:13,group:'charge'};
-    if(/tenue de compte|frais bancaire|banque|commission|agios|frais de gestion|honoraire|comptable|avocat|procedure|gestion/.test(txt))return {line:6,group:'charge'};
-    if(/recuperable/.test(txt))return {line:11,group:'charge'};
-    if(/eviction|relogement|indemnite/.test(txt))return {line:12,group:'charge'};
+    if(/taxe|foncier|impot|imposition|cfe|crl|ordures/.test(txt))return {line:12,group:'charge'};
+    if(/frais de gestion|honoraire|comptable|avocat|procedure|gestion|tenue de compte|frais bancaire|banque|commission|agios/.test(txt))return {line:6,group:'charge'};
+    if(/recuperable/.test(txt))return {line:10,group:'charge'};
+    if(/eviction|relogement|indemnite/.test(txt))return {line:11,group:'charge'};
     if(isRec&&/loyer|fermage|recette|location/.test(txt))return {line:1,group:'recette'};
     if(isRec&&/provision/.test(txt))return {line:2,group:'recette'};
     if(isRec)return {line:3,group:'recette'};
     return {line:'classer',group:'classer'};
 }
-function balanceClassOf(r,map){
+function declClassOf(r,map){
     let cat=String(r.category||'').trim()||'Autre';
     let ov=map&&Object.prototype.hasOwnProperty.call(map,cat)?map[cat]:null;
     if(ov!==null&&ov!==undefined&&ov!==''){
         if(ov==='finance')return {line:'finance',group:'finance',manual:true};
         if(ov==='ventiler')return {line:'ventiler',group:'ventiler',manual:true};
         if(ov==='classer')return {line:'classer',group:'classer',manual:true};
-        if(String(ov)==='10')return {line:9,group:'charge',manual:true,dont:10};
+        if(String(ov)==='9bis')return {line:9,group:'charge',manual:true,dont:'9bis'};
         let n=Number(ov);
         if(n>=1&&n<=4)return {line:n,group:'recette',manual:true};
-        if((n>=6&&n<=16)||n===18||n===19||n===20||n===22||n===23||n===25)return {line:n,group:'charge',manual:true};
+        if(n===14)return {line:14,group:'deduction',manual:true};
+        if((n>=6&&n<=15)||n===17||n===19||n===20||n===22)return {line:n,group:'charge',manual:true};
     }
-    return balanceAutoClass(r);
+    return declAutoClass(r);
 }
-function balanceForfaitSetting(s,year,hasBuildings){
-    let all=S.settings.balance_forfait;
-    let perSci=all&&typeof all==='object'?all[s.id]:null;
-    let v=perSci&&typeof perSci==='object'?perSci[String(year)]:null;
-    // 20 € est le montant forfaitaire légal ; sans aucune adresse renseignée,
-    // aucun local n'existe et le forfait reste à 0.
-    if(v===null||v===undefined||v==='')return hasBuildings?20:0;
-    return Number(v)||0;
-}
-// Modèle du bilan : chaque mouvement est rattaché à une ligne officielle et à
-// un immeuble. Les montants restent exacts ici ; l'arrondi à l'euro est fait
+// Modèle de la déclaration : chaque mouvement est rattaché à une ligne officielle
+// et à un immeuble. Les montants restent exacts ici ; l'arrondi à l'euro est fait
 // au rendu, colonne par colonne, puis additionné (jamais l'inverse).
-function balance2072Model(s,period){
+function declModel(s,period){
     let buildings=balanceBuildings(s);
     let map=balanceLineMap(s);
     let byKey=new Map(buildings.map(b=>[b.key,b]));
@@ -9626,245 +9631,379 @@ function balance2072Model(s,period){
     let entries=rows('entries',s.id).filter(r=>entryDate(r)&&entryDate(r)>=period.start&&entryDate(r)<=period.end);
     entries.forEach(r=>{
         let amt=r2(Math.abs(entrySigned(r)));
-        let cls=balanceClassOf(r,map);
-        let key=balanceEntryBuilding(r);
+        let cls=declClassOf(r,map);
+        let key=declEntryBuilding(r);
         if(!byKey.has(key)){key='__none__';unassigned.push(r);}
-        let rec={entry:r,amount:amt,cls,key};
-        if(cls.group==='finance'){financing.push(rec);return;}
-        if(cls.group==='ventiler'){toSplit.push(rec);return;}
-        if(cls.group==='classer'){unclassified.push(rec);return;}
-        let line=cls.line;
+        let item={entry:r,amount:amt,cls,key};
+        if(cls.group==='finance'){financing.push(item);return;}
+        if(cls.group==='ventiler'){toSplit.push(item);return;}
+        if(cls.group==='classer'){unclassified.push(item);return;}
         if(cls.dont){
             if(!dontBy.has(cls.dont))dontBy.set(cls.dont,{exact:0,by:{}});
             let D=dontBy.get(cls.dont);
             D.exact=r2(D.exact+amt);
             D.by[key]=r2((D.by[key]||0)+amt);
         }
-        if(!lines.has(line))lines.set(line,{exact:0,by:{}});
-        let L=lines.get(line);
+        if(!lines.has(cls.line))lines.set(cls.line,{exact:0,by:{}});
+        let L=lines.get(cls.line);
         L.exact=r2(L.exact+amt);
         L.by[key]=r2((L.by[key]||0)+amt);
         let cat=String(r.category||'').trim()||'Autre';
-        if(!cats.has(cat))cats.set(cat,{cat,line,group:cls.group,exact:0,by:{},count:0});
+        if(!cats.has(cat))cats.set(cat,{cat,line:cls.line,group:cls.group,exact:0,by:{},count:0});
         let C=cats.get(cat);
         C.exact=r2(C.exact+amt);
         C.by[key]=r2((C.by[key]||0)+amt);
         C.count+=1;
     });
-    let forfaitSetting=balanceForfaitSetting(s,period.year||Number(String(period.start).slice(0,4)),buildings.length>0);
-    let line7=lines.get(7);
-    let line7Exact=line7?line7.exact:0;
-    // Le forfait est manuel et unique. Il n'est ajouté que si aucun mouvement
-    // n'est déjà classé en ligne 7 : jamais deux fois le même montant.
-    let forfaitManual=line7Exact<=0.004;
-    return {buildings,lines,cats,dontBy,entries,unassigned,unclassified,toSplit,financing,
-        forfaitSetting,forfaitManual,forfaitExact:forfaitManual?r2(forfaitSetting):0};
+    return {buildings,lines,cats,dontBy,entries,unassigned,unclassified,toSplit,financing};
 }
-function balanceColumns(m){
-    let cols=m.buildings.map(b=>({key:b.key,label:b.label,short:b.label.length>26?b.label.slice(0,24)+'…':b.label}));
-    let needNone=m.unassigned.length>0||m.forfaitManual||m.toSplit.length>0||m.unclassified.length>0||m.financing.length>0;
-    if(needNone)cols.push({key:'__none__',label:'Non affecté',short:'Non affecté'});
+function declCols(m){
+    let cols=m.buildings.map(b=>({key:b.key,label:b.label,short:b.label.length>30?b.label.slice(0,28)+'…':b.label}));
+    if(m.unassigned.length)cols.push({key:'__none__',label:'Non affecté',short:'Non affecté'});
     return cols;
 }
-function balanceLineAmount(m,line,key){
-    if(line===7&&key==='__none__')return m.forfaitExact;
-    let L=m.lines.get(line);
-    return L&&L.by[key]?L.by[key]:0;
+// Arrondi à l'euro de chaque colonne, puis seulement ensuite addition.
+function declCells(m,n,keys){
+    let L=m.lines.get(n);
+    return keys.map(k=>Math.round(L&&L.by[k]?L.by[k]:0));
 }
-function balanceLineTotal(m,line,keys){
-    return r2(keys.reduce((a,k)=>a+balanceLineAmount(m,line,k),0));
+function declDontCells(m,token,keys){
+    let D=m.dontBy.get(token);
+    return keys.map(k=>Math.round(D&&D.by[k]?D.by[k]:0));
 }
-function balanceLineExact(m,line){
-    if(line===7)return r2((m.lines.get(7)?.exact||0)+m.forfaitExact);
-    let L=m.lines.get(line);
+function declExact(m,n){
+    if(n==='9bis'){let D=m.dontBy.get('9bis');return D?D.exact:0;}
+    let L=m.lines.get(n);
     return L?L.exact:0;
 }
-// Rendu d'une ligne du formulaire officiel : arrondi par colonne puis somme.
-function balance2072Row(m,line,cols,kind,label){
-    let cells=cols.map(c=>Math.round(balanceLineAmount(m,line,c.key)));
-    let total=cells.reduce((a,b)=>a+b,0);
-    return {cells,total,exact:balanceLineExact(m,line)};
+// Toutes les lignes de l'annexe A1, calculées dans l'ordre officiel.
+function declA1Rows(m,keys){
+    let rowsOut={};
+    let get=n=>rowsOut[String(n)]?rowsOut[String(n)]:keys.map(()=>0);
+    let put=(n,cells)=>{rowsOut[String(n)]=cells;};
+    [1,2,3,4].forEach(n=>put(n,declCells(m,n,keys)));
+    put(5,keys.map((_,i)=>get(1)[i]+get(2)[i]+get(3)[i]+get(4)[i]));
+    [6,7,8,9,10,11,12,13,14,15].forEach(n=>put(n,declCells(m,n,keys)));
+    put('9bis',declDontCells(m,'9bis',keys));
+    put(16,keys.map((_,i)=>get(6)[i]+get(7)[i]+get(8)[i]+get(9)[i]+get(10)[i]+get(11)[i]+get(12)[i]+get(13)[i]-get(14)[i]+get(15)[i]));
+    put(17,declCells(m,17,keys));
+    put(18,keys.map((_,i)=>get(5)[i]-get(16)[i]-get(17)[i]));
+    put(19,declCells(m,19,keys));
+    put(20,declCells(m,20,keys));
+    put(21,keys.map((_,i)=>get(18)[i]+get(19)[i]-get(20)[i]));
+    put(22,declCells(m,22,keys));
+    put(23,keys.map((_,i)=>get(21)[i]+get(22)[i]));
+    return rowsOut;
 }
-function balanceTableHead(cols,extra=''){
-    return `<thead><tr><th style="min-width:250px">${extra||'Poste'}</th><th class="align-right" style="min-width:64px">Ligne</th><th class="align-right">Exact</th><th class="align-right">Arrondi</th>${cols.map(c=>`<th class="align-right" title="${esc(c.label)}">${esc(c.short)}</th>`).join('')}<th class="align-right">Total</th></tr></thead>`;
+function declSum(cells){return (cells||[]).reduce((a,b)=>a+b,0);}
+// Cadre I du formulaire principal : les cinq cases R1 à R5.
+function declMainCases(m,keys){
+    let r=declA1Rows(m,keys);
+    let sum=n=>declSum(r[String(n)]||[]);
+    return {
+        R1:sum(5)+sum(19)-sum(20)+sum(22),
+        R2:sum(9),
+        R3:sum(16),
+        R4:sum(17),
+        R5:sum(23)
+    };
 }
-function balanceAmountCells(exact,rounded,cells,total){
-    return `<td class="align-right muted">${money(exact,2)}</td><td class="align-right">${money(rounded,0)}</td>${cells.map(v=>`<td class="align-right">${v?money(v,0):'<span class="muted">—</span>'}</td>`).join('')}<td class="align-right"><strong class="${total<0?'red':''}">${money(total,0)}</strong></td>`;
+function declCopyBtn(value,label,extra={}){
+    let v=Math.round(Number(value)||0);
+    let txt=v?money(v,0):'<span class="muted">—</span>';
+    return `<button type="button" class="decl-cell ${extra.cls||''}" data-decl-copy="${v}" data-decl-label="${esc(label)}" title="Copier ${v} € — ${esc(label)}">${txt}</button>`;
 }
-
-// --- 1. Tableau de la société, construit comme le classeur ---------------
-function balanceSocieteView(s,period,m){
-    let cols=balanceColumns(m);
-    let keys=cols.map(c=>c.key);
-    let isIS=s.regime==='IS';
-    if(m.forfaitExact>0.004){
-        // Le forfait de la ligne 7 est une déduction fiscale, pas un mouvement :
-        // il apparaît comme une ligne à part, pour que le total affiché soit
-        // exactement la somme des colonnes.
-        m.cats.set('__forfait__',{cat:'Autres frais de gestion (forfait)',line:7,group:'charge',exact:m.forfaitExact,by:{__none__:m.forfaitExact},count:0,forfait:true});
+async function declCopyAmount(v,label){
+    let txt=String(Math.round(Number(v)||0));
+    let ok=false;
+    try{if(navigator.clipboard&&navigator.clipboard.writeText){await navigator.clipboard.writeText(txt);ok=true;}}catch(e){}
+    if(!ok){
+        try{
+            let ta=document.createElement('textarea');
+            ta.value=txt;ta.setAttribute('readonly','');ta.style.position='fixed';ta.style.opacity='0';
+            document.body.appendChild(ta);ta.select();
+            ok=document.execCommand&&document.execCommand('copy');
+            ta.remove();
+        }catch(e){}
     }
-    let recettes=[...m.cats.values()].filter(c=>c.group==='recette').sort((a,b)=>a.line-b.line||a.cat.localeCompare(b.cat,'fr'));
-    let depenses=[...m.cats.values()].filter(c=>c.group==='charge').sort((a,b)=>a.line-b.line||a.cat.localeCompare(b.cat,'fr'));
-    let hors=[...m.cats.values()].filter(c=>['finance','ventiler','classer'].includes(c.group)).sort((a,b)=>a.cat.localeCompare(b.cat,'fr'));
-    let year=period.year||Number(String(period.start).slice(0,4));
-    let catRow=c=>{
-        let cells=keys.map(k=>Math.round(c.by[k]||0));
-        let exact=c.exact,rounded=cells.reduce((a,b)=>a+b,0);
-        return `<tr><td>${esc(c.cat)}<span class="cell-sub">${c.forfait?'Montant forfaitaire manuel':c.count+' mouvement'+(c.count>1?'s':'')}</span></td><td class="align-right"><span class="pill${c.forfait?' gold':''}">${esc(String(c.line))}</span></td>${balanceAmountCells(exact,rounded,cells,rounded)}</tr>`;
-    };
-    let section=(title,list,lineFilter)=>{
-        if(!list.length)return '';
-        let body=list.map(catRow).join('');
-        let exactHeader={'recette':'5','charge':'17'}[lineFilter]||'';
-        let exact=r2(list.reduce((a,c)=>a+c.exact,0));
-        let perCol=keys.map(k=>list.reduce((a,c)=>a+Math.round(c.by[k]||0),0));
-        let total=perCol.reduce((a,b)=>a+b,0);
-        return `<tr class="balance-section"><td colspan="${5+cols.length}"><strong>${esc(title)}</strong></td></tr>${body}
-        <tr class="balance-subtotal"><td><strong>Total ${esc(title.toLowerCase())}</strong>${exactHeader?`<span class="cell-sub">Ligne ${exactHeader}</span>`:''}</td><td class="align-right"><span class="pill">${exactHeader||'—'}</span></td><td class="align-right muted">${money(exact,2)}</td><td class="align-right">${total?money(total,0):'<span class="muted">—</span>'}</td>${perCol.map(v=>`<td class="align-right">${v?money(v,0):'<span class="muted">—</span>'}</td>`).join('')}<td class="align-right"><strong>${total?money(total,0):'<span class="muted">—</span>'}</strong></td></tr>`;
-    };
-    let recExact=r2(recettes.reduce((a,c)=>a+c.exact,0));
-    let depExact=r2(depenses.reduce((a,c)=>a+c.exact,0));
-    let recRounded=keys.reduce((a,k)=>a+recettes.reduce((b,c)=>b+Math.round(c.by[k]||0),0),0);
-    let depRounded=keys.reduce((a,k)=>a+depenses.reduce((b,c)=>b+Math.round(c.by[k]||0),0),0);
-    let resultExact=r2(recExact-depExact),resultRounded=recRounded-depRounded;
-    let perColResult=keys.map(k=>{
-        let r=recettes.reduce((a,c)=>a+Math.round(c.by[k]||0),0);
-        let d=depenses.reduce((a,c)=>a+Math.round(c.by[k]||0),0);
-        return r-d;
+    notify((label?label+' : ':'Montant copié : ')+txt+' €'+(ok?' — collé dans la déclaration en ligne.':''));
+}
+// Chaque montant affiché dit d'où il vient et peut être ouvert.
+function declProvenance(m,n){
+    let list=[...m.cats.values()].filter(c=>String(c.line)===String(n));
+    if(!list.length)return '';
+    return list.sort((a,b)=>b.exact-a.exact).map(c=>`${esc(c.cat)} · ${c.count} mouvement${c.count>1?'s':''}`).join(' · ');
+}
+function declLineRowsHtml(m,rowsOut,keys,opts={}){
+    let body='';
+    DECL_A1_LINES.forEach(([n,label,kind])=>{
+        let cells=rowsOut[String(n)]||keys.map(()=>0);
+        let total=declSum(cells);
+        let isDont=kind==='dont';
+        let isTotal=kind==='total';
+        let cls=isTotal?'balance-subtotal':isDont?'balance-dont':'';
+        let prov=declProvenance(m,n);
+        let name=isTotal?`<strong>${esc(label)}</strong>`:esc(label);
+        let labelHtml=prov?`<button type="button" class="decl-line-label" data-decl-detail="${n}">${name}</button>`:name;
+        body+=`<tr class="${cls}"><td>${labelHtml}${prov?`<span class="cell-sub">${prov}</span>`:''}</td>
+        <td class="align-right"><span class="pill ${isTotal?'gold':''}">${n}</span></td>
+        ${cells.map((v,i)=>{
+            if(!v)return `<td class="align-right muted">—</td>`;
+            if(isDont)return `<td class="align-right muted">${money(v,0)}</td>`;
+            let colLabel=(opts.cols&&opts.cols[i])?opts.cols[i].label:'total';
+            return `<td class="align-right">${declCopyBtn(v,`Ligne ${n} · ${colLabel}`)}</td>`;
+        }).join('')}
+        <td class="align-right">${total?declCopyBtn(total,`Ligne ${n} · total`,{cls:'decl-total'}):'<span class="muted">—</span>'}</td></tr>`;
     });
-    let forfaitNote=m.forfaitManual
-        ?`Ligne 7 : forfait manuel de <strong>${money(m.forfaitExact,2)}</strong> (aucun mouvement n’est classé sur cette ligne).`
-        :`Ligne 7 : <strong>${money(m.lines.get(7)?.exact||0,2)}</strong> de mouvements classés ; le forfait manuel n’est pas ajouté.`;
-    let controls=[];
+    return body;
+}
+function declA1Head(cols){
+    return `<thead><tr><th style="min-width:280px">Cadre VII · annexe 2072-S-A1</th><th class="align-right" style="min-width:56px">Ligne</th>${cols.map(c=>`<th class="align-right" title="${esc(c.label)}">${esc(c.short)}</th>`).join('')}<th class="align-right">Total</th></tr></thead>`;
+}
+// --- Modales --------------------------------------------------------------
+function declMappingModal(){
+    let s=currentSCI();if(!s)return;
+    let map=balanceLineMap(s);
+    let cats=[...new Set(rows('entries',s.id).filter(r=>entryDate(r)).map(r=>String(r.category||'').trim()||'Autre'))].sort((a,b)=>a.localeCompare(b,'fr'));
+    let options=(sel)=>{
+        let out=`<option value="" ${sel===''?'selected':''}>Classement automatique</option>`;
+        out+=`<option value="finance" ${sel==='finance'?'selected':''}>Hors formulaire · opération de financement</option>`;
+        out+=`<option value="ventiler" ${sel==='ventiler'?'selected':''}>À ventiler (capital d’emprunt, non déductible)</option>`;
+        out+=`<option value="classer" ${sel==='classer'?'selected':''}>Non classé (exclu des totaux)</option>`;
+        DECL_SELECTABLE.forEach(([n,label])=>{
+            out+=`<option value="${n}" ${String(sel)===String(n)?'selected':''}>Ligne ${n} · ${esc(label.length>72?label.slice(0,70)+'…':label)}</option>`;
+        });
+        return out;
+    };
+    let automap={};
+    rows('entries',s.id).filter(r=>entryDate(r)).forEach(r=>{let c=String(r.category||'').trim()||'Autre';if(!automap[c])automap[c]=declAutoClass(r);});
+    let body=cats.map(c=>{
+        let ov=map&&Object.prototype.hasOwnProperty.call(map,c)?map[c]:'';
+        let auto=automap[c]||{line:'classer'};
+        return `<div class="col-config-item" style="align-items:flex-start"><div style="flex:1;min-width:0"><strong>${esc(c)}</strong><span class="cell-sub">Lecture automatique : ${auto.line==='finance'?'hors formulaire':auto.line==='ventiler'?'à ventiler':auto.line==='classer'?'non classé':'ligne '+auto.line}</span></div><select data-decl-map="${esc(c)}" aria-label="Ligne de ${esc(c)}" style="max-width:330px">${options(ov)}</select></div>`;
+    }).join('');
+    openModal('Classer les catégories · annexe 2072-S-A1',`<p class="sub" style="margin-bottom:12px">Chaque catégorie de trésorerie est rattachée à une ligne officielle de l’annexe A1. Un classement explicite l’emporte sur la lecture automatique du libellé. Ce qui reste non classé n’est pas compté dans les totaux et bloque la déclaration.</p><div class="col-config-list">${body||'<p class="sub">Aucune catégorie sur cet exercice.</p>'}</div>`,`<button data-action="close-modal">Annuler</button><button class="primary" data-action="decl-map-save">Enregistrer le classement</button>`);
+}
+function declAssignModal(){
+    let s=currentSCI();if(!s)return;
+    let period=declPeriod(s),m=declModel(s,period);
+    if(!m.unassigned.length)return notify('Tous les mouvements de la période sont rattachés à un immeuble.');
+    let props=rows('properties',s.id);
+    let opts=(sel)=>`<option value="">Sans immeuble (non affecté)</option>`+props.map(p=>`<option value="${esc(p.id)}" ${sel===p.id?'selected':''}>${esc(p.name)} · ${esc(p.address||'adresse non renseignée')}</option>`).join('');
+    let guess=props.length===1?props[0].id:'';
+    let body=m.unassigned.slice(0,80).map(r=>`<tr><td>${date(r.date)}<span class="cell-sub">${esc(truncate(r.label,48))}</span></td><td class="align-right">${money(Math.abs(entrySigned(r)),2)}</td><td><select data-decl-assign="${esc(r.id)}" aria-label="Immeuble de ${esc(truncate(r.label,30))}" style="min-width:220px">${opts(guess)}</select></td></tr>`).join('');
+    openModal('Affecter les mouvements · colonnes de l’annexe A1',`<p class="sub" style="margin-bottom:12px">${m.unassigned.length} mouvement${m.unassigned.length>1?'s':''} de la période n’${m.unassigned.length>1?'ont':'a'} pas d’immeuble. L’annexe A1 demande une colonne par immeuble : sans affectation, ces montants restent en « Non affecté ».</p><div class="table-wrap"><table><thead><tr><th>Mouvement</th><th class="align-right">Montant</th><th>Immeuble</th></tr></thead><tbody>${body}</tbody></table></div>`,`<button data-action="close-modal">Annuler</button><button class="primary" data-action="decl-assign-save">Affecter</button>`);
+}
+function declDetailModal(n){
+    let s=currentSCI();if(!s)return;
+    let period=declPeriod(s),m=declModel(s,period);
+    let keys=declCols(m).map(c=>c.key);
+    let list=[...m.cats.values()].filter(c=>String(c.line)===String(n)).map(c=>c.cat);
+    let moves=m.entries.filter(r=>list.includes(String(r.category||'').trim()||'Autre'));
+    let total=r2(moves.reduce((a,r)=>a+r2(Math.abs(entrySigned(r))),0));
+    let rowsHtml=moves.sort((a,b)=>String(a.date).localeCompare(String(b.date))).map(r=>{
+        let b=m.buildings.find(x=>x.key===declEntryBuilding(r));
+        return `<tr><td>${date(r.date)}</td><td>${esc(r.label||'')}</td><td>${esc(String(r.category||'').trim()||'Autre')}</td><td>${b?esc(b.label):'<span class="muted">Non affecté</span>'}</td><td class="align-right">${money(Math.abs(entrySigned(r)),2)}</td></tr>`;
+    }).join('');
+    openModal(`Ligne ${n} · ${truncate(DECL_A1_LABELS[String(n)]||'',70)}`,`<p class="sub" style="margin-bottom:12px">${moves.length} mouvement${moves.length>1?'s':''} · ${money(total,2)} au total. Ces montants sont la source exacte de la ligne ${n}.</p><div class="table-wrap"><table><thead><tr><th>Date</th><th>Libellé</th><th>Catégorie</th><th>Immeuble</th><th class="align-right">Montant</th></tr></thead><tbody>${rowsHtml||'<tr><td colspan="5" class="muted">Aucun mouvement.</td></tr>'}</tbody></table></div>`,`<button data-action="close-modal">Fermer</button>`);
+}
+function truncate(t,n){t=String(t||'');return t.length>n?t.slice(0,n-1)+'…':t;}
+// Adresse du siège : la ville n'est répétée que si elle n'est pas déjà écrite.
+function declSiege(s){
+    let a=String(s.address||'').trim(),c=String(s.city||'').trim();
+    if(!a)return c||'';
+    if(!c||balanceNorm(a).includes(balanceNorm(c)))return a;
+    return a+' · '+c;
+}
+// --- Onglet « À vérifier » ------------------------------------------------
+function declCheckItem(level,title,note,action){
+    let color=level==='ok'?'var(--green)':level==='warn'?'var(--gold)':'var(--red)';
+    let pill=level==='ok'?'green':level==='warn'?'gold':'red';
+    return `<div class="decl-check" style="border-left:3px solid ${color}"><div class="row between wrap"><strong>${esc(title)}</strong><span class="pill ${pill}">${level==='ok'?'Prêt':level==='warn'?'À compléter':'Bloquant'}</span></div><p class="sub" style="margin-top:6px">${note}</p>${action||''}</div>`;
+}
+function declChecksView(s,period,m){
+    let items=[];
+    let issues=0,blocks=0;
+    let add=(level,title,note,action)=>{items.push(declCheckItem(level,title,note,action));if(level==='warn')issues++;if(level==='error')blocks++;};
+    // Identité de la société (cadre II).
+    if(!String(s.siren||'').trim())add('warn','SIREN absent','Le cadre II de la 2072-S demande le SIREN de la société : sans lui, la déclaration ne peut pas être rattachée à votre dossier fiscal.',`<button data-action="edit-sci" style="margin-top:9px">${icon('edit')} Compléter la fiche société</button>`);
+    else add('ok','Identité de la société',`${esc(s.name)} · SIREN ${esc(s.siren)} · clôture ${esc(s.closing||'31/12')} · gérant ${esc(s.manager||'non renseigné')}.`);
+    if(!String(s.manager||'').trim())add('warn','Gérant non renseigné','Le cadre II demande le nom, l’adresse et le téléphone du gérant, ainsi que le nombre d’associés et de parts.',`<button data-action="edit-sci" style="margin-top:9px">${icon('edit')} Compléter la fiche société</button>`);
+    // Associés (annexe A2).
+    let partners=rows('partners',s.id);
+    let shares=partners.reduce((a,p)=>a+(Number(p.shares)||0),0);
+    if(!partners.length)add('error','Aucun associé','L’annexe A2 répartit le résultat entre les associés : sans associé, il n’y a personne à qui répartir.',`<button data-add="partners" style="margin-top:9px">${icon('plus')} Ajouter un associé</button>`);
+    else if(shares<=0)add('error','Nombre de parts manquant','Le pourcentage de détention est calculé à partir des parts. Sans parts renseignées, aucune quote-part ne peut être établie.',`<button data-edit="${esc(partners[0].id)}" style="margin-top:9px">${icon('edit')} Renseigner les parts</button>`);
+    else add('ok','Associés et parts',`${partners.length} associé${partners.length>1?'s':''} · ${num(shares)} part${shares>1?'s':''} au total. La quote-part de chacun est proportionnelle à ses parts.`);
+    let noAddr=partners.filter(p=>!String(p.address||'').trim());
+    if(noAddr.length)add('warn','Adresse d’associé manquante',`L’annexe A2 identifie chaque associé par son nom, son adresse et son nombre de parts. ${noAddr.length} fiche${noAddr.length>1?'s':''} sans adresse : ${noAddr.map(p=>esc(p.name)).join(', ')}.`,`<button data-edit="${esc(noAddr[0].id)}" style="margin-top:9px">${icon('edit')} Compléter</button>`);
+    // Immeubles (cadre IV).
+    if(!m.buildings.length)add('error','Aucun immeuble','Le cadre IV liste les immeubles détenus, avec leur adresse et leur nombre de locaux. Sans bien renseigné, l’annexe A1 n’a aucune colonne.',`<button data-add="properties" style="margin-top:9px">${icon('plus')} Ajouter un bien</button>`);
+    else{
+        add('ok','Immeubles',`${m.buildings.length} adresse${m.buildings.length>1?'s':''} distincte${m.buildings.length>1?'s':''} : ${m.buildings.map(b=>esc(b.label)).join(' · ')}.`);
+        let noLocaux=m.buildings.filter(b=>!b.locauxSet);
+        if(noLocaux.length)add('warn','Nombre de locaux non renseigné','Le cadre IV demande le nombre de locaux de chaque immeuble. Il se renseigne dans la fiche du bien.',`<button data-add="properties" style="margin-top:9px">${icon('plus')} Renseigner les biens</button>`);
+    }
+    // Classement des mouvements.
     if(m.unclassified.length){
         let total=r2(m.unclassified.reduce((a,u)=>a+u.amount,0));
-        controls.push(`<div class="notice" style="border-left:3px solid var(--gold)"><strong>${m.unclassified.length} mouvement${m.unclassified.length>1?'s':''} non classé${m.unclassified.length>1?'s':''} · ${money(total,2)}</strong><p class="sub" style="margin-top:6px">Ils ne sont pas repris dans les totaux officiels. Classez leur catégorie sur une ligne du formulaire pour compléter le bilan.</p><button data-action="balance-mapping">${icon('settings')} Classer les catégories</button></div>`);
-    }
+        add('error',`${m.unclassified.length} mouvement${m.unclassified.length>1?'s':''} non classé${m.unclassified.length>1?'s':''}`,`${money(total,2)} ne sont rattachés à aucune ligne officielle : les totaux de l’annexe A1 seraient faux.`,`<button data-action="balance-mapping" style="margin-top:9px">${icon('settings')} Classer les catégories</button>`);
+    }else add('ok','Toutes les catégories sont classées','Chaque catégorie de trésorerie est rattachée à une ligne de l’annexe A1.');
     if(m.toSplit.length){
         let total=r2(m.toSplit.reduce((a,u)=>a+u.amount,0));
-        controls.push(`<div class="notice" style="border-left:3px solid var(--gold)"><strong>${m.toSplit.length} échéance${m.toSplit.length>1?'s':''} d’emprunt · ${money(total,2)} à ventiler</strong><p class="sub" style="margin-top:6px">Seuls les intérêts sont déductibles (ligne 20) : le capital remboursé ne l’est pas. Dominis ne connaît pas encore la ventilation de chaque échéance ; renseignez les intérêts dans une catégorie dédiée (« Intérêts ») pour les voir apparaître en ligne 20.</p></div>`);
-    }
-    if(m.financing.length){
-        let total=r2(m.financing.reduce((a,u)=>a+u.amount,0));
-        controls.push(`<div class="notice"><strong>${m.financing.length} opération${m.financing.length>1?'s':''} de financement · ${money(total,2)}</strong><p class="sub" style="margin-top:6px">Apports, comptes courants et dépôts de garantie ne sont ni des recettes ni des charges : ils figurent au bilan comptable, pas dans le résultat.</p></div>`);
+        add('warn',`${m.toSplit.length} échéance${m.toSplit.length>1?'s':''} d’emprunt à ventiler`,`${money(total,2)} : seule la part d’intérêts est déductible en ligne 17, le capital remboursé ne l’est pas. Séparez les intérêts dans une catégorie « Intérêts ».`,'');
     }
     if(m.unassigned.length){
-        controls.push(`<div class="notice" style="border-left:3px solid var(--gold)"><strong>${m.unassigned.length} mouvement${m.unassigned.length>1?'s':''} sans immeuble</strong><p class="sub" style="margin-top:6px">Ils apparaissent en « Non affecté ». Rattachez-les à un bien pour obtenir une colonne par adresse exacte.</p><button data-action="balance-assign">${icon('building')} Affecter les mouvements</button></div>`);
+        add('warn',`${m.unassigned.length} mouvement${m.unassigned.length>1?'s':''} sans immeuble`,'Ils restent en « Non affecté » : la déduction par immeuble du cadre VII ne peut pas être établie.','<button data-action="balance-assign" style="margin-top:9px">'+icon('building')+' Affecter les mouvements</button>');
     }
-    return `<div class="panel" style="margin-bottom:18px"><div class="panel-head"><h2>Tableau de la société · ${esc(String(year))}</h2><span class="pill gold">${m.buildings.length} adresse${m.buildings.length>1?'s':''} distincte${m.buildings.length>1?'s':''}</span></div>
-    <div class="panel-body">
-      <p class="sub" style="margin-bottom:12px">Chaque mouvement est classé sur sa ligne du formulaire officiel et sur l’immeuble de son adresse. Les montants sont arrondis à l’euro colonne par colonne, puis additionnés : le total est toujours la somme des colonnes affichées. La colonne « Exact » conserve les centimes pour le contrôle.</p>
-      <div class="table-wrap"><table class="balance-table">${balanceTableHead(cols,'Catégorie')}<tbody>
-        ${section('Recettes '+year,recettes,'recette')}
-        ${section('Dépenses '+year,depenses,'charge')}
-        ${hors.length?`<tr class="balance-section"><td colspan="${5+cols.length}"><strong>Hors formulaire</strong></td></tr>${hors.map(catRow).join('')}`:''}
-      </tbody><tfoot>
-        <tr><td><strong>Résultat de la société</strong><span class="cell-sub">${isIS?'Recettes − dépenses de l’exercice · compte de résultat 2033-B (case 310)':'Recettes − dépenses (ligne 21 → 24)'}</span></td><td class="align-right"><span class="pill gold">${isIS?'2033-B':'21 / 24'}</span></td><td class="align-right muted">${money(resultExact,2)}</td><td class="align-right"><strong class="${resultRounded<0?'red':'green'}">${resultRounded?money(resultRounded,0):'<span class="muted">—</span>'}</strong></td>${perColResult.map(v=>`<td class="align-right">${v?money(v,0):'<span class="muted">—</span>'}</td>`).join('')}<td class="align-right"><strong class="${resultRounded<0?'red':'green'}">${resultRounded?money(resultRounded,0):'<span class="muted">—</span>'}</strong></td></tr>
-      </tfoot></table></div>
-      <p class="sub" style="margin-top:12px">${forfaitNote} ${isIS?'Cette SCI relève de l’impôt sur les sociétés : la numérotation 2072 ci-dessus n’est qu’un repère de classement. Le résultat comptable se reporte à la ligne 136 du bilan (2033-A) et à la case 310 du compte de résultat (2033-B).':'Le déficit éventuel se reporte en ligne 21 (revenu ou déficit de l’immeuble) puis en ligne 24 (revenu net), et enfin en ligne 26 (montant à répartir entre les associés).'}</p>
-      ${controls.join('')}
+    if(m.financing.length)add('ok',`${m.financing.length} opération${m.financing.length>1?'s':''} de financement`,`${money(r2(m.financing.reduce((a,u)=>a+u.amount,0)),2)} : apports, comptes courants et dépôts de garantie ne sont ni recettes ni charges. Ils sont exclus, comme le veut le formulaire.`,'');
+    let verdict=blocks?`${blocks} point${blocks>1?'s':''} bloquant${blocks>1?'s':''}`:issues?`${issues} point${issues>1?'s':''} à compléter`:'Tout est prêt';
+    return `<div class="panel" style="margin-bottom:18px"><div class="panel-head"><h2>Pouvez-vous déclarer ?</h2><span class="pill ${blocks?'red':issues?'gold':'green'}">${verdict}</span></div><div class="panel-body"><p class="sub" style="margin-bottom:14px">Dominis vérifie ce que chaque case du formulaire exige. Rien n’est corrigé en silence : ce qui manque est signalé, avec le bouton pour le renseigner.</p>${items.join('')}</div></div>`;
+}
+// --- Onglet 2072-S (formulaire principal) ---------------------------------
+function declMainView(s,period,m,keys){
+    let c=declMainCases(m,keys);
+    let partners=rows('partners',s.id);
+    let shares=partners.reduce((a,p)=>a+(Number(p.shares)||0),0);
+    let cadres1=[[ 'R1','Revenus bruts',c.R1,'Total des lignes 5 + 19 − 20 + 22 de l’annexe A1'],[ 'R2','Paiement sur travaux',c.R2,'Total de la ligne 9 de l’annexe A1'],[ 'R3','Frais et charges autres qu’intérêts d’emprunts',c.R3,'Total de la ligne 16 de l’annexe A1'],[ 'R4','Intérêts d’emprunts',c.R4,'Total de la ligne 17 de l’annexe A1'],[ 'R5','Revenu net (+) ou déficit net (−)',c.R5,'Total de la ligne 23 de l’annexe A1 — c’est ce montant qui est réparti']];
+    let rowsHtml=cadres1.map(([code,label,val,note])=>`<tr><td><strong>${code}</strong> · ${esc(label)}<span class="cell-sub">${esc(note)}</span></td><td class="align-right">${val?declCopyBtn(val,code+' · '+label,{cls:'decl-total'}):'<span class="muted">—</span>'}</td></tr>`).join('');
+    let ident=[['Dénomination',s.name],['SIREN',s.siren||'Non renseigné'],['Adresse du siège',declSiege(s)||'Non renseignée'],['Clôture de l’exercice',s.closing||'31/12'],['Gérant',s.manager||'Non renseigné'],['Nombre d’associés',String(partners.length)],['Nombre total de parts',shares?num(shares):'Non renseigné'],['Nominal des parts',shares&&Number(s.capital)?money(r2(Number(s.capital)/shares),2):'—']];
+    return `<div class="panel" style="margin-bottom:18px"><div class="panel-head"><h2>Cadre I · résultat net à répartir</h2><span class="pill gold">2072-S-SD</span></div><div class="panel-body"><p class="sub" style="margin-bottom:12px">Les cinq cases du formulaire principal, calculées depuis l’annexe A1. C’est la ligne R5 que vous répartissez ensuite entre les associés.</p><div class="table-wrap"><table class="balance-table"><thead><tr><th>Case</th><th class="align-right">Montant</th></tr></thead><tbody>${rowsHtml}</tbody></table></div></div></div>
+    <div class="settings-grid" style="margin-bottom:18px">
+      <div class="panel"><div class="panel-head"><h2>Cadre II · renseignements généraux</h2><button data-action="edit-sci">${icon('edit')} Modifier</button></div><div class="panel-body info-grid">${ident.map(([k,v])=>`<div class="info-item"><label>${esc(k)}</label><span>${esc(v)}</span></div>`).join('')}</div></div>
+      <div class="panel"><div class="panel-head"><h2>Cadre IV · immeubles détenus</h2><span class="pill">${m.buildings.length} adresse${m.buildings.length>1?'s':''}</span></div><div class="panel-body"><div class="table-wrap"><table><thead><tr><th>Adresse</th><th class="align-right">Locaux</th><th>Nature</th></tr></thead><tbody>${m.buildings.map(b=>`<tr><td>${esc(b.label)}<span class="cell-sub">${b.properties.map(p=>esc(p.type||'Bien')).join(' · ')}</span></td><td class="align-right">${b.locaux||'<span class="muted">—</span>'}</td><td>${b.properties.map(p=>esc(p.type||'—')).filter((v,i,a)=>a.indexOf(v)===i).join(', ')}</td></tr>`).join('')||'<tr><td colspan="3" class="muted">Aucun immeuble renseigné.</td></tr>'}</tbody></table></div><p class="sub" style="margin-top:10px">La codification officielle de la « nature » (A/B) figure dans la notice 2072-S-NOT-SD : Dominis affiche le type saisi, à vous de choisir le code.</p></div></div>
+    </div>
+    <div class="panel"><div class="panel-head"><h2>Cadre III · produits et charges hors immeubles</h2></div><div class="panel-body"><p class="sub">R6 produits financiers · R7 plus-values de cession · R8 moins-values de cession. Ces montants ne figurent dans aucune case de Dominis : ils se lisent sur vos relevés bancaires et vos actes de cession. Laisser vide s’il n’y en a pas.</p></div></div>`;
+}
+// --- Onglet annexe A1 -----------------------------------------------------
+function declA1View(s,period,m){
+    let cols=declCols(m),keys=cols.map(c=>c.key);
+    let rowsOut=declA1Rows(m,keys);
+    let table=`<div class="table-wrap"><table class="balance-table balance-2072">${declA1Head(cols)}<tbody>${declLineRowsHtml(m,rowsOut,keys,{cols})}</tbody></table></div>`;
+    let notes=[];
+    if(m.unclassified.length)notes.push(`<div class="notice" style="border-left:3px solid var(--red)"><strong>${m.unclassified.length} mouvement${m.unclassified.length>1?'s':''} non classé${m.unclassified.length>1?'s':''}</strong><p class="sub" style="margin-top:6px">Ils ne sont pas comptés dans ce tableau. <button class="text-link" data-action="balance-mapping">Classer les catégories →</button></p></div>`);
+    if(m.toSplit.length)notes.push(`<div class="notice" style="border-left:3px solid var(--gold)"><strong>${m.toSplit.length} échéance${m.toSplit.length>1?'s':''} d’emprunt à ventiler</strong><p class="sub" style="margin-top:6px">La ligne 17 n’accepte que les intérêts. Le capital remboursé n’est pas déductible : classez les intérêts dans une catégorie dédiée.</p></div>`);
+    if(m.unassigned.length)notes.push(`<div class="notice" style="border-left:3px solid var(--gold)"><strong>${m.unassigned.length} mouvement${m.unassigned.length>1?'s':''} sans immeuble</strong><p class="sub" style="margin-top:6px">Ils apparaissent dans la colonne « Non affecté ». <button class="text-link" data-action="balance-assign">Affecter les mouvements →</button></p></div>`);
+    return `<div class="panel" style="margin-bottom:18px"><div class="panel-head"><h2>Annexe 1 · cadre VII</h2><span class="pill gold">${esc(period.label)}</span></div><div class="panel-body">
+    <p class="sub" style="margin-bottom:12px">Une colonne par <strong>immeuble</strong>, c’est-à-dire par adresse distincte. Les lignes 9 bis est un « dont » : elle est déjà comprise dans la ligne 9 et ne s’ajoute jamais au total. La ligne 14 se déduit. Cliquez sur un montant pour le copier et le coller dans la déclaration en ligne.</p>
+    ${table}
+    <div class="row gap8 wrap" style="margin-top:14px"><button type="button" data-action="balance-mapping">${icon('settings')} Classer les catégories</button><button type="button" data-action="balance-assign">${icon('building')} Affecter les mouvements</button></div>
+    ${notes.join('')}
     </div></div>`;
 }
-
-// --- 2. Formulaire officiel 2072-C-A1 -------------------------------------
-function balance2072View(s,period,m){
-    let cols=balanceColumns(m);
-    let keys=cols.map(c=>c.key);
-    let rows=new Map();
-    BALANCE_2072_LINES.forEach(([n,label,kind])=>rows.set(n,{n,label,kind}));
-    let prev={};
-    let get=(n)=>{let r=rows.get(n);return r;};
-    let cellsFor=(n)=>{
-        if(n===10)return null; // « dont » : calculé depuis le classement explicite
-        if([5,17,21,24].includes(n))return null; // calculés
-        if(n===26)return null;
-        if(n===25)return null;
-        let cells=keys.map(k=>Math.round(balanceLineAmount(m,n,k)));
-        if(n===7&&m.forfaitManual)cells=keys.map(k=>k==='__none__'?Math.round(m.forfaitExact):0);
-        if(n===15)cells=cells.map(v=>-Math.abs(v));
-        return {cells};
-    };
-    let body='';
-    let totalCol=(perCol)=>perCol.reduce((a,b)=>a+b,0);
-    let sumRows=(list)=>{
-        let cells=keys.map(()=>0);
-        list.forEach(n=>{
-            let row=prev[n];if(!row)return;
-            row.cells.forEach((v,i)=>cells[i]+=v);
-        });
-        return cells;
-    };
-    let pushRow=(n,cells,opts={})=>{
-        prev[n]={cells};
-        let r=get(n);
-        let total=totalCol(cells);
-        let sign=cells.some(v=>v<0);
-        body+=`<tr class="${r.kind==='total'?'balance-subtotal':r.kind==='dont'?'balance-dont':''}">
-            <td>${r.kind==='total'?'<strong>':''}${esc(r.label)}${r.kind==='total'?'</strong>':''}${n===7&&m.forfaitManual?'<span class="cell-sub">Montant manuel, 20 € par défaut</span>':''}</td>
-            <td class="align-right"><span class="pill ${r.kind==='total'?'gold':''}">${n}</span></td>
-            ${cells.map(v=>`<td class="align-right">${v?money(v,0):'<span class="muted">—</span>'}</td>`).join('')}
-            <td class="align-right"><strong class="${total<0?'red':''}">${money(total,0)}</strong></td></tr>`;
-    };
-    // Recettes 1 à 5
-    [1,2,3,4].forEach(n=>pushRow(n,cellsFor(n).cells));
-    pushRow(5,sumRows([1,2,3,4]));
-    // Charges 6 à 16 (10 = « dont », 15 = déduction)
-    [6,7,8,9,10,11,12,13,14,15,16].forEach(n=>{
-        if(n===10){
-            // « dont » ne s'ajoute pas au total 17 : ces montants sont déjà
-            // compris dans la ligne 9. Il reste vide tant qu'aucune catégorie
-            // n'y est explicitement classée.
-            let D=m.dontBy.get(10);
-            let cells=keys.map(k=>Math.round(D&&D.by[k]?D.by[k]:0));
-            prev[10]={cells};
-            body+=`<tr class="balance-dont"><td>${esc(get(10).label)}</td><td class="align-right"><span class="pill">10</span></td>${cells.map(v=>`<td class="align-right muted">${v?money(v,0):'—'}</td>`).join('')}<td class="align-right muted">${totalCol(cells)?money(totalCol(cells),0):'—'}</td></tr>`;
-            return;
-        }
-        pushRow(n,cellsFor(n).cells);
+// --- Onglet annexe A2 -----------------------------------------------------
+function declPartners(s){
+    let partners=rows('partners',s.id);
+    let total=partners.reduce((a,p)=>a+(Number(p.shares)||0),0);
+    return partners.map(p=>({...p,quote:total>0?(Number(p.shares)||0)/total:0})).sort((a,b)=>b.quote-a.quote);
+}
+function declShares(s,period,m){
+    let keys=declCols(m).map(c=>c.key);
+    let c=declMainCases(m,keys);
+    let partners=declPartners(s);
+    return partners.map(p=>{
+        let A=Math.round((c.R1)*p.quote);
+        let B=Math.round((c.R3)*p.quote);
+        let D=Math.round((c.R4)*p.quote);
+        return {...p,A,B,D,E:A-B-D};
     });
-    // 17 = 6+7+8+9+11+12+13+14−15+16
-    let l17=keys.map(()=>0);
-    [6,7,8,9,11,12,13,14,15,16].forEach(n=>{
-        prev[n].cells.forEach((v,i)=>l17[i]+=v);
-    });
-    pushRow(17,l17);
-    // 18 à 20
-    [18,19,20].forEach(n=>pushRow(n,cellsFor(n).cells));
-    // 21 = 5 − 17 − 18 − 19 − 20
-    let l21=keys.map((_,i)=>prev[5].cells[i]-prev[17].cells[i]-prev[18].cells[i]-prev[19].cells[i]-prev[20].cells[i]);
-    pushRow(21,l21);
-    // 22 et 23
-    [22,23].forEach(n=>pushRow(n,cellsFor(n).cells));
-    // 24 = 21 + 22 − 23
-    let l24=keys.map((_,i)=>prev[21].cells[i]+prev[22].cells[i]-prev[23].cells[i]);
-    pushRow(24,l24);
-    // 25 reste au niveau de la société
-    pushRow(25,keys.map(()=>0));
-    // 26 = somme des colonnes de la ligne 24 + ligne 25, colonne par colonne
-    let l26cells=keys.map((_,i)=>prev[24].cells[i]+prev[25].cells[i]);
-    let l26=totalCol(l26cells);
-    body+=`<tr class="balance-subtotal"><td><strong>${esc(get(26).label)}</strong><span class="cell-sub">Somme des colonnes de la ligne 24 + ligne 25</span></td><td class="align-right"><span class="pill gold">26</span></td>${l26cells.map(v=>`<td class="align-right"><strong class="${l26<0?'red':'green'}">${v?money(v,0):'<span class="muted">—</span>'}</strong></td>`).join('')}<td class="align-right"><strong class="${l26<0?'red':'green'}">${money(l26,0)}</strong></td></tr>`;
-    let head=`<thead><tr><th style="min-width:300px">Cadre VII · détermination des revenus selon la règle des revenus fonciers</th><th class="align-right" style="min-width:56px">Ligne</th>${cols.map(c=>`<th class="align-right" title="${esc(c.label)}">${esc(c.short)}</th>`).join('')}<th class="align-right">Total</th></tr></thead>`;
-    let regimeNote=s.regime==='IS'
-        ?`<div class="notice" style="border-left:3px solid var(--red);margin-bottom:14px"><strong>Cette SCI relève de l’impôt sur les sociétés.</strong><p class="sub" style="margin-top:6px">Le formulaire officiel est alors la liasse <strong>2033-A</strong> (bilan simplifié) et <strong>2033-B</strong> (compte de résultat), jointes à la déclaration 2065 — et non la 2072, réservée aux SCI à l’IR. Le cadre ci-dessous reste affiché à titre indicatif : c’est la vue « Bilan comptable » qui correspond à votre régime.</p><button type="button" data-balance-tab="comptable" style="margin-top:10px">Ouvrir le bilan comptable (2033-A / 2033-B)</button></div>`
-        :'';
-    return `${regimeNote}<div class="panel" style="margin-bottom:18px"><div class="panel-head"><h2>Formulaire 2072-C-A1 · annexe 1</h2><span class="pill gold">${esc(period.label)}</span></div>
-    <div class="panel-body">
-      <p class="sub" style="margin-bottom:12px">Une colonne par immeuble, c’est-à-dire par <strong>adresse distincte</strong> : deux biens au même endroit partagent une colonne, deux lieux différents en ont deux. Les montants sont arrondis à l’euro. La ligne 10 est un « dont » : elle est déjà comprise dans la ligne 9 et ne s’ajoute pas au total 17. La ligne 15 se déduit.</p>
-      <div class="table-wrap"><table class="balance-table balance-2072">${head}<tbody>${body}</tbody></table></div>
-      <div class="row gap8 wrap" style="margin-top:14px">
-        <label class="sub" for="balance-forfait">Ligne 7 · forfait autres frais de gestion</label>
-        <input id="balance-forfait" type="number" step="0.01" min="0" value="${Number(m.forfaitSetting).toFixed(2)}" style="width:120px" aria-label="Forfait autres frais de gestion">
-        <button type="button" data-action="balance-forfait-local">Appliquer le forfait de 20 €</button>
-        <span class="pill ${m.forfaitManual?'gold':''}">${m.forfaitManual?'Montant manuel appliqué':'Mouvements classés en ligne 7'}</span>
-      </div>
-      <p class="sub" style="margin-top:10px">La règle officielle (article 31, I, 1°, e du CGI) fixe ce forfait à 20 € par local et par an. Dominis applique un montant unique, librement modifiable : à vous de choisir entre le forfait légal et un montant adapté à votre situation.</p>
-      ${m.unclassified.length?`<div class="notice" style="margin-top:12px;border-left:3px solid var(--gold)"><strong>${m.unclassified.length} mouvement${m.unclassified.length>1?'s':''} non classé${m.unclassified.length>1?'s':''}</strong><p class="sub" style="margin-top:6px">Ils ne sont pas comptés dans ce formulaire. <button class="text-link" data-action="balance-mapping">Classer les catégories →</button></p></div>`:''}
-      ${m.toSplit.length?`<div class="notice" style="margin-top:12px"><strong>${m.toSplit.length} échéance${m.toSplit.length>1?'s':''} d’emprunt non ventilée${m.toSplit.length>1?'s':''}</strong><p class="sub" style="margin-top:6px">La ligne 20 n’accepte que les intérêts. Utilisez la catégorie « Intérêts » pour les échéances dont vous connaissez la part d’intérêts.</p></div>`:''}
+}
+function declA2View(s,period,m){
+    let c=declMainCases(m,declCols(m).map(x=>x.key));
+    let list=declShares(s,period,m);
+    let sumE=list.reduce((a,p)=>a+p.E,0);
+    let ecart=r2(c.R5-sumE);
+    let body=list.map(p=>`<tr><td><strong>${esc(p.name)}</strong><span class="cell-sub">${esc(p.role||'Associé')} · ${p.shares?num(p.shares):'0'} part${Number(p.shares)>1?'s':''} · ${(p.quote*100).toFixed(2).replace('.',',')} %</span></td><td class="align-right">${declCopyBtn(p.A,'Quote-part revenus bruts · '+p.name)}</td><td class="align-right">${declCopyBtn(p.B,'Quote-part frais et charges · '+p.name)}</td><td class="align-right">${declCopyBtn(p.D,'Quote-part intérêts · '+p.name)}</td><td class="align-right">${p.E?declCopyBtn(p.E,'Quote-part résultat · '+p.name,{cls:'decl-total'}):'<span class="muted">—</span>'}</td></tr>`).join('');
+    let foot=`<tfoot><tr><td><strong>Total</strong><span class="cell-sub">Colonnes A + B + D + E</span></td><td class="align-right"><strong>${money(declSum(list.map(p=>p.A)),0)}</strong></td><td class="align-right"><strong>${money(declSum(list.map(p=>p.B)),0)}</strong></td><td class="align-right"><strong>${money(declSum(list.map(p=>p.D)),0)}</strong></td><td class="align-right"><strong>${money(sumE,0)}</strong></td></tr></tfoot>`;
+    return `<div class="panel" style="margin-bottom:18px"><div class="panel-head"><h2>Annexe 2 · cadre IX</h2><span class="pill gold">${list.length} associé${list.length>1?'s':''}</span></div><div class="panel-body">
+    <p class="sub" style="margin-bottom:12px">Une colonne par associé. <strong>A</strong> = quote-part des revenus bruts (5+19−20+22), <strong>B</strong> = quote-part des frais et charges (16), <strong>D</strong> = quote-part des intérêts (17), <strong>E</strong> = A − B − D, soit exactement la quote-part du résultat à répartir. Chaque colonne est calculée à partir du pourcentage de parts détenues.</p>
+    <div class="table-wrap"><table class="balance-table"><thead><tr><th style="min-width:230px">Associé</th><th class="align-right">A · revenus bruts</th><th class="align-right">B · frais et charges</th><th class="align-right">D · intérêts</th><th class="align-right">E · résultat</th></tr></thead><tbody>${body||'<tr><td colspan="5" class="muted">Aucun associé renseigné.</td></tr>'}</tbody>${list.length?foot:''}</table></div>
+    ${Math.abs(ecart)>0.004?`<p class="sub" style="margin-top:10px">La somme des quotes-parts (${money(sumE,0)}) diffère de la case R5 (${money(c.R5,0)}) de ${money(ecart,2)} : c’est l’arrondi à l’euro de chaque associé. La déclaration en ligne fait le même arrondi.</p>`:`<p class="sub" style="margin-top:10px">La somme des quotes-parts est égale à la case R5 : ${money(sumE,0)}.</p>`}
+    ${list.length?`<p class="sub">Une annexe libre est jointe au-delà de quatre associés ; Dominis affiche toutes les lignes.</p>`:''}
     </div></div>`;
 }
+// --- Onglet 2044 des associés --------------------------------------------
+function decl2044Cases(p,renov){
+    // Page 4 de la 2044 : calcul du résultat foncier et répartition du déficit.
+    let rec=p.A,int=p.D,autres=p.B;
+    let r420=p.E;
+    // Plafond d'imputation sur le revenu global : 10 700 €, majorés de la ligne
+    // 112 bis (rénovation énergétique), sans dépasser 21 400 €.
+    let cap=Math.min(10700+(Number(renov)||0),21400);
+    if(r420>=0)return {r420,ba:r420,bb:0,bc:0,detail:'bénéfice reporté en case 4BA'};
+    let deficit=Math.abs(r420);
+    if(int>rec){
+        let bc=Math.min(autres,cap);
+        let reste=autres-bc;
+        let interetsExcedent=int-rec;
+        return {r420,ba:0,bb:reste+interetsExcedent,bc,detail:'intérêts supérieurs aux revenus : la part des intérêts n’est jamais imputable sur le revenu global'};
+    }
+    let bc=Math.min(deficit,cap);
+    return {r420,ba:0,bb:deficit-bc,bc,detail:deficit>cap?'déficit plafonné à 10 700 € sur le revenu global, le reste est reportable 10 ans':'déficit entièrement imputable sur le revenu global'};
+}
+function decl2044View(s,period,m){
+    let list=declShares(s,period,m);
+    if(!list.length)return `<div class="panel"><div class="panel-body"><p class="sub">Aucun associé renseigné : la 2044 de chacun ne peut pas être préparée.</p><button data-add="partners" style="margin-top:12px">${icon('plus')} Ajouter un associé</button></div></div>`;
+    let cards=list.map(p=>{
+        let k=decl2044Cases(p,Math.round(declExact(m,'9bis')*p.quote));
+        let lines=[['110','Nom et adresse de la société',`${s.name} · ${declSiege(s)||'adresse non renseignée'}`,null],['111','Revenus bruts',p.A,p.A],['112','Frais et charges (sauf intérêts d’emprunt)',p.B,p.B],['112 bis','dont travaux de rénovation énergétique',Math.round(declExact(m,'9bis')*p.quote),null],['113','Intérêts d’emprunt',p.D,p.D],['114','Bénéfice (+) ou déficit (−) · 111 − 112 − 113',p.E,p.E]];
+        let body=lines.map(([code,label,val,copy])=>`<tr><td><span class="pill">${code}</span> ${esc(label)}</td><td class="align-right">${(copy===null||!val)?`<span class="muted">${copy===null&&val?esc(String(val)):'—'}</span>`:declCopyBtn(val,code+' · '+label)}</td></tr>`).join('');
+        body+=`<tr class="balance-subtotal"><td><span class="pill gold">115</span> Total de chaque ligne, à reporter page 4</td><td class="align-right"><strong>${money(p.E,0)}</strong></td></tr>`;
+        let cases=`<div class="decl-cases"><div class="setting-row"><div><h3>4BA · bénéfice foncier imposable</h3><p>Ligne 420 si elle est positive.</p></div><div>${k.ba?declCopyBtn(k.ba,'4BA · '+p.name,{cls:'decl-total'}):'<span class="muted">—</span>'}</div></div><div class="setting-row"><div><h3>4BB · déficit reportable sur les revenus fonciers</h3><p>Reportable 10 ans, jamais sur le revenu global.</p></div><div>${k.bb?declCopyBtn(k.bb,'4BB · '+p.name,{cls:'decl-total'}):'<span class="muted">—</span>'}</div></div><div class="setting-row"><div><h3>4BC · déficit imputable sur le revenu global</h3><p>Plafonné à 10 700 € (jusqu’à 21 400 € en rénovation énergétique).</p></div><div>${k.bc?declCopyBtn(k.bc,'4BC · '+p.name,{cls:'decl-total'}):'<span class="muted">—</span>'}</div></div><div class="setting-row"><div><h3>4BD · déficits antérieurs</h3><p>Stock des années passées, à reprendre de votre avis d’imposition.</p></div><div><span class="muted">à saisir</span></div></div></div>`;
+        return `<div class="panel" style="margin-bottom:18px"><div class="panel-head"><h2>${esc(p.name)}</h2><span class="pill gold">${(p.quote*100).toFixed(2).replace('.',',')} % des parts</span></div><div class="panel-body">
+        <p class="sub" style="margin-bottom:12px">Rubrique 110 de la 2044. Si cet associé n’a <strong>aucun autre revenu foncier</strong>, il peut reporter directement ces montants sur sa 2042, avec une annexe libre : la 2044 n’est alors pas obligatoire.</p>
+        <div class="settings-grid"><div><div class="table-wrap"><table class="balance-table"><tbody>${body}</tbody></table></div></div><div>${cases}</div></div>
+        <p class="sub" style="margin-top:12px">${esc(k.detail)}. La case 4BD dépend de l’avis d’imposition de l’an dernier : Dominis ne peut pas la déduire.</p>
+        </div></div>`;
+    }).join('');
+    return `<div class="notice"><strong>Un document par associé, pas par société.</strong> La 2044 est la déclaration personnelle de chaque associé : Dominis prépare la quote-part à recopier, et les cases de la 2042 qui en découlent.</div>${cards}`;
+}
+// --- Onglet IS ------------------------------------------------------------
+function declIsView(s,period,years){
+    let m=balanceModel(s,period);
+    return `<div class="notice" style="border-left:3px solid var(--red)"><strong>SCI à l’impôt sur les sociétés : ni 2072-S, ni 2044.</strong><p class="sub" style="margin-top:6px">La société dépose la <strong>2065</strong> (résultat fiscal) avec la liasse <strong>2033</strong> : 2033-A pour le bilan simplifié, 2033-B pour le compte de résultat, et 2033-C à G pour les immobilisations, provisions, effectifs, capital et filiales. Les associés ne déclarent rien au titre de la SCI : les dividendes relèvent de leur 2042.</p></div>
+    ${balanceComptableView(s,period,m,years)}`;
+}
+// --- Page « Déclaration » -------------------------------------------------
+function declPeriod(s){return balancePeriod(s);}
+function declPage(s){
+    let period=declPeriod(s),years=balanceYears(s);
+    let isIS=s.regime==='IS';
+    let tabs=isIS?DECL_IS_TABS:DECL_IR_TABS;
+    let valid=tabs.map(t=>t[0]);
+    // Un onglet qui n'existe pas pour ce régime retombe sur le premier disponible.
+    if(!valid.includes(declTab))declTab=valid[0];
+    let custom=period.mode==='custom';
+    let yearOptions=years.map(y=>`<option value="${y}" ${!custom&&y===period.year?'selected':''}>Exercice ${y}</option>`).join('');
+    let controls=`<div class="row gap8 wrap" style="margin-bottom:16px"><label class="sub" for="balance-year">Exercice déclaré</label><select id="balance-year" style="width:auto;min-width:190px">${yearOptions}<option value="custom" ${custom?'selected':''}>Période personnalisée</option></select>${custom?`<input id="balance-start" type="date" value="${esc(period.start)}" aria-label="Début de la période"><span class="muted">→</span><input id="balance-end" type="date" value="${esc(period.end)}" aria-label="Fin de la période">`:''}<span class="pill gold">${esc(period.label)}</span><span class="pill">Clôture ${esc(s.closing||'31/12')}</span><span class="pill">${isIS?'Régime IS · 2065 + 2033':'Régime IR · 2072-S'}</span></div>`;
+    let nav=`<nav class="tabs" role="tablist" aria-label="Documents à déposer" style="margin-top:6px">${tabs.map(([id,label])=>`<button type="button" class="tab ${declTab===id?'active':''}" data-decl-tab="${id}" role="tab" aria-selected="${declTab===id}">${label}</button>`).join('')}</nav>`;
+    let content='';
+    if(declTab==='checks'){
+        content=declChecksView(s,period,declModel(s,period))+(isIS?'':declQuickSummary(s,period));
+    }else if(declTab==='main'){
+        let m=declModel(s,period);
+        content=declMainView(s,period,m,declCols(m).map(c=>c.key));
+    }else if(declTab==='a1'){
+        content=declA1View(s,period,declModel(s,period));
+    }else if(declTab==='a2'){
+        content=declA2View(s,period,declModel(s,period));
+    }else if(declTab==='p2044'){
+        content=decl2044View(s,period,declModel(s,period));
+    }else{
+        content=declIsView(s,period,years);
+    }
+    return `${controls}${nav}${content}`;
+}
+function declQuickSummary(s,period){
+    let m=declModel(s,period);
+    let c=declMainCases(m,declCols(m).map(x=>x.key));
+    let liste=declShares(s,period,m);
+    let color=c.R5<0?'red':'green';
+    return `<div class="settings-grid"><div class="panel"><div class="panel-body"><div class="eyebrow">Revenu net à répartir · case R5</div><div style="font-size:26px;margin-top:8px" class="${color}">${money(c.R5,0)}</div><p class="sub" style="margin-top:8px">Annexe A1 ligne 23. C’est le seul montant qui se répartit.</p><button class="text-link" data-decl-tab="a1">Voir l’annexe A1 →</button></div></div>
+    <div class="panel"><div class="panel-body"><div class="eyebrow">Répartition entre associés</div><div class="stack" style="margin-top:10px">${liste.map(p=>`<div class="row between"><span>${esc(p.name)}<span class="cell-sub">${(p.quote*100).toFixed(2).replace('.',',')} %</span></span><strong class="${p.E<0?'red':'green'}">${money(p.E,0)}</strong></div>`).join('')||'<span class="sub">Aucun associé renseigné.</span>'}</div><button class="text-link" style="margin-top:10px" data-decl-tab="a2">Voir l’annexe A2 →</button></div></div>
+    <div class="panel"><div class="panel-body"><div class="eyebrow">Documents à déposer</div><div class="stack" style="margin-top:10px"><div class="row between"><span>2072-S-SD</span><span class="pill">société</span></div><div class="row between"><span>Annexe 2072-S-A1</span><span class="pill">${m.buildings.length} immeuble${m.buildings.length>1?'s':''}</span></div><div class="row between"><span>Annexe 2072-S-A2</span><span class="pill">${liste.length} associé${liste.length>1?'s':''}</span></div><div class="row between"><span>2044 de chaque associé</span><span class="pill">après la SCI</span></div></div><p class="sub" style="margin-top:10px">Dépôt par voie dématérialisée, environ le 2ᵉ jour ouvré suivant le 1ᵉʳ mai, avec 15 jours de plus pour la télédéclaration.</p></div></div></div>`;
+}
 
-// --- 3. Bilan comptable (actif / passif) ----------------------------------
 function balanceComptableView(s,period,m,years){
     let gapOk=Math.abs(m.gap)<0.005;
     let cards=`<div class="settings-grid" style="margin-bottom:20px"><div class="panel"><div class="panel-body"><div class="eyebrow">Total de l’actif · case 112</div><div style="font-size:24px;margin-top:6px">${money(m.totalActif,2)}</div><p class="sub" style="margin-top:6px">Biens ${money(m.assets,2)} · créances ${money(m.receivables,2)} · trésorerie ${money(m.cash,2)}</p></div></div><div class="panel"><div class="panel-body"><div class="eyebrow">Total du passif · case 180</div><div style="font-size:24px;margin-top:6px">${money(m.totalPassif,2)}</div><p class="sub" style="margin-top:6px">Capitaux propres ${money(r2(m.capital+m.prior+m.result),2)} · dettes ${money(r2(m.loanTotal+Math.max(0,m.cca)+m.deposits),2)}</p></div></div></div>`;
@@ -9907,68 +10046,10 @@ function balanceComptableView(s,period,m,years){
     </div></div>`;
 }
 
-// --- Classement des catégories sur les lignes officielles -----------------
-function balanceMappingModal(){
-    let s=currentSCI();if(!s)return;
-    let period=balancePeriod(s),m=balance2072Model(s,period),map=balanceLineMap(s);
-    let cats=[...new Set(rows('entries',s.id).filter(r=>entryDate(r)).map(r=>String(r.category||'').trim()||'Autre'))].sort((a,b)=>a.localeCompare(b,'fr'));
-    let options=(sel)=>{
-        let out=`<option value="" ${sel==='' ?'selected':''}>Classement automatique</option>`;
-        out+=`<option value="finance" ${sel==='finance'?'selected':''}>Hors formulaire · opération de financement</option>`;
-        out+=`<option value="ventiler" ${sel==='ventiler'?'selected':''}>À ventiler (capital d’emprunt, non déductible)</option>`;
-        out+=`<option value="classer" ${sel==='classer'?'selected':''}>Non classé (exclu du bilan)</option>`;
-        BALANCE_2072_LINES.filter(([n,k])=>!['total'].includes(k)).forEach(([n,label])=>{
-            out+=`<option value="${n}" ${String(sel)===String(n)?'selected':''}>Ligne ${n} · ${esc(label.length>70?label.slice(0,68)+'…':label)}</option>`;
-        });
-        return out;
-    };
-    let automap={};
-    rows('entries',s.id).filter(r=>entryDate(r)).forEach(r=>{let c=String(r.category||'').trim()||'Autre';if(!automap[c])automap[c]=balanceAutoClass(r);});
-    let body=cats.map(c=>{
-        let ov=map&&Object.prototype.hasOwnProperty.call(map,c)?map[c]:'';
-        let auto=automap[c]||{line:'classer'};
-        return `<div class="col-config-item" style="align-items:flex-start"><div style="flex:1;min-width:0"><strong>${esc(c)}</strong><span class="cell-sub" style="display:block">Lecture automatique : ${auto.line==='finance'?'hors formulaire':auto.line==='ventiler'?'à ventiler':auto.line==='classer'?'non classé':'ligne '+esc(String(auto.line))+' — '+esc((BALANCE_LINE_LABELS[auto.line]||'').slice(0,60))}</span></div><select data-balance-map="${esc(c)}" style="width:auto;min-width:290px;max-width:48%" aria-label="Ligne officielle de la catégorie ${esc(c)}">${options(ov)}</select></div>`;
-    }).join('');
-    openModal('Classer les catégories · formulaire 2072-C-A1',`<p class="sub" style="margin-bottom:12px">Chaque catégorie de trésorerie est rattachée à une ligne du formulaire officiel. Sans choix explicite, Dominis applique une lecture automatique du libellé, rappelée sous chaque catégorie. Ce classement ne modifie ni les montants ni la trésorerie : il ne change que la présentation du bilan.</p>${cats.length?body:'<p class="sub">Aucune catégorie à classer.</p>'}<p class="compact-note">Les échéances d’emprunt ne contiennent qu’une part d’intérêts déductibles : classez la catégorie « Emprunt (capital + intérêts) » sur la ligne 20 uniquement si vous y avez isolé les intérêts, sinon laissez-la « à ventiler ».</p>`,`<button data-action="close-modal">Fermer</button><button class="primary" data-action="balance-map-save">${icon('check')} Enregistrer le classement</button>`,true);
-}
-function balanceAssignModal(){
-    let s=currentSCI();if(!s)return;
-    let period=balancePeriod(s),m=balance2072Model(s,period);
-    if(!m.unassigned.length)return notify('Tous les mouvements de la période sont rattachés à un bien.');
-    let opts=(sel)=>`<option value="">Sans bien (non affecté)</option>`+rows('properties',s.id).map(p=>`<option value="${esc(p.id)}" ${sel===p.id?'selected':''}>${esc(p.name)} · ${esc(p.address||'adresse non renseignée')}</option>`).join('');
-    let props=rows('properties',s.id);
-    let sameAddress=(r)=>{
-        // Proposition : la catégorie « travaux » ne dit pas le bien ; on propose
-        // le bien quand la société n'en a qu'un, sinon l'utilisateur choisit.
-        return props.length===1?props[0].id:'';
-    };
-    let body=m.unassigned.slice(0,60).map(r=>`<tr><td>${date(r.date)}<span class="cell-sub">${esc(truncate(r.label,48))}</span></td><td class="align-right">${money(Math.abs(entrySigned(r)),2)}</td><td><select data-balance-assign="${esc(r.id)}" style="width:100%;min-width:220px">${opts(sameAddress(r))}</select></td></tr>`).join('');
-    openModal('Affecter les mouvements · colonnes par immeuble',`<p class="sub" style="margin-bottom:12px">${m.unassigned.length} mouvement${m.unassigned.length>1?'s':''} de la période n’${m.unassigned.length>1?'ont':'a'} pas de bien rattaché. Les colonnes du bilan sont des <strong>adresses distinctes</strong> : rattacher un mouvement à un bien le range dans la colonne de l’adresse de ce bien.</p><div class="table-wrap"><table><thead><tr><th>Mouvement</th><th class="align-right">Montant</th><th>Bien / immeuble</th></tr></thead><tbody>${body}</tbody></table></div>${m.unassigned.length>60?`<p class="sub" style="margin-top:10px">Seuls les 60 premiers mouvements sont affichés.</p>`:''}`,`<button data-action="close-modal">Annuler</button><button class="primary" data-action="balance-assign-save">${icon('check')} Enregistrer les affectations</button>`,true);
-}
-function truncate(t,n){t=String(t||'');return t.length>n?t.slice(0,n-1)+'…':t;}
-
-// --- Page « Bilan » -------------------------------------------------------
-function balancePage(s){
-    let period=balancePeriod(s),years=balanceYears(s);
-    let custom=period.mode==='custom';
-    let yearOptions=years.map(y=>`<option value="${y}" ${!custom&&y===period.year?'selected':''}>Exercice ${y}</option>`).join('');
-    let controls=`<div class="row gap8 wrap" style="margin-bottom:16px"><label class="sub" for="balance-year">Période du bilan</label><select id="balance-year" style="width:auto;min-width:190px">${yearOptions}<option value="custom" ${custom?'selected':''}>Période personnalisée</option></select>${custom?`<input id="balance-start" type="date" value="${esc(period.start)}" aria-label="Début de la période"><span class="muted">→</span><input id="balance-end" type="date" value="${esc(period.end)}" aria-label="Fin de la période">`:''}<span class="pill gold">${esc(period.label)}</span><span class="pill">Clôture statutaire ${esc(s.closing||'31/12')}</span><span class="pill">${s.regime==='IS'?'Régime IS · liasse 2033':'Régime IR · formulaire 2072'}</span><span style="flex:1"></span><button type="button" data-action="balance-mapping">${icon('settings')} Classer les catégories</button><button type="button" data-action="balance-assign">${icon('building')} Affecter les mouvements</button></div>`;
-    let tabs=`<nav class="tabs" role="tablist" aria-label="Présentation du bilan" style="margin-top:6px">${BALANCE_TABS.map(([id,label])=>`<button type="button" class="tab ${balanceTab===id?'active':''}" data-balance-tab="${id}" role="tab" aria-selected="${balanceTab===id}">${label}</button>`).join('')}</nav>`;
-    let content='';
-    if(balanceTab==='societe'){
-        content=balanceSocieteView(s,period,balance2072Model(s,period));
-    }else if(balanceTab==='formulaire'){
-        content=balance2072View(s,period,balance2072Model(s,period));
-    }else{
-        content=balanceComptableView(s,period,balanceModel(s,period),years);
-    }
-    return `${controls}${tabs}${content}`;
-}
-
 function identity(s){let openTxt=s.opening&&Number(s.opening)!==0?money(s.opening,2)+(s.opening_date?' au '+date(s.opening_date):''):'—';return `<div class="settings-grid"><div class="panel"><div class="panel-head"><h2>Identité de la société</h2><button data-action="edit-sci">${icon('edit')} Modifier</button></div><div class="panel-body info-grid">${[['Dénomination',s.name],['SIREN',s.siren||'Non renseigné'],['Gérant',s.manager||'Non renseigné'],['Siège social',s.address||'Non renseigné'],['Capital social',money(s.capital,2)],['Régime fiscal',s.regime||'IR'],['Clôture de l’exercice',s.closing||'31/12'],['Solde d’ouverture',openTxt]].map(([k,v])=>`<div class="info-item"><label>${k}</label><span>${esc(v)}</span></div>`).join('')}<div class="info-item" style="grid-column:1/-1"><label>Notes de gestion</label><span style="white-space:pre-wrap">${esc(s.notes||'Aucune note.')}</span></div></div></div><div class="stack"><div class="panel"><div class="panel-head"><h2>Repères de gestion · ${esc(s.regime||'IR')}</h2></div><div class="panel-body stack"><p class="sub">${s.regime==='IS'?'Préparer la déclaration 2065 et ses annexes avec une comptabilité d’engagement, les immobilisations et les amortissements. Dominis ne produit pas de liasse fiscale ni de FEC.':'Préparer les informations de la déclaration 2072 selon votre situation. Les recettes et dépenses enregistrées ne déterminent pas automatiquement le résultat foncier imposable.'}</p><p class="sub">Le gérant doit rendre compte annuellement de sa gestion aux associés (article 1856 du Code civil). Les modalités de décision dépendent notamment des statuts.</p><button data-add="tasks">${icon('calendar')} Ajouter une échéance de suivi</button><button data-action="annual-report">${icon('file')} Préparer une synthèse annuelle</button><p class="sub">Les dates fiscales sont à vérifier chaque année. Aucun calendrier légal automatique n’est imposé par l’application.</p></div></div><div class="panel"><div class="panel-body"><h3 class="red">Suppression de la SCI</h3><p class="sub" style="margin:8px 0 15px">Cette action supprime la société et toutes ses données liées. Exportez une sauvegarde complète auparavant.</p><button class="danger" data-action="delete-sci">${icon('trash')} Supprimer cette SCI</button><button class="danger" data-action="manage-deletions" style="margin-top:8px">${icon('trash')} Gérer la suppression</button><p class="compact-note" style="margin-top:10px">Vider une seule page de cette SCI, sans toucher aux autres sociétés.</p></div></div></div></div>`;}
 function settingsGeneral(){return `<div class="settings-grid"><div class="stack"><section class="panel"><div class="panel-head"><h2>Apparence & préférences</h2>${icon('sun')}</div><div class="panel-body"><div class="setting-row"><div><h3>Thème de l’interface</h3><p>Le même soin, de jour comme de nuit.</p></div><div class="theme-choice"><button data-theme="dark" class="${S.settings.theme==='dark'?'active':''}">${icon('moon')} Sombre</button><button data-theme="light" class="${S.settings.theme==='light'?'active':''}">${icon('sun')} Clair</button></div></div><div class="setting-row"><div><h3>Navigation compacte</h3><p>Une barre latérale discrète, plus d’espace.</p></div><button class="toggle ${S.settings.collapsed?'on':''}" data-action="collapse" aria-label="Navigation compacte" aria-pressed="${!!S.settings.collapsed}"></button></div><div class="setting-row"><div><h3>Nom de votre espace</h3><p>Affiché dans la barre latérale.</p></div><button data-action="rename-space">${icon('edit')} Modifier</button></div><div class="setting-row"><div><h3>Sauvegarde à la fermeture</h3><p>Copie complète dans le dossier sauvegardes/.</p></div><button class="toggle ${S.settings.auto_backup?'on':''}" data-action="auto-backup" aria-label="Sauvegarde à la fermeture" aria-pressed="${!!S.settings.auto_backup}"></button></div><div class="setting-row"><div><h3>Sauvegarde hebdomadaire</h3><p>Copie de data.db au premier lancement de la semaine ; deux fichiers maximum dans auto-save/.</p></div><button class="toggle ${S.settings.weekly_auto_save?'on':''}" data-action="weekly-auto-save" aria-label="Sauvegarde hebdomadaire" aria-pressed="${!!S.settings.weekly_auto_save}"></button></div></div></section><section class="panel"><div class="panel-head"><h2>Ordre de navigation</h2>${icon('panel')}</div><div class="panel-body"><p class="sub">Déplacez les pages avec les flèches. Vos nouvelles SCI apparaissent automatiquement.</p><div class="order-item locked">${icon('grid')} Tableau de bord <span style="margin-left:auto">${icon('lock')}</span></div>${navOrder().map((id,i,a)=>`<div class="order-item">${navIcon(id)}${esc(navName(id))}<div class="actions"><button data-move="${id}" data-dir="-1" ${!i?'disabled':''} title="Monter">${icon('up')}</button><button data-move="${id}" data-dir="1" ${i===a.length-1?'disabled':''} title="Descendre">${icon('down')}</button></div></div>`).join('')}<div class="order-item locked">${icon('settings')} Paramètres <span style="margin-left:auto">${icon('lock')}</span></div><p class="compact-note">Tableau de bord reste en premier, Paramètres en dernier. Quitter est une action distincte.</p></div></section></div><div class="stack"><section class="panel"><div class="panel-head"><h2>Vos données vous appartiennent</h2>${icon('database')}</div><div class="panel-body"><div class="setting-row"><div><h3>Importer des données</h3><p>JSON Dominis, CSV ou Excel (.xlsx) de mouvements multi-SCI.<br>Aperçu et destinations avant validation.</p></div><button data-action="import">${icon('upload')} Importer</button></div><div class="setting-row"><div><h3>Exporter une sélection</h3><p>Choisissez les SCI, les données et le format.</p></div><button data-action="export">${icon('download')} Exporter</button></div><div class="setting-row"><div><h3>Sauvegarde complète</h3><p>Toutes les SCI, pièces jointes et préférences.<br>${S.settings.last_backup?'Dernière : '+new Date(S.settings.last_backup).toLocaleString('fr-FR'):'Aucune sauvegarde manuelle enregistrée.'}</p></div><button class="primary" data-action="backup">${icon('database')} Sauvegarder</button></div><div class="setting-row"><div><h3>Restaurer une sauvegarde</h3><p>Remplace l’ensemble de l’espace. Une copie<br>de sécurité est créée avant restauration.</p></div><button data-action="restore">${icon('clock')} Restaurer</button></div></div></section><section class="panel"><div class="panel-head"><h2>Stockage & confidentialité</h2>${icon('lock')}</div><div class="panel-body stack"><div class="row between"><span class="sub">Base locale</span><span class="pill green"><span class="status-dot"></span>data.db · ${num(S.db_size/1024/1024)} Mo</span></div><p class="sub">Aucune télémétrie. La gestion de vos données fonctionne hors ligne. Seule la vérification des versions contacte GitHub, sans transmettre vos données patrimoniales. Documents, réglages et historique sont stockés dans SQLite. La base n’est pas chiffrée : protégez votre session et vos sauvegardes.</p><p class="sub">Usage local, mono-utilisateur. Ne placez pas une base ouverte sur un partage réseau ou dans une synchronisation cloud.</p>${S.preview?'<div class="notice" style="margin:0">Aperçu hébergé : utilisez des données fictives uniquement. Le téléchargement et les lanceurs sont destinés à l’usage local.</div>':''}</div></section>${S.settings.demo?`<section class="panel"><div class="panel-body"><h3>Données de démonstration</h3><p class="sub" style="margin:8px 0 14px">Efface toutes les données de cet espace démo, y compris vos ajouts. Sauvegardez-les avant de repartir d’un espace vierge.</p><button class="danger" data-action="reset-demo">${icon('trash')} Vider l’espace de démonstration</button></div></section>`:''}</div><section class="panel" style="grid-column:1/-1"><div class="panel-head"><h2>Journal d’activité</h2><span class="sub">80 dernières actions</span></div><div class="panel-body audit-list">${S.audit.map(r=>`<div class="audit-line"><time>${esc(new Date(r.at).toLocaleString('fr-FR'))}</time><strong style="min-width:90px">${esc(r.action)}</strong><span class="muted">${esc(r.detail)}</span></div>`).join('')||'<p class="sub">Aucune action enregistrée.</p>'}</div></section></div>`;}
 function render(){if(!['dashboard','settings',...Object.keys(navs),...S.scis.map(s=>s.id)].includes(page))page='dashboard';yearSelectSeq=0;renderShell();let content='';if(page==='dashboard'){content=head('Votre patrimoine, en perspective.','L’essentiel de vos sociétés, réuni au même endroit.',yearSelect()+exportBtn()+`<button class="primary" data-action="new-sci">${icon('plus')} Nouvelle SCI</button>`,'Tableau de bord général')+(S.scis.length?dashboard():empty('Bienvenue dans votre espace patrimonial','Créez votre première SCI. Son espace de gestion apparaîtra automatiquement dans la navigation.',`<button class="primary" data-action="new-sci">${icon('plus')} Créer ma première SCI</button>`));}
-else if(page==='settings')content=settingsPage();else if(navs[page])content=listPage({treasury:'entries',agenda:'tasks',documents:'documents'}[page]);else{let s=currentSCI();content=head(s.name,(s.city||s.address||'Société civile immobilière')+' · Régime '+(s.regime||'IR'),yearSelect(s.id)+`<button data-action="edit-sci">${icon('edit')} Société</button>`+`<button class="primary" data-action="quick">${icon('plus')} Ajouter</button>`,'Espace société')+`<nav class="tabs" aria-label="Gestion de la SCI">${tabs.map(([t,n])=>`<button class="tab ${tab===t?'active':''}" data-tab="${t}">${n}</button>`).join('')}</nav>`+(tab==='overview'?dashboard(s.id):tab==='balance'?balancePage(s):tab==='identity'?identity(s):listPage(tab,s.id));}
+else if(page==='settings')content=settingsPage();else if(navs[page])content=listPage({treasury:'entries',agenda:'tasks',documents:'documents'}[page]);else{let s=currentSCI();content=head(s.name,(s.city||s.address||'Société civile immobilière')+' · Régime '+(s.regime||'IR'),yearSelect(s.id)+`<button data-action="edit-sci">${icon('edit')} Société</button>`+`<button class="primary" data-action="quick">${icon('plus')} Ajouter</button>`,'Espace société')+`<nav class="tabs" aria-label="Gestion de la SCI">${tabs.map(([t,n])=>`<button class="tab ${tab===t?'active':''}" data-tab="${t}">${n}</button>`).join('')}</nav>`+(tab==='overview'?dashboard(s.id):tab==='balance'?declPage(s):tab==='identity'?identity(s):listPage(tab,s.id));}
 const recoveryNotice=S.primary_db_missing?`<div class="notice" role="alert" style="border-left-color:var(--red)"><strong>La base principale data.db était absente.</strong> Dominis a créé une base vide ; les fichiers de auto-save/ ne sont pas utilisés comme base. Avant toute nouvelle saisie, restaurez une copie dans data.db.<div style="margin-top:10px"><button class="danger" data-action="restore">${icon('clock')} Restaurer une sauvegarde</button></div></div>`:'';$('#main').innerHTML=recoveryNotice+content+`<div class="footer"><span>DOMINIS <span style="opacity:.5;margin:0 7px">/</span> Votre patrimoine, en toute clarté.</span><span class="row gap8">${icon('lock')} Enregistrement local · Outil de gestion, hors comptabilité certifiée</span></div>`;updateCount();checkTaskNotifications();}
 function currentListKind(){return navs[page]?{treasury:'entries',agenda:'tasks',documents:'documents'}[page]:tab;}
 function visibleCount(kind,id){let list=filtered(kind,id);if(kind==='documents')list=list.filter(inDocFolder);return list.length}
@@ -9990,7 +10071,7 @@ if(kind==='tasks'){
 let f=(n,l,t='text',def='',o=null,req=false,full=false)=>field(n,l,t,d[n]??def,o,req,full),body='';
 if(kind!=='sci')body+=field('sci','Société concernée','select',sid,S.scis.map(s=>[s.id,s.name]),true,true);
 if(kind==='sci')body+=f('name','Nom de la SCI','text','',null,true,true)+f('siren','SIREN (9 chiffres)')+f('regime','Régime fiscal','select','IR',['IR','IS'])+f('manager','Gérant')+f('capital','Capital social (€)','number',0)+f('address','Adresse du siège','text','',null,false,true)+f('city','Ville')+f('closing','Clôture (jour/mois)','text','31/12')+f('opening','Solde de trésorerie initial (€)','number',0)+f('opening_date','Date du solde initial','date',today(),null,true)+f('color','Couleur de la société','color','#c7ad77');
-if(kind==='properties')body+=f('name','Nom du bien','text','',null,true,true)+f('address','Adresse complète','text','',null,true,true)+f('type','Type','select','Appartement',['Appartement','Immeuble','Maison','Local professionnel','Terrain','Autre'])+f('status','Occupation déclarée','select','Vacant',['Vacant','Loué','Usage des associés','Travaux'])+f('value','Valeur estimée (€)','number',0)+f('purchase','Prix d’acquisition (€)','number',0)+f('surface','Surface (m²)','number',0)+f('acquired','Date d’acquisition','date')+f('dpe','Classe DPE','select','Non renseigné',['Non renseigné','A','B','C','D','E','F','G','Non concerné'])+f('dpe_date','Validité du DPE / à vérifier','date')
+if(kind==='properties')body+=f('name','Nom du bien','text','',null,true,true)+f('address','Adresse complète','text','',null,true,true)+f('type','Type','select','Appartement',['Appartement','Immeuble','Maison','Local professionnel','Terrain','Autre'])+f('status','Occupation déclarée','select','Vacant',['Vacant','Loué','Usage des associés','Travaux'])+f('value','Valeur estimée (€)','number',0)+f('purchase','Prix d’acquisition (€)','number',0)+f('surface','Surface (m²)','number',0)+f('locaux','Nombre de locaux (cadre IV de la 2072-S)','number',1)+f('acquired','Date d’acquisition','date')+f('dpe','Classe DPE','select','Non renseigné',['Non renseigné','A','B','C','D','E','F','G','Non concerné'])+f('dpe_date','Validité du DPE / à vérifier','date')
 +`<div class="prop-crop-box"><div class="row between wrap"><div><h4 style="margin:0;font-size:12px">Photo du bien</h4><p class="sub" style="margin-top:3px">Image affichée dans l’encadré de la carte. Recadrez-la librement : le format pris en compte est <strong>16:5</strong> (bannière large), enregistrée en 1600 × 500 px. Sans photo, la carte garde exactement son apparence actuelle.</p></div><span class="pill gold">Format 16:5 · 1600 × 500 px</span></div><div class="prop-crop-stage-wrap" id="prop-crop-box" tabindex="0" role="img" aria-label="Zone de recadrage de la photo (utilisez les flèches du clavier ou la souris)"><div class="prop-crop-placeholder" id="prop-crop-placeholder">${icon('building')}<span class="sub">Aucune photo pour l’instant</span></div><div class="prop-crop-grid"></div><span class="prop-crop-badge" id="prop-crop-badge" style="display:none">Format enregistré : 1600 × 500 px · 16:5</span></div><div class="prop-crop-controls"><input id="f-photo-file" type="file" accept="image/png,image/jpeg,image/webp,image/gif" aria-label="Choisir une photo"><button type="button" id="prop-crop-remove" disabled title="Retirer la photo">${icon('trash')} Retirer</button><button type="button" id="prop-crop-reset" disabled title="Recentrer la photo">${icon('refresh')} Recentrer</button></div><div class="prop-crop-controls"><span class="sub" style="min-width:78px">Zoom <span id="prop-crop-zoom-label">×1.00</span></span><input id="prop-crop-zoom" type="range" min="100" max="400" step="5" value="100" disabled aria-label="Zoom du recadrage"></div><p class="sub">Glissez la photo dans le cadre pour choisir la partie visible, puis ajustez le zoom au besoin. Seul le rectangle doré est conservé sur la carte.</p><input type="hidden" id="f-photo-existing" name="photo_existing" value="${esc(d.photo||'')}"><input type="hidden" id="f-photo-x" name="photo_x" value="50"><input type="hidden" id="f-photo-y" name="photo_y" value="50"><input type="hidden" id="f-photo-zoom" name="photo_zoom" value="1"></div>`;
 if(kind==='leases')body+=f('tenant','Locataire / raison sociale','text','',null,true,true)+f('property_id','Bien loué','select','', [['','Sélectionner un bien'],...rows('properties',sid).map(p=>[p.id,p.name])],true,true)+f('email','E-mail','email')+f('phone','Téléphone')+f('type','Type de bail','select','Habitation nue',['Habitation nue','Habitation meublée','Professionnel','Commercial','Autre'])+f('status','Statut','select','Actif',['Actif','Terminé','À venir'])+f('start','Début du bail','date',today(),null,true)+f('end','Fin du bail','date')+f('rent','Loyer mensuel hors charges (€)','number',0)+f('charges','Provisions pour charges (€)','number',0)+f('deposit','Dépôt de garantie (€)','number',0)+f('revision','Indice / date de révision');
 if(kind==='partners')body+=f('name','Nom de l’associé','text','',null,true,true)+f('email','E-mail','email')+f('role','Fonction','select','Associé',['Associé','Gérant associé','Personne morale'])+f('shares','Nombre de parts sociales','number',0)+f('cca','Solde déclaré du compte courant (€)','number',0)+f('address','Adresse','text','',null,false,true);
@@ -10112,13 +10193,12 @@ function receipt(id){let c=rec(id),l=rec(c.lease_id),s=sci(c.sci),p=rec(l?.prope
 function searchModal(){openModal('Retrouver l’essentiel',`<input id="global-search" type="search" placeholder="Une SCI, un locataire, un bien, un document…" aria-label="Recherche globale"><div id="search-results" class="search-results" style="margin-top:15px"></div>`);let search=()=>{let q=$('#global-search').value.toLowerCase().trim();let list=[...S.scis.map(s=>({...s,kind:'sci'})),...S.records].filter(r=>q&&Object.values(r).some(v=>typeof v==='string'&&v.toLowerCase().includes(q))).slice(0,30);$('#search-results').innerHTML=list.map(r=>`<button class="search-result" data-search-go="${r.id}" data-search-kind="${r.kind}">${icon(r.kind==='sci'?'building':'file')}<span>${esc(label(r))}<small>${r.kind==='sci'?'Société':esc(sciname(r.sci))+' · '+kindNames[r.kind]}</small></span></button>`).join('')||`<p class="sub">${q?'Aucun résultat.':'La recherche porte sur toutes les SCI et les métadonnées des documents.'}</p>`;};$('#global-search').oninput=search;search();}
 async function quit(){if(closing||updateInstalling)return;if($('#modal').innerHTML&&modalDirty&&!confirm('Des modifications de formulaire ne sont pas enregistrées. Les abandonner et quitter ?'))return;openModal('Quitter en toute sérénité',`<p>Les écritures enregistrées et les réglages seront synchronisés, puis l’intégrité de la base sera vérifiée.</p><p class="sub" style="margin-top:12px">${S.settings.auto_backup?'Une sauvegarde complète sera créée dans sauvegardes/. ':''}${S.preview?'Mode aperçu : le service de démonstration restera disponible.':S.native?'La fenêtre et le processus local seront fermés.':'En mode navigateur, la fermeture automatique de l’onglet peut être bloquée ; le serveur sera bien arrêté.'}</p>`,`<button data-action="close-modal">Rester dans Dominis</button><button class="primary" id="confirm-quit">${icon('exit')} Enregistrer et quitter</button>`);$('#confirm-quit').onclick=async()=>{closing=true;$('#confirm-quit').disabled=true;try{await settingsQueue;await api('quit',{});closeModal(true);if(S.preview){notify('Intégrité vérifiée, données sauvegardées. Le service reste actif dans cet aperçu.');await refresh();}else{$('#main').innerHTML=empty('Votre espace est fermé.','Toutes les données enregistrées ont été sauvegardées. Vous pouvez fermer cet onglet.');setTimeout(()=>window.close(),400);}}catch(e){modalError(e);$('#confirm-quit')&&($('#confirm-quit').disabled=false);}finally{closing=false;}};}
 function quickModal(){openModal('Une action, sans détour',`<div class="checks">${Object.entries(kindNames).map(([k,n])=>`<button data-add="${k}" style="justify-content:flex-start">${icon('plus')}${n}</button>`).join('')}</div>`);}
-async function handleAction(a){switch(a){case'collapse':await setPref({collapsed:!S.settings.collapsed});document.body.classList.toggle('collapsed',!!S.settings.collapsed);if(page==='settings')render();break;case'bell':openBellModal();break;case'new-sci':editForm('sci');break;case'edit-sci':editForm('sci',currentSCI());break;case'delete-sci':deletion('sci',page);break;case'manage-deletions':manageDeletions();break;case'close-modal':closeModal();break;case'export':exportModal();break;case'import':importModal();break;case'backup':await settingsQueue;await download(await api('backup',{}),'dominis-sauvegarde-'+today()+'.db');await refresh();notify('Sauvegarde complète téléchargée. Conservez-la sur un support sûr.');break;case'restore':restoreModal();break;case'generate-calls':callsModal();break;case'search':searchModal();break;case'quick':quickModal();break;case'annual-report':annualReport();break;case'balance-mapping':balanceMappingModal();break;case'balance-assign':balanceAssignModal();break;case'balance-forfait-local':{let s=currentSCI();if(s){let p=balancePeriod(s),v='20';let all={...(S.settings.balance_forfait||{})};let per={...(all[s.id]||{})};per[String(p.year||Number(String(p.start).slice(0,4)))]=Number(v);all[s.id]=per;setPref({balance_forfait:all}).then(()=>render());}break;}case'balance-map-save':{let s=currentSCI();if(!s)break;let map={...balanceLineMap(s)};$$('[data-balance-map]').forEach(sel=>{let c=sel.dataset.balanceMap,v=sel.value;if(v)map[c]=v;else delete map[c];});let all={...(S.settings.balance_line_map||{})};all[s.id]=map;setPref({balance_line_map:all}).then(()=>{closeModal(true);render();notify('Classement enregistré pour '+s.name+'.');});break;}case'balance-assign-save':{let s=currentSCI();if(!s)break;let changes=[...$$('[data-balance-assign]')].map(sel=>[sel.dataset.balanceAssign,sel.value]);let todo=changes.filter(([id,pid])=>pid);for(const [id,pid] of todo){let r=rec(id);if(!r)continue;await api('save',{kind:'entries',id,sci:r.sci,data:{...r,property_id:pid}});}await load();closeModal(true);render();notify(todo.length+' mouvement'+(todo.length>1?'s':'')+' rattaché'+(todo.length>1?'s':'')+' à un bien.');break;}case'doc-folder-reset':await restoreDefaultDocFolders();break;case'doc-folder-new':newDocFolderModal();break;case'quit':await quit();break;case'auto-backup':await setPref({auto_backup:!S.settings.auto_backup});render();break;case'weekly-auto-save':await setPref({weekly_auto_save:!S.settings.weekly_auto_save});render();break;case'rename-space':openModal('Nom de votre espace',field('owner','Nom affiché','text',S.settings.owner),`<button data-action="close-modal">Annuler</button><button class="primary" id="save-owner">Enregistrer</button>`);$('#save-owner').onclick=async()=>{try{let v=$('#f-owner').value.trim();if(!v||v.length>45)throw new Error('Choisissez un nom de 1 à 45 caractères.');await setPref({owner:v});closeModal(true);render();}catch(e){modalError(e)}};break;case'reset-demo':openModal('Repartir d’un espace vierge',`<p class="sub">Toutes les SCI et données de cette démonstration seront supprimées, y compris vos ajouts. Vos préférences d’apparence sont conservées. Créez une sauvegarde avant de continuer.</p><div style="margin-top:15px">${field('confirm-demo','Saisissez EFFACER pour confirmer')}</div>`,`<button data-action="close-modal">Annuler</button><button class="danger" id="reset-confirm">Vider la démonstration</button>`);$('#reset-confirm').onclick=async()=>{try{await api('reset-demo',{confirmation:$('#f-confirm-demo').value});closeModal(true);page='dashboard';await refresh();notify('Votre espace est maintenant vierge.');}catch(e){modalError(e)}};break;}}
-document.addEventListener('click',async ev=>{let el=ev.target.closest('button,[data-nav],[data-doc-open],[data-doc-folder]');if(!el)return;if(Date.now()<folderDragSuppressUntil)return;try{if(updateInstalling)return;if(el.dataset.folderNew){newDocFolderModal(el.dataset.folderParent||'');return;}if(el.dataset.folderRename){renameDocFolderModal(el.dataset.folderRename);return;}if(el.dataset.folderMove){await moveDocFolder(docScope(),el.dataset.folderMove,Number(el.dataset.dir));return;}if(el.dataset.docFolder!==undefined&&el.dataset.docFolder!==null&&el.dataset.docOpen===undefined){docFolder=el.dataset.docFolder;docYear='';renderListing();return;}if(el.dataset.docOpen){await documentPreview(el.dataset.docOpen);return;}if(el.dataset.documentPreview){await documentPreview(el.dataset.documentPreview);return;}if(el.dataset.docZoom){let v=el.dataset.docZoom;if(v==='in')docPreviewStageZoom(docPreviewZoom+0.25);else if(v==='out')docPreviewStageZoom(docPreviewZoom-0.25);else docPreviewStageZoom(Number(v)/100);return;}if(el.dataset.docSheet!==undefined&&el.dataset.docSheet!==null){docPreviewSheetSelect(Number(el.dataset.docSheet));return;}if(el.dataset.macClose){dismissMacNotification(el.dataset.macClose);return;}if(el.dataset.macView){let id=el.dataset.macView,r=rec(id);await markTaskRemindersRead(id);if(r){closeModal(true);navigate(r.sci,'tasks');editForm('tasks',r);}return;}if(el.dataset.bellView){let id=el.dataset.bellView,r=rec(id);await markTaskRemindersRead(id);closeModal(true);if(r){navigate(r.sci,'tasks');editForm('tasks',r);}return;}if(el.dataset.bellRead){await markTaskRemindersRead(el.dataset.bellRead);if($('#bell-modal-body'))openBellModal();return;}if(el.dataset.bellReadAll){for(let r of unreadReminderTasks())await markTaskRemindersRead(r.id);if($('#bell-modal-body'))openBellModal();return;}if(el.dataset.bellAgenda){closeModal(true);navigate('agenda');return;}if(el.dataset.balanceTab){balanceTab=el.dataset.balanceTab;render();return;}if(el.dataset.tableConfig){openTableColumnsModal(el.dataset.tableConfig);return;}
+async function handleAction(a){switch(a){case'collapse':await setPref({collapsed:!S.settings.collapsed});document.body.classList.toggle('collapsed',!!S.settings.collapsed);if(page==='settings')render();break;case'bell':openBellModal();break;case'new-sci':editForm('sci');break;case'edit-sci':editForm('sci',currentSCI());break;case'delete-sci':deletion('sci',page);break;case'manage-deletions':manageDeletions();break;case'close-modal':closeModal();break;case'export':exportModal();break;case'import':importModal();break;case'backup':await settingsQueue;await download(await api('backup',{}),'dominis-sauvegarde-'+today()+'.db');await refresh();notify('Sauvegarde complète téléchargée. Conservez-la sur un support sûr.');break;case'restore':restoreModal();break;case'generate-calls':callsModal();break;case'search':searchModal();break;case'quick':quickModal();break;case'annual-report':annualReport();break;case'balance-mapping':declMappingModal();break;case'balance-assign':declAssignModal();break;case'decl-map-save':{let s=currentSCI();if(!s)break;let map={...balanceLineMap(s)};$$('[data-decl-map]').forEach(sel=>{let c=sel.dataset.declMap,v=sel.value;if(v)map[c]=v;else delete map[c];});let all={...(S.settings.decl_line_map||{})};all[s.id]=map;setPref({decl_line_map:all}).then(()=>{closeModal(true);render();notify('Classement enregistré pour '+s.name+'.');});break;}case'decl-assign-save':{let s=currentSCI();if(!s)break;let changes=[...$$('[data-decl-assign]')].map(sel=>[sel.dataset.declAssign,sel.value]);let todo=changes.filter(([id,pid])=>pid);for(const [id,pid] of todo){let r=rec(id);if(!r)continue;await api('save',{kind:'entries',id,sci:r.sci,data:{...r,property_id:pid}});}await load();closeModal(true);render();notify(todo.length+' mouvement'+(todo.length>1?'s':'')+' rattaché'+(todo.length>1?'s':'')+' à un immeuble.');break;}case'balance-map-save':{let s=currentSCI();if(!s)break;let map={...balanceLineMap(s)};$$('[data-balance-map]').forEach(sel=>{let c=sel.dataset.balanceMap,v=sel.value;if(v)map[c]=v;else delete map[c];});let all={...(S.settings.balance_line_map||{})};all[s.id]=map;setPref({balance_line_map:all}).then(()=>{closeModal(true);render();notify('Classement enregistré pour '+s.name+'.');});break;}case'balance-assign-save':{let s=currentSCI();if(!s)break;let changes=[...$$('[data-balance-assign]')].map(sel=>[sel.dataset.balanceAssign,sel.value]);let todo=changes.filter(([id,pid])=>pid);for(const [id,pid] of todo){let r=rec(id);if(!r)continue;await api('save',{kind:'entries',id,sci:r.sci,data:{...r,property_id:pid}});}await load();closeModal(true);render();notify(todo.length+' mouvement'+(todo.length>1?'s':'')+' rattaché'+(todo.length>1?'s':'')+' à un bien.');break;}case'doc-folder-reset':await restoreDefaultDocFolders();break;case'doc-folder-new':newDocFolderModal();break;case'quit':await quit();break;case'auto-backup':await setPref({auto_backup:!S.settings.auto_backup});render();break;case'weekly-auto-save':await setPref({weekly_auto_save:!S.settings.weekly_auto_save});render();break;case'rename-space':openModal('Nom de votre espace',field('owner','Nom affiché','text',S.settings.owner),`<button data-action="close-modal">Annuler</button><button class="primary" id="save-owner">Enregistrer</button>`);$('#save-owner').onclick=async()=>{try{let v=$('#f-owner').value.trim();if(!v||v.length>45)throw new Error('Choisissez un nom de 1 à 45 caractères.');await setPref({owner:v});closeModal(true);render();}catch(e){modalError(e)}};break;case'reset-demo':openModal('Repartir d’un espace vierge',`<p class="sub">Toutes les SCI et données de cette démonstration seront supprimées, y compris vos ajouts. Vos préférences d’apparence sont conservées. Créez une sauvegarde avant de continuer.</p><div style="margin-top:15px">${field('confirm-demo','Saisissez EFFACER pour confirmer')}</div>`,`<button data-action="close-modal">Annuler</button><button class="danger" id="reset-confirm">Vider la démonstration</button>`);$('#reset-confirm').onclick=async()=>{try{await api('reset-demo',{confirmation:$('#f-confirm-demo').value});closeModal(true);page='dashboard';await refresh();notify('Votre espace est maintenant vierge.');}catch(e){modalError(e)}};break;}}
+document.addEventListener('click',async ev=>{let el=ev.target.closest('button,[data-nav],[data-doc-open],[data-doc-folder],[data-decl-detail],[data-decl-copy]');if(!el)return;if(Date.now()<folderDragSuppressUntil)return;try{if(updateInstalling)return;if(el.dataset.folderNew){newDocFolderModal(el.dataset.folderParent||'');return;}if(el.dataset.folderRename){renameDocFolderModal(el.dataset.folderRename);return;}if(el.dataset.folderMove){await moveDocFolder(docScope(),el.dataset.folderMove,Number(el.dataset.dir));return;}if(el.dataset.docFolder!==undefined&&el.dataset.docFolder!==null&&el.dataset.docOpen===undefined){docFolder=el.dataset.docFolder;docYear='';renderListing();return;}if(el.dataset.docOpen){await documentPreview(el.dataset.docOpen);return;}if(el.dataset.documentPreview){await documentPreview(el.dataset.documentPreview);return;}if(el.dataset.docZoom){let v=el.dataset.docZoom;if(v==='in')docPreviewStageZoom(docPreviewZoom+0.25);else if(v==='out')docPreviewStageZoom(docPreviewZoom-0.25);else docPreviewStageZoom(Number(v)/100);return;}if(el.dataset.docSheet!==undefined&&el.dataset.docSheet!==null){docPreviewSheetSelect(Number(el.dataset.docSheet));return;}if(el.dataset.macClose){dismissMacNotification(el.dataset.macClose);return;}if(el.dataset.macView){let id=el.dataset.macView,r=rec(id);await markTaskRemindersRead(id);if(r){closeModal(true);navigate(r.sci,'tasks');editForm('tasks',r);}return;}if(el.dataset.bellView){let id=el.dataset.bellView,r=rec(id);await markTaskRemindersRead(id);closeModal(true);if(r){navigate(r.sci,'tasks');editForm('tasks',r);}return;}if(el.dataset.bellRead){await markTaskRemindersRead(el.dataset.bellRead);if($('#bell-modal-body'))openBellModal();return;}if(el.dataset.bellReadAll){for(let r of unreadReminderTasks())await markTaskRemindersRead(r.id);if($('#bell-modal-body'))openBellModal();return;}if(el.dataset.bellAgenda){closeModal(true);navigate('agenda');return;}if(el.dataset.declTab){declTab=el.dataset.declTab;render();return;}if(el.dataset.declCopy!==undefined){await declCopyAmount(el.dataset.declCopy,el.dataset.declLabel||'');return;}if(el.dataset.declDetail){declDetailModal(el.dataset.declDetail);return;}if(el.dataset.tableConfig){openTableColumnsModal(el.dataset.tableConfig);return;}
 if(el.dataset.tableDensity){await saveTableView(el.dataset.tableKind,{density:el.dataset.tableDensity});refreshTableViewUi(el.dataset.tableKind);return;}
 if(el.dataset.tableOpt){let tk=el.dataset.tableKind,cur=tableView(tk);await saveTableView(tk,{[el.dataset.tableOpt]:!cur[el.dataset.tableOpt]});refreshTableViewUi(tk);return;}if(el.dataset.colToggle){let k=el.dataset.colKind,cid=el.dataset.colToggle,cols=getTableColumns(k),c=cols.find(x=>x.id===cid);if(c){if(c.visible&&cols.filter(x=>x.visible).length<=1)return;c.visible=!c.visible;await saveTableColumns(k,cols);if(tableKindOf(k)==='entries_preview')render();else renderListing();if($('#col-config-wrap'))$('#col-config-wrap').innerHTML=renderTableColumnsList(k);}return;}if(el.dataset.colMove){let k=el.dataset.colKind,cid=el.dataset.colMove,dir=Number(el.dataset.dir),cols=getTableColumns(k),i=cols.findIndex(x=>x.id===cid),j=i+dir;if(i>=0&&j>=0&&j<cols.length){[cols[i],cols[j]]=[cols[j],cols[i]];await saveTableColumns(k,cols);if(tableKindOf(k)==='entries_preview')render();else renderListing();if($('#col-config-wrap'))$('#col-config-wrap').innerHTML=renderTableColumnsList(k);}return;}if(el.dataset.colReset){// Réinitialisation explicite : ce tableau retrouve l'ordre et la visibilité par défaut, sans toucher aux autres tableaux (même ceux du même type).
 let k=el.dataset.colReset,all={...(S.settings.table_columns||{})};all[k]={order:[],hidden:[]};await setPref({table_columns:all});if(tableKindOf(k)==='entries_preview')render();else renderListing();if($('#col-config-wrap'))$('#col-config-wrap').innerHTML=renderTableColumnsList(k);return;}if(el.dataset.settingsSection){settingsSection=el.dataset.settingsSection;render();return;}if(el.dataset.updateAction){let a=el.dataset.updateAction;if(a==='check'){updateInfo=await (await api('update/check',{})).json();render();}else if(a==='offer')showUpdateOffer();else if(a==='install')await beginUpdate();else if(a==='force')await forceUpdate();else if(a==='force-install')await beginUpdate(true);return;}if(el.dataset.nav){navigate(el.dataset.nav,el.dataset.tab||'overview');return;}if(el.dataset.tab){tab=el.dataset.tab;query='';filter='';setPref({last_tab:tab});render();return;}if(el.dataset.action){await handleAction(el.dataset.action);return;}if(el.dataset.add){editForm(el.dataset.add);return;}if(el.dataset.edit){let r=rec(el.dataset.edit);editForm(r.kind,r);return;}if(el.dataset.delete){let r=rec(el.dataset.delete);deletion(r.kind,r.id);return;}if(el.dataset.pay){let c=rec(el.dataset.pay);editForm('entries',null,{sci:c.sci,label:'Loyer '+label(rec(c.lease_id))+' · '+c.period,call_id:c.id,amount:due(c),direction:'Recette',category:'Loyers'});$('#f-sci').value=c.sci;$('#f-sci').disabled=true;return;}if(el.dataset.receipt){receipt(el.dataset.receipt);return;}if(el.dataset.document){let r=rec(el.dataset.document);await download(await api('document?id='+r.id),r.filename||'document');return;}if(el.dataset.complete){let r=rec(el.dataset.complete);dismissMacNotification(r.id);let reached=taskReminderDates(r).filter(d=>d&&d<=today());let read=[...new Set([...(Array.isArray(r.read_reminders)?r.read_reminders:[]),...reached])];await api('save',{kind:r.kind,id:r.id,sci:r.sci,data:{...r,status:'Terminé',read_reminders:read}});await refresh();notify('Échéance terminée.');return;}if(el.dataset.theme){await setPref({theme:el.dataset.theme});render();return;}if(el.dataset.move){let o=navOrder(),i=o.indexOf(el.dataset.move),j=i+Number(el.dataset.dir);if(j>=0&&j<o.length){[o[i],o[j]]=[o[j],o[i]];await setPref({order:o});render();}return;}if(el.dataset.searchGo){let id=el.dataset.searchGo,kind=el.dataset.searchKind;closeModal(true);if(kind==='sci')navigate(id);else{let r=rec(id);navigate(r.sci,kind);editForm(kind,r);}return;}}catch(e){notify(e.message,true);}});
-document.addEventListener('change',async ev=>{let el=ev.target;try{if(el.classList&&el.classList.contains('year-select')){let v=el.value===YEAR_ALL?YEAR_ALL:Number(el.value);syncYearSelects(el.value);await setPref({year:v});render();}if(el.id==='scope'){scope=el.value;render();}if(el.id==='status-filter'){filter=el.value;renderListing();}if(el.id==='doc-year-filter'){docYear=el.value;renderListing();}if(el.id==='balance-forfait'){let s=currentSCI();if(s){let p=balancePeriod(s),all={...(S.settings.balance_forfait||{})},per={...(all[s.id]||{})};let v=Math.max(0,Number(el.value)||0);per[String(p.year||Number(String(p.start).slice(0,4)))]=v;all[s.id]=per;await setPref({balance_forfait:all});render();}}
-if(el.id==='balance-year'){let s=currentSCI();if(s){let p=balancePeriod(s);if(el.value==='custom'){balanceView={mode:'custom',year:p.year,start:p.start,end:p.end};}else{balanceView={mode:'year',year:Number(el.value),start:'',end:''};}render();}}
+document.addEventListener('change',async ev=>{let el=ev.target;try{if(el.classList&&el.classList.contains('year-select')){let v=el.value===YEAR_ALL?YEAR_ALL:Number(el.value);syncYearSelects(el.value);await setPref({year:v});render();}if(el.id==='scope'){scope=el.value;render();}if(el.id==='status-filter'){filter=el.value;renderListing();}if(el.id==='doc-year-filter'){docYear=el.value;renderListing();}if(el.id==='balance-year'){let s=currentSCI();if(s){let p=balancePeriod(s);if(el.value==='custom'){balanceView={mode:'custom',year:p.year,start:p.start,end:p.end};}else{balanceView={mode:'year',year:Number(el.value),start:'',end:''};}render();}}
 if(el.id==='balance-start'||el.id==='balance-end'){let s=currentSCI();if(s){let p=balancePeriod(s);balanceView={mode:'custom',year:p.year,start:el.id==='balance-start'?el.value:p.start,end:el.id==='balance-end'?el.value:p.end};render();}}
 if(el.id==='doc-preview-folder'){moveDocToFolder(docPreviewId,el.value);}}catch(e){notify(e.message,true)}});
 document.addEventListener('input',ev=>{if(ev.target.id==='filter-search'){query=ev.target.value;renderListing();}if(ev.target.id==='doc-zoom-range'){docPreviewStageZoom((Number(ev.target.value)||100)/100);}if(ev.target.closest('#modal')&&!['global-search'].includes(ev.target.id)&&!ev.target.closest('#col-config-wrap')&&!ev.target.closest('#bell-modal-body')&&!ev.target.closest('#doc-preview-body'))modalDirty=true;});
