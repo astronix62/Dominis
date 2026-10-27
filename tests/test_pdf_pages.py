@@ -467,5 +467,17 @@ class ScreenConsistencyTests(unittest.TestCase):
         self.assertNotIn("\ndocPageOrder=", HTML)
 
 
+class DeadCodeTests(unittest.TestCase):
+    def test_no_orphan_data_attribute_remains(self):
+        self.assertNotIn('data-color=', HTML)
+        self.assertNotIn('data-balance-map', HTML)
+        self.assertNotIn('data-balance-assign', HTML)
+
+    def test_no_debug_trace_in_the_interface(self):
+        script = HTML[HTML.index('<script>'):HTML.index('</script>')]
+        self.assertNotIn('console.log', script)
+        self.assertNotIn('debugger', script)
+
+
 if __name__ == '__main__':
     unittest.main()

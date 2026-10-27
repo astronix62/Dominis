@@ -10709,7 +10709,7 @@ function chartRail(list,id){
     }
     if(catList.length>=2){
         let max=catList[0].value||1;
-        let bars=catList.slice(0,5).map(c=>`<div class="rail-bar-row"><span class="rail-bar-label" title="${esc(c.label)}">${esc(c.label)}</span><span class="rail-bar-track"><i style="width:${Math.max(3,Math.round(c.value/max*100))}%" data-color="red"></i></span><span class="rail-bar-value">${money(c.value,0)}</span></div>`).join('');
+        let bars=catList.slice(0,5).map(c=>`<div class="rail-bar-row"><span class="rail-bar-label" title="${esc(c.label)}">${esc(c.label)}</span><span class="rail-bar-track"><i style="width:${Math.max(3,Math.round(c.value/max*100))}%" ></i></span><span class="rail-bar-value">${money(c.value,0)}</span></div>`).join('');
         panels.push(`<div class="panel"><div class="panel-head" style="padding:14px 16px 0"><div><h2 style="font-size:13px">Structure des dépenses</h2><p>${catList.length} catégorie${catList.length>1?'s':''} · ${money(catList.reduce((a,c)=>a+c.value,0),0)}</p></div></div><div class="panel-body" style="padding:12px 16px 16px"><div class="rail-bars">${bars}</div></div></div>`);
     }
     if(!panels.length)return '';
