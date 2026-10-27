@@ -6951,6 +6951,13 @@ def _pdf_esc(text):
 
 
 def _pdf_width(text, size, bold=False):
+    """Largeur approchée en points, volontairement majorée.
+
+    Les caractères larges (cadratin, points de suspension, guillemets français)
+    étaient sous-estimés : un texte tronqué « à la largeur » débordait alors de
+    sa colonne, parfois au-delà de la marge de la page. Le facteur final garde
+    une marge de sécurité de 2 %.
+    """
     narrow = set("il.,:;'!|")
     wide = set('mwMW@')
     total = 0.0
@@ -6967,35 +6974,49 @@ def _pdf_width(text, size, bold=False):
             total += 0.68
         elif ch in '()[]{}':
             total += 0.333
-        elif ch in '-–—':
-            total += 0.333
+        elif ch in '—…':
+            total += 1.0
+        elif ch in '«»€':
+            total += 0.556
+        elif ch in '-–·’':
+            total += 0.3
         else:
-            total += 0.52
-    return total * size * (1.03 if bold else 1.0)
+            total += 0.53
+    return total * size * (1.03 if bold else 1.0) * 1.02
 
 
 def _pdf_wrap(text, size, width, bold=False):
+    """Découpe un texte en lignes, en coupant les mots plus larges que la ligne.
+
+    Un mot insécable (référence, adresse sans espace) dépassait sinon de sa
+    colonne, parfois au-delà de la marge de la page.
+    """
     text = str(text or '').replace('\n', ' ')
-    words = text.split(' ')
+    width = max(12.0, float(width))
+
+    def split_long(word):
+        parts, cur = [], ''
+        for ch in word:
+            if cur and _pdf_width(cur + ch, size, bold) > width:
+                parts.append(cur)
+                cur = ch
+            else:
+                cur += ch
+        if cur:
+            parts.append(cur)
+        return parts
+
     lines, cur = [], ''
-    for word in words:
+    for word in text.split(' '):
         if not word:
             continue
-        candidate = (cur + ' ' + word).strip()
-        if _pdf_width(candidate, size, bold) <= width or not cur:
-            if not cur and _pdf_width(candidate, size, bold) > width:
-                part = ''
-                for ch in candidate:
-                    if _pdf_width(part + ch, size, bold) > width and part:
-                        break
-                    part += ch
-                lines.append(part)
-                cur = candidate[len(part):].strip()
-            else:
+        for piece in ([word] if _pdf_width(word, size, bold) <= width else split_long(word)):
+            candidate = (cur + ' ' + piece).strip()
+            if not cur or _pdf_width(candidate, size, bold) <= width:
                 cur = candidate
-        else:
-            lines.append(cur)
-            cur = word
+            else:
+                lines.append(cur)
+                cur = piece
     if cur:
         lines.append(cur)
     return lines or ['']
@@ -7219,9 +7240,15 @@ class PdfAnnualReport:
         rows = [[str(c) for c in row] for row in (table.get('rows') or [])]
         if not headers:
             return
-        weights = table.get('weights') or [1.0] * len(headers)
-        aligns = table.get('aligns') or ['left'] * len(headers)
-        total = sum(float(w) for w in weights) or float(len(weights))
+        # Un modèle incomplet (moins de largeurs ou d'alignements que de
+        # colonnes) ne doit jamais interrompre la génération du dossier : les
+        # valeurs manquantes reprennent les réglages par défaut.
+        weights = list(table.get('weights') or [])
+        weights = [w for w in weights if isinstance(w, (int, float)) and w > 0]
+        weights = (weights + [1.0] * len(headers))[:len(headers)]
+        aligns = list(table.get('aligns') or [])
+        aligns = (aligns + ['left'] * len(headers))[:len(headers)]
+        total = sum(weights) or float(len(headers))
         widths = [self.width * float(w) / total for w in weights]
         xpos = []
         x = PDF_MARGIN
@@ -8298,6 +8325,122 @@ def build_annual_report_pdf(model):
     return doc.build()
 
 
+def _csv_is_number(text):
+    try:
+        float(str(text).replace(',', '.'))
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def _csv_cell(value):
+    """Cellule CSV : jamais de formule, mais les nombres restent des nombres.
+
+    Un montant négatif commence par « - » : sans ce test il serait préfixé et
+    deviendrait du texte dans le tableur, donc impossible à additionner.
+    """
+    if isinstance(value, bool):
+        return 'oui' if value else 'non'
+    if isinstance(value, (int, float)):
+        return _csv_number(value)
+    text = str(value if value is not None else '')
+    text = text.replace('\r', ' ').replace('\n', ' ').strip()
+    if text and _csv_is_number(text):
+        return text
+    if text[:1] in ('=', '+', '-', '@', '\t'):
+        text = "'" + text
+    return text
+
+
+def _csv_number(value, decimals=0):
+    """Montant au format français : virgule décimale, pas de séparateur de milliers."""
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if decimals <= 0:
+        return str(int(round(n)))
+    return ('%.*f' % (decimals, n)).replace('.', ',')
+
+
+def _csv_text(rows):
+    stream = io.StringIO()
+    writer = csv.writer(stream, delimiter=';', lineterminator='\r\n', quoting=csv.QUOTE_MINIMAL)
+    for row in rows:
+        writer.writerow([_csv_cell(c) for c in row])
+    return stream.getvalue()
+
+
+def build_declaration_csv(model, fmt='form'):
+    """CSV du dossier de déclaration, dans deux présentations distinctes.
+
+    - ``form``  : une ligne par case du formulaire officiel (2072-S, annexes
+      A1 et A2, 2044, ou 2065/2033 pour une SCI à l'IS).
+    - ``recap`` : récapitulatif recettes/dépenses mouvement par mouvement, avec
+      cumul et total, comme la zone « l. 75 » du classeur d'exemple.
+
+    Le modèle vient de l'interface, qui l'a calculé avec les mêmes fonctions que
+    l'écran et le PDF : aucun montant n'est recalculé ici.
+    """
+    if not isinstance(model, dict):
+        raise ValueError('Dossier de déclaration invalide.')
+    fmt = 'recap' if fmt == 'recap' else 'form'
+    title = str(model.get('sci') or 'SCI').strip() or 'SCI'
+    period = str(model.get('period') or '').strip()
+    regime = str(model.get('regime') or 'IR').strip() or 'IR'
+    if fmt == 'form':
+        rows = [['Formulaire', 'Case', 'Libellé', 'Détail', 'Montant', 'Unité']]
+        sections = model.get('sections')
+        if not isinstance(sections, list) or not sections:
+            raise ValueError('Aucune case à exporter.')
+        for sec in sections:
+            if not isinstance(sec, dict):
+                continue
+            form = str(sec.get('name') or '').strip()
+            for item in (sec.get('rows') or []):
+                if not isinstance(item, list) or len(item) < 4:
+                    continue
+                case, label, detail, value = item[0], item[1], item[2], item[3]
+                rows.append([form, case, label, detail, value, 'euros'])
+        if len(rows) < 2:
+            raise ValueError('Aucune case à exporter.')
+        return ('\ufeff' + _csv_text(rows)).encode('utf-8')
+
+    recap = model.get('recap')
+    if not isinstance(recap, dict):
+        raise ValueError('Récapitulatif invalide.')
+    cols = ['Date', 'Libellé', 'Catégorie', 'Immeuble', 'Montant', 'Détail']
+    rows = [[title, 'Exercice ' + period if period else '', 'Régime ' + regime, '', '', ''],
+            ['', '', '', '', '', ''], ['RECETTES', '', '', '', '', ''], cols]
+    total_rec = 0.0
+    for item in (recap.get('recettes') or []):
+        if not isinstance(item, list) or len(item) < 5:
+            continue
+        total_rec += float(item[4] or 0)
+        rows.append([item[0], item[1], item[2], item[3], _csv_number(item[4], 2), item[5] if len(item) > 5 else ''])
+    rows.append(['TOTAL RECETTES', '', '', '', _csv_number(total_rec, 2), ''])
+    rows += [['', '', '', '', '', ''], ['DÉPENSES', '', '', '', '', ''], cols]
+    total_dep = 0.0
+    for item in (recap.get('depenses') or []):
+        if not isinstance(item, list) or len(item) < 5:
+            continue
+        total_dep += float(item[4] or 0)
+        rows.append([item[0], item[1], item[2], item[3], _csv_number(item[4], 2), item[5] if len(item) > 5 else ''])
+    rows.append(['TOTAL DÉPENSES', '', '', '', _csv_number(total_dep, 2), ''])
+    rows.append(['RÉSULTAT (recettes − dépenses)', '', '', '', _csv_number(total_rec - total_dep, 2),
+                 'Bénéfice' if total_rec - total_dep >= 0 else 'Déficit'])
+    hors = [it for it in (recap.get('hors') or []) if isinstance(it, list) and len(it) >= 5]
+    if hors:
+        total_hors = sum(float(it[4] or 0) for it in hors)
+        rows += [['', '', '', '', '', ''],
+                 ['HORS RÉSULTAT (financement, échéances à ventiler, catégories non classées)', '', '', '', '', ''],
+                 cols]
+        for item in hors:
+            rows.append([item[0], item[1], item[2], item[3], _csv_number(item[4], 2), item[5] if len(item) > 5 else ''])
+        rows.append(['TOTAL HORS RÉSULTAT', '', '', '', _csv_number(total_hors, 2), ''])
+    return ('\ufeff' + _csv_text(rows)).encode('utf-8')
+
+
 def build_document_preview(r):
     d=json.loads(r['data'])
     meta={'id':r['id'],'sci':r['sci'],'name':d.get('name',''),'category':d.get('category','Autre'),'date':d.get('date',''),'notes':d.get('notes',''),'filename':d.get('filename',''),'mime':d.get('mime',''),'size':d.get('size',0),'folder_id':d.get('folder_id','')}
@@ -8575,6 +8718,18 @@ class Handler(BaseHTTPRequestHandler):
                         name=re.sub(r'[^A-Za-z0-9._-]+','-',Path(name).name) or 'declaration.pdf'
                         if not name.lower().endswith('.pdf'): name+='.pdf'
                         return self.reply(raw,mime='application/pdf',filename=name)
+                    if path=='/api/declaration-csv':
+                        # Même modèle que le PDF, deux présentations : les cases
+                        # du formulaire officiel, ou le récapitulatif
+                        # recettes/dépenses de l'exercice.
+                        fmt='recap' if p.get('format')=='recap' else 'form'
+                        raw=build_declaration_csv(p.get('model'),fmt)
+                        if len(raw)>40*1024*1024:
+                            raise ValueError('Export trop volumineux.')
+                        name=str(p.get('filename') or 'declaration.csv')
+                        name=re.sub(r'[^A-Za-z0-9._-]+','-',Path(name).name) or 'declaration.csv'
+                        if not name.lower().endswith('.csv'): name+='.csv'
+                        return self.reply(raw,mime='text/csv; charset=utf-8',filename=name)
                     if path=='/api/annual-report':
                         # Synthèse annuelle : le PDF est produit ici puis archivé
                         # comme un document ordinaire (aperçu, téléchargement,
@@ -9443,6 +9598,9 @@ function photoCropShow(src){
     img.src=src;
 }
 let docPreviewId='',docPreviewZoom=1,docPreviewSheets=[],docPreviewFrame=0,docPreviewStartPage=1,docPreviewMeta=null;
+// Ordre en cours d'édition dans la modale de disposition : déclaré ici, sinon
+// l'affectation créait une variable globale implicite.
+let docPageOrder=[];
 function docPreviewClampZoom(z){let n=Number(z);if(!Number.isFinite(n)||n<=0)n=1;return Math.min(4,Math.max(0.25,Math.round(n*100)/100));}
 // Point du document (0..1) placé au centre de la zone d'aperçu : il reste sous
 // le curseur pendant tout le zoom, d'où un agrandissement centré.
@@ -9685,10 +9843,7 @@ async function docArrangeModal(id){
             let card=del.closest('.doc-page-card');
             if(area.children.length<=1)return notify('Le document doit conserver au moins une page.',true);
             card.classList.add('leaving');
-            setTimeout(()=>{
-                let box=card.getBoundingClientRect();
-                docPagesFlip(()=>card.remove());
-            },150);
+            setTimeout(()=>docPagesFlip(()=>card.remove()),150);
             return;
         }
         let move=ev.target.closest('[data-doc-page-move]');
@@ -10611,7 +10766,6 @@ function manageDeletions(){
         try{
             let tab=$('#f-purge-page').value;
             if($('#f-purge-confirm').value.trim().toUpperCase()!=='SUPPRIMER')return modalError(new Error('Saisissez SUPPRIMER pour confirmer cette suppression.'));
-            let plan=purgePlan(s.id,tab);
             let res=await (await api('purge',{sci:s.id,tab,confirm:true})).json();
             closeModal(true);
             await refresh();
@@ -11054,11 +11208,20 @@ function declChecksView(s,period,m){
     return `<div class="panel" style="margin-bottom:18px"><div class="panel-head"><h2>Pouvez-vous déclarer ?</h2><span class="pill ${blocks?'red':issues?'gold':'green'}">${verdict}</span></div><div class="panel-body"><p class="sub" style="margin-bottom:14px">Dominis vérifie ce que chaque case du formulaire exige. Rien n’est corrigé en silence : ce qui manque est signalé, avec le bouton pour le renseigner.</p>${items.join('')}</div></div>`;
 }
 // --- Onglet 2072-S (formulaire principal) ---------------------------------
+// Libellés officiels des cinq cases du cadre I : une seule définition, utilisée
+// par l'écran, le PDF et l'export CSV.
+const DECL_MAIN_CASES=[
+    ['R1','Revenus bruts','Total des lignes 5 + 19 − 20 + 22 de l’annexe A1'],
+    ['R2','Paiement sur travaux','Total de la ligne 9 de l’annexe A1'],
+    ['R3','Frais et charges autres qu’intérêts d’emprunts','Total de la ligne 16 de l’annexe A1'],
+    ['R4','Intérêts d’emprunts','Total de la ligne 17 de l’annexe A1'],
+    ['R5','Revenu net (+) ou déficit net (−)','Total de la ligne 23 — c’est ce montant qui est réparti']
+];
 function declMainView(s,period,m,keys){
     let c=declMainCases(m,keys);
     let partners=rows('partners',s.id);
     let shares=partners.reduce((a,p)=>a+(Number(p.shares)||0),0);
-    let cases=[['R1','Revenus bruts',c.R1,'Total des lignes 5 + 19 − 20 + 22 de l’annexe A1'],['R2','Paiement sur travaux',c.R2,'Total de la ligne 9 de l’annexe A1'],['R3','Frais et charges autres qu’intérêts d’emprunts',c.R3,'Total de la ligne 16 de l’annexe A1'],['R4','Intérêts d’emprunts',c.R4,'Total de la ligne 17 de l’annexe A1'],['R5','Revenu net (+) ou déficit net (−)',c.R5,'Total de la ligne 23 — c’est ce montant qui est réparti']];
+    let cases=DECL_MAIN_CASES.map(([code,label,note])=>[code,label,c[code],note]);
     let rowsHtml=cases.map(([code,label,val,note])=>`<tr><td><strong>${code}</strong> · ${esc(label)}<span class="cell-sub">${esc(note)}</span></td><td class="align-right">${val?declCopyBtn(val,code+' · '+label):'<span class="muted">—</span>'}</td></tr>`).join('');
     let ident=[['Dénomination',s.name],['SIREN',s.siren||'Non renseigné'],['Adresse du siège',declSiege(s)||'Non renseignée'],['Clôture de l’exercice',s.closing||'31/12'],['Gérant',s.manager||'Non renseigné'],['Nombre d’associés',String(partners.length)],['Nombre total de parts',shares?num(shares):'Non renseigné'],['Nominal des parts',shares&&Number(s.capital)?money(r2(Number(s.capital)/shares),2):'—']];
     let bis=Math.round(declExact(m,'9bis'));
@@ -11073,8 +11236,7 @@ function declMainView(s,period,m,keys){
 function declA1Head(cols){
     return `<thead><tr><th class="decl-line-num">Ligne</th><th>Libellé officiel</th>${cols.map(c=>`<th class="align-right">${esc(c.short)}</th>`).join('')}<th class="align-right">Total</th><th></th></tr></thead>`;
 }
-function declLineRowsHtml(m,rowsOut,keys,opts={}){
-    let cols=opts.cols||[];
+function declLineRowsHtml(m,rowsOut,keys){
     let body=DECL_A1_LINES.map(([n,label,kind])=>{
         let cells=rowsOut[String(n)]||[];
         let total=declSum(cells);
@@ -11095,7 +11257,7 @@ function declA1View(s,period,m){
     if(m.unassigned.length)notes.push(`<div class="notice" style="border-left:3px solid var(--gold)"><strong>${m.unassigned.length} mouvement${m.unassigned.length>1?'s':''} sans immeuble</strong><p class="sub" style="margin-top:6px">Ils apparaissent dans la colonne « Non affecté ». <button class="text-link" data-action="balance-assign">Affecter les mouvements →</button></p></div>`);
     return `<div class="panel" style="margin-bottom:18px"><div class="panel-head"><h2>Annexe 1 · cadre VII</h2><span class="pill gold">${esc(period.label)}</span></div><div class="panel-body">
     <p class="sub" style="margin-bottom:12px">Une colonne par <strong>immeuble</strong>, c’est-à-dire par adresse distincte. La ligne 9 bis est un « dont » : elle est déjà comprise dans la ligne 9 et ne s’ajoute jamais au total. La ligne 14 se déduit. Cliquez sur « Copier » pour coller le montant dans la déclaration en ligne.</p>
-    <div class="table-wrap"><table class="balance-table balance-2072">${declA1Head(cols)}<tbody>${declLineRowsHtml(m,rowsOut,keys,{cols})}</tbody></table></div>
+    <div class="table-wrap"><table class="balance-table balance-2072">${declA1Head(cols)}<tbody>${declLineRowsHtml(m,rowsOut,keys)}</tbody></table></div>
     <div class="row gap8 wrap" style="margin-top:14px"><button type="button" data-action="balance-mapping">${icon('settings')} Classer les catégories</button><button type="button" data-action="balance-assign">${icon('building')} Affecter les mouvements</button></div>
     ${notes.join('')}
     </div></div>`;
@@ -11544,11 +11706,109 @@ async function declPdfDownload(){
         if(btn){btn.disabled=false;btn.innerHTML=old;}
     }
 }
+// --- Export CSV -----------------------------------------------------------
+// Deux présentations du même dossier : les cases du formulaire officiel, ou le
+// récapitulatif mouvement par mouvement (recettes, dépenses, cumul, résultat).
+function declCsvModel(s,period){
+    let m=declModel(s,period),cols=declCols(m),keys=cols.map(c=>c.key);
+    let a1=declA1Rows(m,keys),c=declMainCases(m,keys),list=declShares(s,period,m);
+    let isIS=s.regime==='IS';
+    let sections=[];
+    if(isIS){
+        let b=balanceModel(s,period);
+        let bilan=[];
+        (b.actif||[]).forEach(l=>bilan.push([l.code,l.label,'Actif',Math.round(l.amount)]));
+        bilan.push(['112','TOTAL DE L’ACTIF NET','Actif',Math.round(b.totalActif)]);
+        (b.passif||[]).forEach(l=>bilan.push([l.code,l.label,'Passif',Math.round(l.amount)]));
+        bilan.push(['180','TOTAL DU PASSIF','Passif',Math.round(b.totalPassif)]);
+        sections.push({name:'2065 · liasse 2033-A',rows:bilan});
+        sections.push({name:'2033-A · résultat',rows:[
+            ['136','Résultat de l’exercice','Compte de résultat',Math.round(b.result)],
+            ['084','Disponibilités','Trésorerie à la clôture',Math.round(b.cash)],
+            ['068','Créances de loyers','Actif circulant',Math.round(b.receivables)]
+        ]});
+    }else{
+        sections.push({name:'2072-S · cadre I',rows:DECL_MAIN_CASES.map(([code,label])=>[code,label,'Résultat de la société',Math.round(c[code])])});
+        let a1Rows=[];
+        DECL_A1_LINES.forEach(([n,label])=>{
+            let cells=a1[String(n)]||[];
+            let short=DECL_A1_SHORT[String(n)]||label;
+            cells.forEach((v,i)=>a1Rows.push([String(n),short,cols[i]?cols[i].label:'Total',Math.round(v)]));
+            a1Rows.push([String(n),short,'Total',Math.round(declSum(cells))]);
+        });
+        sections.push({name:'Annexe A1 · cadre VII',rows:a1Rows});
+        let a2Rows=[];
+        list.forEach(p=>{
+            a2Rows.push(['A','Revenus bruts',p.name+' ('+num(p.quote*100)+' %)',Math.round(p.A)]);
+            a2Rows.push(['B','Frais et charges',p.name+' ('+num(p.quote*100)+' %)',Math.round(p.B)]);
+            a2Rows.push(['D','Intérêts d’emprunt',p.name+' ('+num(p.quote*100)+' %)',Math.round(p.D)]);
+            a2Rows.push(['E','Résultat',p.name+' ('+num(p.quote*100)+' %)',Math.round(p.E)]);
+        });
+        sections.push({name:'Annexe A2 · cadre IX',rows:a2Rows});
+        let r2044=[],renov=Math.round(declExact(m,'9bis'));
+        list.forEach(p=>{
+            let k=decl2044Cases(p,Math.round(renov*p.quote));
+            r2044.push(['111','Revenus bruts',p.name,Math.round(p.A)]);
+            r2044.push(['112','Frais et charges (sauf intérêts)',p.name,Math.round(p.B)]);
+            r2044.push(['113','Intérêts d’emprunt',p.name,Math.round(p.D)]);
+            r2044.push(['114','Bénéfice (+) ou déficit (−)',p.name,Math.round(p.E)]);
+            r2044.push(['4BA','Bénéfice foncier imposable (ligne 420)',p.name,k.ba]);
+            r2044.push(['4BB','Déficit reportable sur les revenus fonciers',p.name,k.bb]);
+            r2044.push(['4BC','Déficit imputable sur le revenu global',p.name,k.bc]);
+            r2044.push(['4BD','Déficits antérieurs',p.name,'']);
+        });
+        sections.push({name:'2044 des associés',rows:r2044});
+    }
+    // Récapitulatif : chaque mouvement de l'exercice, dans l'ordre des dates.
+    let map=balanceLineMap(s);
+    let recettes=[],depenses=[],hors=[];
+    [...m.entries].sort((x,y)=>entryDate(x).localeCompare(entryDate(y))||String(x.label||'').localeCompare(String(y.label||''))).forEach(r=>{
+        let amt=Math.abs(entrySigned(r)),cls=declClassOf(r,map);
+        // La colonne « Détail » porte la ligne de l'annexe A1, ou le motif
+        // lorsqu'un mouvement est volontairement tenu hors du résultat.
+        let label=cls.line?'Ligne '+String(cls.line):'';
+        let row=[date(entryDate(r)),String(r.label||''),String(r.category||''),entryBuildingLabel(r),r2(amt),label];
+        if(cls.group==='finance'){row[5]='Hors résultat · opération de financement';hors.push(row);return;}
+        if(cls.group==='ventiler'){row[5]='Hors résultat · échéance d’emprunt à ventiler';hors.push(row);return;}
+        if(cls.group==='classer'){row[5]='Hors résultat · catégorie non classée';hors.push(row);return;}
+        (r.direction==='Recette'?recettes:depenses).push(row);
+    });
+    let year=period.mode==='custom'?(period.start||'')+' → '+(period.end||''):period.year;
+    return {sci:s.name,regime:s.regime||'IR',period:String(year),sections,recap:{recettes,depenses,hors}};
+}
+async function declCsvDownload(fmt){
+    let s=currentSCI();
+    if(!s)return notify('Ouvrez d’abord la page d’une SCI.',true);
+    let btn=$('[data-decl-csv="'+fmt+'"]'),old=btn?btn.innerHTML:'';
+    if(btn){btn.disabled=true;btn.innerHTML='Préparation…';}
+    try{
+        let period=declPeriod(s);
+        let model=declCsvModel(s,period);
+        let base=declPdfName(s,period).replace(/\.pdf$/i,'');
+        let name=base+(fmt==='recap'?'-recapitulatif':'-formulaire')+'.csv';
+        let res=await api('declaration-csv',{filename:name,format:fmt,model});
+        await download(res,name);
+        closeModal(true);
+        notify((fmt==='recap'?'Récapitulatif':'Cases du formulaire')+' enregistré en CSV · '+period.label+'.');
+    }catch(e){
+        if(btn){btn.disabled=false;btn.innerHTML=old;}
+        if($('#modal-error'))modalError(e);else notify(e.message,true);
+    }
+}
+function declExportModal(){
+    let s=currentSCI();
+    if(!s)return notify('Ouvrez d’abord la page d’une SCI.',true);
+    openModal('Exporter la déclaration',`<p class="sub" style="margin-bottom:16px">Deux présentations du même dossier, avec les montants affichés à l’écran et dans le PDF. Le fichier s’ouvre directement dans un tableur.</p>
+    <div class="stack">
+      <div class="setting-row"><div><h3>Récapitulatif de l’exercice</h3><p>Une ligne par mouvement, recettes puis dépenses, avec le cumul, le total et le résultat. Même logique que la zone « l. 75 » du classeur d’exemple.</p></div><button class="primary" data-decl-csv="recap">${icon('download')} Télécharger</button></div>
+      <div class="setting-row"><div><h3>Cases du formulaire</h3><p>Une ligne par case officielle : 2072-S, annexes A1 et A2, 2044 de chaque associé, ou 2065 et 2033-A pour une SCI à l’IS.</p></div><button class="primary" data-decl-csv="form">${icon('download')} Télécharger</button></div>
+    </div>`,`<button data-action="close-modal">Fermer</button>`);
+}
 
 function identity(s){let openTxt=s.opening&&Number(s.opening)!==0?money(s.opening,2)+(s.opening_date?' au '+date(s.opening_date):''):'—';return `<div class="settings-grid"><div class="panel"><div class="panel-head"><h2>Identité de la société</h2><button data-action="edit-sci">${icon('edit')} Modifier</button></div><div class="panel-body info-grid">${[['Dénomination',s.name],['SIREN',s.siren||'Non renseigné'],['Gérant',s.manager||'Non renseigné'],['Siège social',s.address||'Non renseigné'],['Capital social',money(s.capital,2)],['Régime fiscal',s.regime||'IR'],['Clôture de l’exercice',s.closing||'31/12'],['Solde d’ouverture',openTxt]].map(([k,v])=>`<div class="info-item"><label>${k}</label><span>${esc(v)}</span></div>`).join('')}<div class="info-item" style="grid-column:1/-1"><label>Notes de gestion</label><span style="white-space:pre-wrap">${esc(s.notes||'Aucune note.')}</span></div></div></div><div class="stack"><div class="panel"><div class="panel-head"><h2>Repères de gestion · ${esc(s.regime||'IR')}</h2></div><div class="panel-body stack"><p class="sub">${s.regime==='IS'?'Préparer la déclaration 2065 et ses annexes avec une comptabilité d’engagement, les immobilisations et les amortissements. Dominis ne produit pas de liasse fiscale ni de FEC.':'Préparer les informations de la déclaration 2072 selon votre situation. Les recettes et dépenses enregistrées ne déterminent pas automatiquement le résultat foncier imposable.'}</p><p class="sub">Le gérant doit rendre compte annuellement de sa gestion aux associés (article 1856 du Code civil). Les modalités de décision dépendent notamment des statuts.</p><button data-add="tasks">${icon('calendar')} Ajouter une échéance de suivi</button><button data-action="annual-report">${icon('file')} Préparer une synthèse annuelle</button><p class="sub">Les dates fiscales sont à vérifier chaque année. Aucun calendrier légal automatique n’est imposé par l’application.</p></div></div><div class="panel"><div class="panel-body"><h3 class="red">Suppression de la SCI</h3><p class="sub" style="margin:8px 0 15px">Cette action supprime la société et toutes ses données liées. Exportez une sauvegarde complète auparavant.</p><button class="danger" data-action="delete-sci">${icon('trash')} Supprimer cette SCI</button><button class="danger" data-action="manage-deletions" style="margin-top:8px">${icon('trash')} Gérer la suppression</button><p class="compact-note" style="margin-top:10px">Vider une seule page de cette SCI, sans toucher aux autres sociétés.</p></div></div></div></div>`;}
 function settingsGeneral(){return `<div class="settings-grid"><div class="stack"><section class="panel"><div class="panel-head"><h2>Apparence & préférences</h2>${icon('sun')}</div><div class="panel-body"><div class="setting-row"><div><h3>Thème de l’interface</h3><p>Le même soin, de jour comme de nuit.</p></div><div class="theme-choice"><button data-theme="dark" class="${S.settings.theme==='dark'?'active':''}">${icon('moon')} Sombre</button><button data-theme="light" class="${S.settings.theme==='light'?'active':''}">${icon('sun')} Clair</button></div></div><div class="setting-row"><div><h3>Navigation compacte</h3><p>Une barre latérale discrète, plus d’espace.</p></div><button class="toggle ${S.settings.collapsed?'on':''}" data-action="collapse" aria-label="Navigation compacte" aria-pressed="${!!S.settings.collapsed}"></button></div><div class="setting-row"><div><h3>Nom de votre espace</h3><p>Affiché dans la barre latérale.</p></div><button data-action="rename-space">${icon('edit')} Modifier</button></div><div class="setting-row"><div><h3>Sauvegarde à la fermeture</h3><p>Copie complète dans le dossier sauvegardes/.</p></div><button class="toggle ${S.settings.auto_backup?'on':''}" data-action="auto-backup" aria-label="Sauvegarde à la fermeture" aria-pressed="${!!S.settings.auto_backup}"></button></div><div class="setting-row"><div><h3>Sauvegarde hebdomadaire</h3><p>Copie de data.db au premier lancement de la semaine ; deux fichiers maximum dans auto-save/.</p></div><button class="toggle ${S.settings.weekly_auto_save?'on':''}" data-action="weekly-auto-save" aria-label="Sauvegarde hebdomadaire" aria-pressed="${!!S.settings.weekly_auto_save}"></button></div></div></section><section class="panel"><div class="panel-head"><h2>Ordre de navigation</h2>${icon('panel')}</div><div class="panel-body"><p class="sub">Déplacez les pages avec les flèches. Vos nouvelles SCI apparaissent automatiquement.</p><div class="order-item locked">${icon('grid')} Tableau de bord <span style="margin-left:auto">${icon('lock')}</span></div>${navOrder().map((id,i,a)=>`<div class="order-item">${navIcon(id)}${esc(navName(id))}<div class="actions"><button data-move="${id}" data-dir="-1" ${!i?'disabled':''} title="Monter">${icon('up')}</button><button data-move="${id}" data-dir="1" ${i===a.length-1?'disabled':''} title="Descendre">${icon('down')}</button></div></div>`).join('')}<div class="order-item locked">${icon('settings')} Paramètres <span style="margin-left:auto">${icon('lock')}</span></div><p class="compact-note">Tableau de bord reste en premier, Paramètres en dernier. Quitter est une action distincte.</p></div></section></div><div class="stack"><section class="panel"><div class="panel-head"><h2>Vos données vous appartiennent</h2>${icon('database')}</div><div class="panel-body"><div class="setting-row"><div><h3>Importer des données</h3><p>JSON Dominis, CSV ou Excel (.xlsx) de mouvements multi-SCI.<br>Aperçu et destinations avant validation.</p></div><button data-action="import">${icon('upload')} Importer</button></div><div class="setting-row"><div><h3>Exporter une sélection</h3><p>Choisissez les SCI, les données et le format.</p></div><button data-action="export">${icon('download')} Exporter</button></div><div class="setting-row"><div><h3>Sauvegarde complète</h3><p>Toutes les SCI, pièces jointes et préférences.<br>${S.settings.last_backup?'Dernière : '+new Date(S.settings.last_backup).toLocaleString('fr-FR'):'Aucune sauvegarde manuelle enregistrée.'}</p></div><button class="primary" data-action="backup">${icon('database')} Sauvegarder</button></div><div class="setting-row"><div><h3>Restaurer une sauvegarde</h3><p>Remplace l’ensemble de l’espace. Une copie<br>de sécurité est créée avant restauration.</p></div><button data-action="restore">${icon('clock')} Restaurer</button></div></div></section><section class="panel"><div class="panel-head"><h2>Stockage & confidentialité</h2>${icon('lock')}</div><div class="panel-body stack"><div class="row between"><span class="sub">Base locale</span><span class="pill green"><span class="status-dot"></span>data.db · ${num(S.db_size/1024/1024)} Mo</span></div><p class="sub">Aucune télémétrie. La gestion de vos données fonctionne hors ligne. Seule la vérification des versions contacte GitHub, sans transmettre vos données patrimoniales. Documents, réglages et historique sont stockés dans SQLite. La base n’est pas chiffrée : protégez votre session et vos sauvegardes.</p><p class="sub">Usage local, mono-utilisateur. Ne placez pas une base ouverte sur un partage réseau ou dans une synchronisation cloud.</p>${S.preview?'<div class="notice" style="margin:0">Aperçu hébergé : utilisez des données fictives uniquement. Le téléchargement et les lanceurs sont destinés à l’usage local.</div>':''}</div></section>${S.settings.demo?`<section class="panel"><div class="panel-body"><h3>Données de démonstration</h3><p class="sub" style="margin:8px 0 14px">Efface toutes les données de cet espace démo, y compris vos ajouts. Sauvegardez-les avant de repartir d’un espace vierge.</p><button class="danger" data-action="reset-demo">${icon('trash')} Vider l’espace de démonstration</button></div></section>`:''}</div><section class="panel" style="grid-column:1/-1"><div class="panel-head"><h2>Journal d’activité</h2><span class="sub">80 dernières actions</span></div><div class="panel-body audit-list">${S.audit.map(r=>`<div class="audit-line"><time>${esc(new Date(r.at).toLocaleString('fr-FR'))}</time><strong style="min-width:90px">${esc(r.action)}</strong><span class="muted">${esc(r.detail)}</span></div>`).join('')||'<p class="sub">Aucune action enregistrée.</p>'}</div></section></div>`;}
 function render(){if(!['dashboard','settings',...Object.keys(navs),...S.scis.map(s=>s.id)].includes(page))page='dashboard';yearSelectSeq=0;renderShell();let content='';if(page==='dashboard'){content=head('Votre patrimoine, en perspective.','L’essentiel de vos sociétés, réuni au même endroit.',yearSelect()+exportBtn()+`<button class="primary" data-action="new-sci">${icon('plus')} Nouvelle SCI</button>`,'Tableau de bord général')+(S.scis.length?dashboard():empty('Bienvenue dans votre espace patrimonial','Créez votre première SCI. Son espace de gestion apparaîtra automatiquement dans la navigation.',`<button class="primary" data-action="new-sci">${icon('plus')} Créer ma première SCI</button>`));}
-else if(page==='settings')content=settingsPage();else if(navs[page])content=listPage({treasury:'entries',agenda:'tasks',documents:'documents'}[page]);else{let s=currentSCI();content=head(s.name,(s.city||s.address||'Société civile immobilière')+' · Régime '+(s.regime||'IR'),(tab==='balance'?`<button data-action="decl-pdf" title="Télécharger le dossier de déclaration au format PDF">${icon('download')} Télécharger le PDF</button>`:'')+yearSelect(s.id)+`<button data-action="edit-sci">${icon('edit')} Société</button>`+`<button class="primary" data-action="quick">${icon('plus')} Ajouter</button>`,'Espace société')+`<nav class="tabs" aria-label="Gestion de la SCI">${tabs.map(([t,n])=>`<button class="tab ${tab===t?'active':''}" data-tab="${t}">${n}</button>`).join('')}</nav>`+(tab==='overview'?dashboard(s.id):tab==='balance'?declPage(s):tab==='identity'?identity(s):listPage(tab,s.id));}
+else if(page==='settings')content=settingsPage();else if(navs[page])content=listPage({treasury:'entries',agenda:'tasks',documents:'documents'}[page]);else{let s=currentSCI();content=head(s.name,(s.city||s.address||'Société civile immobilière')+' · Régime '+(s.regime||'IR'),(tab==='balance'?`<button data-action="decl-pdf" title="Télécharger le dossier de déclaration au format PDF">${icon('download')} Télécharger le PDF</button><button data-action="decl-csv" title="Exporter le dossier au format CSV (récapitulatif ou cases du formulaire)">${icon('download')} CSV</button>`:'')+yearSelect(s.id)+`<button data-action="edit-sci">${icon('edit')} Société</button>`+`<button class="primary" data-action="quick">${icon('plus')} Ajouter</button>`,'Espace société')+`<nav class="tabs" aria-label="Gestion de la SCI">${tabs.map(([t,n])=>`<button class="tab ${tab===t?'active':''}" data-tab="${t}">${n}</button>`).join('')}</nav>`+(tab==='overview'?dashboard(s.id):tab==='balance'?declPage(s):tab==='identity'?identity(s):listPage(tab,s.id));}
 const recoveryNotice=S.primary_db_missing?`<div class="notice" role="alert" style="border-left-color:var(--red)"><strong>La base principale data.db était absente.</strong> Dominis a créé une base vide ; les fichiers de auto-save/ ne sont pas utilisés comme base. Avant toute nouvelle saisie, restaurez une copie dans data.db.<div style="margin-top:10px"><button class="danger" data-action="restore">${icon('clock')} Restaurer une sauvegarde</button></div></div>`:'';$('#main').innerHTML=recoveryNotice+content+`<div class="footer"><span>DOMINIS <span style="opacity:.5;margin:0 7px">/</span> Votre patrimoine, en toute clarté.</span><span class="row gap8">${icon('lock')} Enregistrement local · Outil de gestion, hors comptabilité certifiée</span></div>`;updateCount();checkTaskNotifications();}
 function currentListKind(){return navs[page]?{treasury:'entries',agenda:'tasks',documents:'documents'}[page]:tab;}
 function visibleCount(kind,id){let list=filtered(kind,id);if(kind==='documents')list=list.filter(inDocFolder);return list.length}
@@ -11692,8 +11952,8 @@ function receipt(id){let c=rec(id),l=rec(c.lease_id),s=sci(c.sci),p=rec(l?.prope
 function searchModal(){openModal('Retrouver l’essentiel',`<input id="global-search" type="search" placeholder="Une SCI, un locataire, un bien, un document…" aria-label="Recherche globale"><div id="search-results" class="search-results" style="margin-top:15px"></div>`);let search=()=>{let q=$('#global-search').value.toLowerCase().trim();let list=[...S.scis.map(s=>({...s,kind:'sci'})),...S.records].filter(r=>q&&Object.values(r).some(v=>typeof v==='string'&&v.toLowerCase().includes(q))).slice(0,30);$('#search-results').innerHTML=list.map(r=>`<button class="search-result" data-search-go="${r.id}" data-search-kind="${r.kind}">${icon(r.kind==='sci'?'building':'file')}<span>${esc(label(r))}<small>${r.kind==='sci'?'Société':esc(sciname(r.sci))+' · '+kindNames[r.kind]}</small></span></button>`).join('')||`<p class="sub">${q?'Aucun résultat.':'La recherche porte sur toutes les SCI et les métadonnées des documents.'}</p>`;};$('#global-search').oninput=search;search();}
 async function quit(){if(closing||updateInstalling)return;if($('#modal').innerHTML&&modalDirty&&!confirm('Des modifications de formulaire ne sont pas enregistrées. Les abandonner et quitter ?'))return;openModal('Quitter en toute sérénité',`<p>Les écritures enregistrées et les réglages seront synchronisés, puis l’intégrité de la base sera vérifiée.</p><p class="sub" style="margin-top:12px">${S.settings.auto_backup?'Une sauvegarde complète sera créée dans sauvegardes/. ':''}${S.preview?'Mode aperçu : le service de démonstration restera disponible.':S.native?'La fenêtre et le processus local seront fermés.':'En mode navigateur, la fermeture automatique de l’onglet peut être bloquée ; le serveur sera bien arrêté.'}</p>`,`<button data-action="close-modal">Rester dans Dominis</button><button class="primary" id="confirm-quit">${icon('exit')} Enregistrer et quitter</button>`);$('#confirm-quit').onclick=async()=>{closing=true;$('#confirm-quit').disabled=true;try{await settingsQueue;await api('quit',{});closeModal(true);if(S.preview){notify('Intégrité vérifiée, données sauvegardées. Le service reste actif dans cet aperçu.');await refresh();}else{$('#main').innerHTML=empty('Votre espace est fermé.','Toutes les données enregistrées ont été sauvegardées. Vous pouvez fermer cet onglet.');setTimeout(()=>window.close(),400);}}catch(e){modalError(e);$('#confirm-quit')&&($('#confirm-quit').disabled=false);}finally{closing=false;}};}
 function quickModal(){openModal('Une action, sans détour',`<div class="checks">${Object.entries(kindNames).map(([k,n])=>`<button data-add="${k}" style="justify-content:flex-start">${icon('plus')}${n}</button>`).join('')}</div>`);}
-async function handleAction(a){switch(a){case'collapse':await setPref({collapsed:!S.settings.collapsed});document.body.classList.toggle('collapsed',!!S.settings.collapsed);if(page==='settings')render();break;case'bell':openBellModal();break;case'new-sci':editForm('sci');break;case'edit-sci':editForm('sci',currentSCI());break;case'delete-sci':deletion('sci',page);break;case'manage-deletions':manageDeletions();break;case'close-modal':closeModal();break;case'export':exportModal();break;case'import':importModal();break;case'backup':await settingsQueue;await download(await api('backup',{}),'dominis-sauvegarde-'+today()+'.db');await refresh();notify('Sauvegarde complète téléchargée. Conservez-la sur un support sûr.');break;case'restore':restoreModal();break;case'generate-calls':callsModal();break;case'search':searchModal();break;case'quick':quickModal();break;case'annual-report':annualReport();break;case'decl-pdf':await declPdfDownload();break;case'balance-mapping':declMappingModal();break;case'balance-assign':declAssignModal();break;case'decl-map-save':{let s=currentSCI();if(!s)break;let map={...balanceLineMap(s)};$$('[data-decl-map]').forEach(sel=>{let c=sel.dataset.declMap,v=sel.value;if(v)map[c]=v;else delete map[c];});let all={...(S.settings.decl_line_map||{})};all[s.id]=map;setPref({decl_line_map:all}).then(()=>{closeModal(true);render();notify('Classement enregistré pour '+s.name+'.');});break;}case'decl-assign-save':{let s=currentSCI();if(!s)break;let changes=[...$$('[data-decl-assign]')].map(sel=>[sel.dataset.declAssign,sel.value]);let todo=changes.filter(([id,pid])=>pid);for(const [id,pid] of todo){let r=rec(id);if(!r)continue;await api('save',{kind:'entries',id,sci:r.sci,data:{...r,property_id:pid}});}await load();closeModal(true);render();notify(todo.length+' mouvement'+(todo.length>1?'s':'')+' rattaché'+(todo.length>1?'s':'')+' à un immeuble.');break;}case'doc-folder-reset':await restoreDefaultDocFolders();break;case'doc-folder-new':newDocFolderModal();break;case'quit':await quit();break;case'auto-backup':await setPref({auto_backup:!S.settings.auto_backup});render();break;case'weekly-auto-save':await setPref({weekly_auto_save:!S.settings.weekly_auto_save});render();break;case'rename-space':openModal('Nom de votre espace',field('owner','Nom affiché','text',S.settings.owner),`<button data-action="close-modal">Annuler</button><button class="primary" id="save-owner">Enregistrer</button>`);$('#save-owner').onclick=async()=>{try{let v=$('#f-owner').value.trim();if(!v||v.length>45)throw new Error('Choisissez un nom de 1 à 45 caractères.');await setPref({owner:v});closeModal(true);render();}catch(e){modalError(e)}};break;case'reset-demo':openModal('Repartir d’un espace vierge',`<p class="sub">Toutes les SCI et données de cette démonstration seront supprimées, y compris vos ajouts. Vos préférences d’apparence sont conservées. Créez une sauvegarde avant de continuer.</p><div style="margin-top:15px">${field('confirm-demo','Saisissez EFFACER pour confirmer')}</div>`,`<button data-action="close-modal">Annuler</button><button class="danger" id="reset-confirm">Vider la démonstration</button>`);$('#reset-confirm').onclick=async()=>{try{await api('reset-demo',{confirmation:$('#f-confirm-demo').value});closeModal(true);page='dashboard';await refresh();notify('Votre espace est maintenant vierge.');}catch(e){modalError(e)}};break;}}
-document.addEventListener('click',async ev=>{let el=ev.target.closest('button,[data-nav],[data-doc-open],[data-doc-folder],[data-decl-detail],[data-decl-copy]');if(!el)return;if(Date.now()<folderDragSuppressUntil)return;try{if(updateInstalling)return;if(el.dataset.folderNew){newDocFolderModal(el.dataset.folderParent||'');return;}if(el.dataset.folderRename){renameDocFolderModal(el.dataset.folderRename);return;}if(el.dataset.folderMove){await moveDocFolder(docScope(),el.dataset.folderMove,Number(el.dataset.dir));return;}if(el.dataset.docFolder!==undefined&&el.dataset.docFolder!==null&&el.dataset.docOpen===undefined){docFolder=el.dataset.docFolder;docYear='';renderListing();return;}if(el.dataset.docOpen){await documentPreview(el.dataset.docOpen);return;}if(el.dataset.documentPreview){await documentPreview(el.dataset.documentPreview);return;}if(el.dataset.docZoom){let v=el.dataset.docZoom;if(v==='in')docPreviewStageZoom(docPreviewZoom+0.25);else if(v==='out')docPreviewStageZoom(docPreviewZoom-0.25);else docPreviewStageZoom(Number(v)/100);return;}if(el.dataset.docSheet!==undefined&&el.dataset.docSheet!==null){docPreviewSheetSelect(Number(el.dataset.docSheet));return;}if(el.dataset.docAppendBtn!==undefined){docAppendPick();return;}if(el.dataset.docArrange!==undefined){await docArrangeModal(el.dataset.docArrange||docPreviewId);return;}if(el.dataset.macClose){dismissMacNotification(el.dataset.macClose);return;}if(el.dataset.macView){let id=el.dataset.macView,r=rec(id);await markTaskRemindersRead(id);if(r){closeModal(true);navigate(r.sci,'tasks');editForm('tasks',r);}return;}if(el.dataset.bellView){let id=el.dataset.bellView,r=rec(id);await markTaskRemindersRead(id);closeModal(true);if(r){navigate(r.sci,'tasks');editForm('tasks',r);}return;}if(el.dataset.bellRead){await markTaskRemindersRead(el.dataset.bellRead);if($('#bell-modal-body'))openBellModal();return;}if(el.dataset.bellReadAll){for(let r of unreadReminderTasks())await markTaskRemindersRead(r.id);if($('#bell-modal-body'))openBellModal();return;}if(el.dataset.bellAgenda){closeModal(true);navigate('agenda');return;}if(el.dataset.declTab){declTab=el.dataset.declTab;render();return;}if(el.dataset.declCopy!==undefined){await declCopyAmount(el.dataset.declCopy,el.dataset.declLabel||'');return;}if(el.dataset.declDetail){declDetailModal(el.dataset.declDetail);return;}if(el.dataset.tableConfig){openTableColumnsModal(el.dataset.tableConfig);return;}
+async function handleAction(a){switch(a){case'collapse':await setPref({collapsed:!S.settings.collapsed});document.body.classList.toggle('collapsed',!!S.settings.collapsed);if(page==='settings')render();break;case'bell':openBellModal();break;case'new-sci':editForm('sci');break;case'edit-sci':editForm('sci',currentSCI());break;case'delete-sci':deletion('sci',page);break;case'manage-deletions':manageDeletions();break;case'close-modal':closeModal();break;case'export':exportModal();break;case'import':importModal();break;case'backup':await settingsQueue;await download(await api('backup',{}),'dominis-sauvegarde-'+today()+'.db');await refresh();notify('Sauvegarde complète téléchargée. Conservez-la sur un support sûr.');break;case'restore':restoreModal();break;case'generate-calls':callsModal();break;case'search':searchModal();break;case'quick':quickModal();break;case'annual-report':annualReport();break;case'decl-pdf':await declPdfDownload();break;case'decl-csv':declExportModal();break;case'balance-mapping':declMappingModal();break;case'balance-assign':declAssignModal();break;case'decl-map-save':{let s=currentSCI();if(!s)break;let map={...balanceLineMap(s)};$$('[data-decl-map]').forEach(sel=>{let c=sel.dataset.declMap,v=sel.value;if(v)map[c]=v;else delete map[c];});let all={...(S.settings.decl_line_map||{})};all[s.id]=map;setPref({decl_line_map:all}).then(()=>{closeModal(true);render();notify('Classement enregistré pour '+s.name+'.');});break;}case'decl-assign-save':{let s=currentSCI();if(!s)break;let changes=[...$$('[data-decl-assign]')].map(sel=>[sel.dataset.declAssign,sel.value]);let todo=changes.filter(([id,pid])=>pid);for(const [id,pid] of todo){let r=rec(id);if(!r)continue;await api('save',{kind:'entries',id,sci:r.sci,data:{...r,property_id:pid}});}await load();closeModal(true);render();notify(todo.length+' mouvement'+(todo.length>1?'s':'')+' rattaché'+(todo.length>1?'s':'')+' à un immeuble.');break;}case'doc-folder-reset':await restoreDefaultDocFolders();break;case'doc-folder-new':newDocFolderModal();break;case'quit':await quit();break;case'auto-backup':await setPref({auto_backup:!S.settings.auto_backup});render();break;case'weekly-auto-save':await setPref({weekly_auto_save:!S.settings.weekly_auto_save});render();break;case'rename-space':openModal('Nom de votre espace',field('owner','Nom affiché','text',S.settings.owner),`<button data-action="close-modal">Annuler</button><button class="primary" id="save-owner">Enregistrer</button>`);$('#save-owner').onclick=async()=>{try{let v=$('#f-owner').value.trim();if(!v||v.length>45)throw new Error('Choisissez un nom de 1 à 45 caractères.');await setPref({owner:v});closeModal(true);render();}catch(e){modalError(e)}};break;case'reset-demo':openModal('Repartir d’un espace vierge',`<p class="sub">Toutes les SCI et données de cette démonstration seront supprimées, y compris vos ajouts. Vos préférences d’apparence sont conservées. Créez une sauvegarde avant de continuer.</p><div style="margin-top:15px">${field('confirm-demo','Saisissez EFFACER pour confirmer')}</div>`,`<button data-action="close-modal">Annuler</button><button class="danger" id="reset-confirm">Vider la démonstration</button>`);$('#reset-confirm').onclick=async()=>{try{await api('reset-demo',{confirmation:$('#f-confirm-demo').value});closeModal(true);page='dashboard';await refresh();notify('Votre espace est maintenant vierge.');}catch(e){modalError(e)}};break;}}
+document.addEventListener('click',async ev=>{let el=ev.target.closest('button,[data-nav],[data-doc-open],[data-doc-folder],[data-decl-detail],[data-decl-copy]');if(!el)return;if(Date.now()<folderDragSuppressUntil)return;try{if(updateInstalling)return;if(el.dataset.folderNew){newDocFolderModal(el.dataset.folderParent||'');return;}if(el.dataset.folderRename){renameDocFolderModal(el.dataset.folderRename);return;}if(el.dataset.folderMove){await moveDocFolder(docScope(),el.dataset.folderMove,Number(el.dataset.dir));return;}if(el.dataset.docFolder!==undefined&&el.dataset.docFolder!==null&&el.dataset.docOpen===undefined){docFolder=el.dataset.docFolder;docYear='';renderListing();return;}if(el.dataset.docOpen){await documentPreview(el.dataset.docOpen);return;}if(el.dataset.documentPreview){await documentPreview(el.dataset.documentPreview);return;}if(el.dataset.docZoom){let v=el.dataset.docZoom;if(v==='in')docPreviewStageZoom(docPreviewZoom+0.25);else if(v==='out')docPreviewStageZoom(docPreviewZoom-0.25);else docPreviewStageZoom(Number(v)/100);return;}if(el.dataset.docSheet!==undefined&&el.dataset.docSheet!==null){docPreviewSheetSelect(Number(el.dataset.docSheet));return;}if(el.dataset.docAppendBtn!==undefined){docAppendPick();return;}if(el.dataset.docArrange!==undefined){await docArrangeModal(el.dataset.docArrange||docPreviewId);return;}if(el.dataset.macClose){dismissMacNotification(el.dataset.macClose);return;}if(el.dataset.macView){let id=el.dataset.macView,r=rec(id);await markTaskRemindersRead(id);if(r){closeModal(true);navigate(r.sci,'tasks');editForm('tasks',r);}return;}if(el.dataset.bellView){let id=el.dataset.bellView,r=rec(id);await markTaskRemindersRead(id);closeModal(true);if(r){navigate(r.sci,'tasks');editForm('tasks',r);}return;}if(el.dataset.bellRead){await markTaskRemindersRead(el.dataset.bellRead);if($('#bell-modal-body'))openBellModal();return;}if(el.dataset.bellReadAll){for(let r of unreadReminderTasks())await markTaskRemindersRead(r.id);if($('#bell-modal-body'))openBellModal();return;}if(el.dataset.bellAgenda){closeModal(true);navigate('agenda');return;}if(el.dataset.declTab){declTab=el.dataset.declTab;render();return;}if(el.dataset.declCopy!==undefined){await declCopyAmount(el.dataset.declCopy,el.dataset.declLabel||'');return;}if(el.dataset.declDetail){declDetailModal(el.dataset.declDetail);return;}if(el.dataset.declCsv){await declCsvDownload(el.dataset.declCsv);return;}if(el.dataset.tableConfig){openTableColumnsModal(el.dataset.tableConfig);return;}
 if(el.dataset.tableDensity){await saveTableView(el.dataset.tableKind,{density:el.dataset.tableDensity});refreshTableViewUi(el.dataset.tableKind);return;}
 if(el.dataset.tableOpt){let tk=el.dataset.tableKind,cur=tableView(tk);await saveTableView(tk,{[el.dataset.tableOpt]:!cur[el.dataset.tableOpt]});refreshTableViewUi(tk);return;}if(el.dataset.colToggle){let k=el.dataset.colKind,cid=el.dataset.colToggle,cols=getTableColumns(k),c=cols.find(x=>x.id===cid);if(c){if(c.visible&&cols.filter(x=>x.visible).length<=1)return;c.visible=!c.visible;await saveTableColumns(k,cols);if(tableKindOf(k)==='entries_preview')render();else renderListing();if($('#col-config-wrap'))$('#col-config-wrap').innerHTML=renderTableColumnsList(k);}return;}if(el.dataset.colMove){let k=el.dataset.colKind,cid=el.dataset.colMove,dir=Number(el.dataset.dir),cols=getTableColumns(k),i=cols.findIndex(x=>x.id===cid),j=i+dir;if(i>=0&&j>=0&&j<cols.length){[cols[i],cols[j]]=[cols[j],cols[i]];await saveTableColumns(k,cols);if(tableKindOf(k)==='entries_preview')render();else renderListing();if($('#col-config-wrap'))$('#col-config-wrap').innerHTML=renderTableColumnsList(k);}return;}if(el.dataset.colReset){// Réinitialisation explicite : ce tableau retrouve l'ordre et la visibilité par défaut, sans toucher aux autres tableaux (même ceux du même type).
 let k=el.dataset.colReset,all={...(S.settings.table_columns||{})};all[k]={order:[],hidden:[]};await setPref({table_columns:all});if(tableKindOf(k)==='entries_preview')render();else renderListing();if($('#col-config-wrap'))$('#col-config-wrap').innerHTML=renderTableColumnsList(k);return;}if(el.dataset.settingsSection){settingsSection=el.dataset.settingsSection;render();return;}if(el.dataset.updateAction){let a=el.dataset.updateAction;if(a==='check'){updateInfo=await (await api('update/check',{})).json();render();}else if(a==='offer')showUpdateOffer();else if(a==='install')await beginUpdate();else if(a==='force')await forceUpdate();else if(a==='force-install')await beginUpdate(true);return;}if(el.dataset.nav){navigate(el.dataset.nav,el.dataset.tab||'overview');return;}if(el.dataset.tab){tab=el.dataset.tab;query='';filter='';setPref({last_tab:tab});render();return;}if(el.dataset.action){await handleAction(el.dataset.action);return;}if(el.dataset.add){editForm(el.dataset.add);return;}if(el.dataset.edit){let r=rec(el.dataset.edit);editForm(r.kind,r);return;}if(el.dataset.delete){let r=rec(el.dataset.delete);deletion(r.kind,r.id);return;}if(el.dataset.pay){let c=rec(el.dataset.pay);editForm('entries',null,{sci:c.sci,label:'Loyer '+label(rec(c.lease_id))+' · '+c.period,call_id:c.id,amount:due(c),direction:'Recette',category:'Loyers'});$('#f-sci').value=c.sci;$('#f-sci').disabled=true;return;}if(el.dataset.receipt){receipt(el.dataset.receipt);return;}if(el.dataset.document){let r=rec(el.dataset.document);await download(await api('document?id='+r.id),r.filename||'document');return;}if(el.dataset.complete){let r=rec(el.dataset.complete);dismissMacNotification(r.id);let reached=taskReminderDates(r).filter(d=>d&&d<=today());let read=[...new Set([...(Array.isArray(r.read_reminders)?r.read_reminders:[]),...reached])];await api('save',{kind:r.kind,id:r.id,sci:r.sci,data:{...r,status:'Terminé',read_reminders:read}});await refresh();notify('Échéance terminée.');return;}if(el.dataset.theme){await setPref({theme:el.dataset.theme});render();return;}if(el.dataset.move){let o=navOrder(),i=o.indexOf(el.dataset.move),j=i+Number(el.dataset.dir);if(j>=0&&j<o.length){[o[i],o[j]]=[o[j],o[i]];await setPref({order:o});render();}return;}if(el.dataset.searchGo){let id=el.dataset.searchGo,kind=el.dataset.searchKind;closeModal(true);if(kind==='sci')navigate(id);else{let r=rec(id);navigate(r.sci,kind);editForm(kind,r);}return;}}catch(e){notify(e.message,true);}});
