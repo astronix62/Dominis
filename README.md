@@ -265,54 +265,75 @@ Date | Libellé | Débit | Crédit | Solde
   autres sociétés, les préférences et les documents non concernés restent
   intacts, et chaque suppression est inscrite au journal d’activité.
 
-## Bilan de la SCI
+## Déclaration de la SCI
 
-L’onglet **Bilan** se place **entre « Documents » et « Société »** dans l’espace
-d’une SCI. Il présente trois lectures des **mêmes** données, sans jamais inventer
-de montant manquant :
+L’onglet **Déclaration** (entre « Documents » et « Société ») ne présente pas un
+bilan « maison » : il reproduit les documents que la société dépose réellement,
+dans leur numérotation officielle, et dit pour chaque montant d’où il vient.
 
-| Onglet | Contenu |
-| --- | --- |
-| **Tableau de la société** | le tableau du classeur : une ligne par catégorie, une colonne par adresse, montants exacts et arrondis |
-| **Formulaire 2072-C-A1** | l’annexe officielle, cadre VII, **lignes 1 à 26** dans la numérotation 2025-2026 |
-| **Bilan comptable** | actif brut / amortissements / net, passif par rubriques, compte de résultat (bilan simplifié 2033-A / 2033-B pour une SCI à l’IS) |
+| Régime | Onglets | Documents visés |
+| --- | --- | --- |
+| **IR** | À vérifier · 2072-S · Annexe A1 · Annexe A2 · 2044 des associés | 2072-S-SD + annexes A1/A2, puis 2044 et 2042 de chaque associé |
+| **IS** | 2065 · 2033-A/B | 2065 et liasse 2033 (bilan simplifié et compte de résultat) |
 
-- **Période** : une **année existante** (exercice complet, arrêté à ce jour pour
-  l’année en cours) ou une **période personnalisée** (deux dates).
-- **Une colonne par immeuble** : l’immeuble est un **lieu**. Deux biens à la même
-  adresse forment une seule colonne, deux adresses différentes en forment deux.
-  Les mouvements sans bien apparaissent en « Non affecté ».
-- **Arrondis** : tous les montants publiés sont arrondis à l’euro **colonne par
-  colonne, puis additionnés**. Le total affiché est donc toujours exactement la
-  somme des colonnes ; la colonne « Exact » conserve les centimes pour contrôle.
-- **Ligne 21 → 24** : le revenu ou déficit de l’immeuble (ligne 21) devient le
-  revenu net (ligne 24), puis le montant à répartir entre les associés (ligne 26).
-  La ligne 10 est un **« dont »** : elle est déjà comprise dans la ligne 9 et ne
-  s’ajoute jamais au total. La ligne 15 se déduit.
-- **Forfait de la ligne 7** : la règle légale est de **20 € par local et par an**
-  (article 31, I, 1°, e du CGI). Dominis applique un **montant unique**, modifiable
-  librement dans le champ de la ligne 7 et mémorisé par SCI et par exercice. Le
-  forfait n’est jamais ajouté deux fois : si des mouvements sont classés en
-  ligne 7, le montant manuel n’est pas appliqué.
-- **Classement** : chaque catégorie peut être épinglée à une ligne du formulaire
-  (**Classer les catégories**). Le classement est mémorisé par SCI ; une catégorie
-  non classée est **exclue** des totaux officiels et signalée, jamais corrigée en
-  silence. De même, une échéance d’emprunt est signalée « à ventiler » : seule la
-  part d’intérêts est déductible en ligne 20.
-- **Affectation** : **Affecter les mouvements** rattache un mouvement sans bien à
-  son immeuble. La fiche d’un mouvement comporte aussi un champ **Bien /
-  immeuble** ; la trésorerie affiche la colonne **Immeuble**.
-- **SCI à l’IS** : l’annexe 2072 ne s’applique pas. La page le signale, renvoie à
-  la liasse **2033-A** (bilan simplifié, cases 028 à 180) et **2033-B** (compte de
-  résultat, case 310), et propose d’ouvrir directement le bilan comptable.
-- **Contrôles** : le total de l’actif (**case 112**) et le total du passif
-  (**case 180**) sont affichés avec leur **écart**. Cet écart n’est **jamais
-  corrigé automatiquement** : il est expliqué, et la page indique les éléments à
-  compléter (valeur comptable des biens, amortissements, apports, dettes).
-- **Comparaison des exercices** : un bilan par année existante, avec produits,
-  charges, résultat, trésorerie, actif, passif et écart.
-- Aucun montant n’est extrapolé : les amortissements ne sont pas saisis dans
-  Dominis et figurent en « — » ; une valeur nulle s’affiche « — ».
+### À vérifier
+
+Une liste de contrôles, chacun avec le bouton pour corriger : SIREN, gérant,
+associés et parts, adresse des associés, immeubles et nombre de locaux,
+catégories non classées, échéances d’emprunt à ventiler, mouvements sans
+immeuble. Un point **bloquant** empêche une déclaration juste ; un point **à
+compléter** la dégrade sans l’empêcher.
+
+### 2072-S (formulaire principal)
+
+- **Cadre I** : R1 revenus bruts (5+19−20+22 de l’A1), R2 paiement sur travaux
+  (ligne 9), R3 frais et charges (16), R4 intérêts (17), R5 revenu net ou
+  déficit (23) — le seul montant qui se répartit.
+- **Cadre II** : dénomination, SIREN, siège, clôture, gérant, nombre d’associés,
+  nombre de parts, nominal.
+- **Cadre IV** : liste des immeubles avec adresse, nombre de locaux et nature.
+- **Cadre III** : produits financiers et plus/moins-values (R6 à R8), à saisir
+  depuis les relevés : Dominis ne les invente pas.
+
+### Annexe A1 (cadre VII, lignes 1 à 23)
+
+Une **colonne par immeuble**, c’est-à-dire par adresse distincte. La
+numérotation est celle de la **2072-S** : revenu ou déficit de l’immeuble en
+**18**, revenu net en **21**, montant à répartir en **23**. La ligne **9 bis**
+est un « dont » (déjà comprise dans la 9), la ligne **14** se déduit. Les
+montants sont arrondis à l’euro **colonne par colonne**, puis additionnés.
+
+### Annexe A2 (cadre IX)
+
+Une ligne par associé : **A** quote-part des revenus bruts, **B** quote-part des
+frais et charges, **D** quote-part des intérêts, **E** = A − B − D. La
+quote-part suit le pourcentage de parts détenues ; l’écart d’arrondi avec la
+case R5 est affiché, jamais masqué.
+
+### 2044 des associés
+
+Pour chaque associé : rubrique **110** (nom et adresse de la société), lignes
+**111 à 115**, puis les cases de sa 2042 calculées comme la page 4 de la 2044 —
+**4BA** bénéfice, **4BB** déficit reportable sur les revenus fonciers, **4BC**
+déficit imputable sur le revenu global (10 700 €, majorés de la ligne 112 bis
+sans dépasser 21 400 €), **4BD** déficits antérieurs (à reprendre de l’avis
+d’imposition). Un associé sans autre revenu foncier peut reporter directement
+ces montants sur sa 2042 : la 2044 n’est alors pas obligatoire.
+
+### Copier, comprendre
+
+Chaque montant affiché est un bouton **Copier** : il place l’entier (sans espace
+ni devise) dans le presse-papiers, prêt à coller dans la déclaration en ligne.
+Chaque ligne de l’annexe A1 indique les catégories qui la composent et ouvre, au
+clic, la liste exacte des mouvements.
+
+### SCI à l’IS
+
+Ni 2072-S ni 2044 : la page le signale et présente la liasse 2033 — bilan
+simplifié (cases 028, 068, 084, 110/112, 120, 134, 136, 164, 169, 174, 180),
+compte de résultat (case 310), construction de la trésorerie et comparaison des
+exercices. L’écart actif − passif est affiché et expliqué, jamais corrigé
+automatiquement.
 
 ## Zoom de l’aperçu des documents
 
