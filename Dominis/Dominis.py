@@ -3,7 +3,7 @@
 Usage: python Dominis.py [--desktop] [--demo] [--preview] [--port 8765] [--db data.db]
 Seule dépendance facultative : pywebview (fenêtre native).
 """
-import ast, math, re, shutil, subprocess, gzip, ssl, zipfile
+import ast, math, re, shutil, subprocess, gzip, ssl, zipfile, zlib
 import xml.etree.ElementTree as ET
 import argparse, base64, csv, datetime as dt, hashlib, html, io, json, mimetypes
 import os, secrets, sqlite3, sys, tempfile, threading, time, uuid, webbrowser, warnings
@@ -5439,6 +5439,9 @@ def clean(kind,data):
     for k,v in list(d.items()):
         if kind=='tasks' and k in ('reminders','read_reminders'): continue
         if kind=='sci' and k=='balances': continue
+        # Liste des fichiers assemblés dans un PDF (nom, pages) : une liste de
+        # dictionnaires, pas une valeur scalaire.
+        if kind=='documents' and k=='pdf_parts': continue
         if not isinstance(v,(str,int,float,bool,type(None))): raise ValueError('Valeur non prise en charge : '+k)
         if isinstance(v,str) and k!='blob' and len(v)>50*1024*1024: raise ValueError('Texte trop long.')
     if kind=='properties':
@@ -5487,11 +5490,27 @@ def clean(kind,data):
         if 'doc_order' in d and d['doc_order'] not in (None,''):
             try: d['doc_order']=int(float(d['doc_order']))
             except (ValueError,TypeError): d.pop('doc_order',None)
+        parts=d.get('pdf_parts')
+        if parts is not None:
+            kept=[]
+            if isinstance(parts,list):
+                for item in parts[:40]:
+                    if not isinstance(item,dict): continue
+                    name=str(item.get('name') or '')[:160]
+                    try: pages=max(0,int(item.get('pages') or 0))
+                    except (TypeError,ValueError): pages=0
+                    kept.append({'name':name,'pages':pages,'kind':'Image' if str(item.get('kind'))=='Image' else 'PDF'})
+            d['pdf_parts']=kept
         if d.get('blob'):
             try: raw=base64.b64decode(d['blob'],validate=True)
             except Exception: raise ValueError('Pièce jointe invalide.')
             if len(raw)>500*1024*1024: raise ValueError('Pièce jointe limitée à 500 Mo.')
             d['size']=len(raw)
+            if raw[:4]==b'%PDF':
+                try: d['pdf_pages']=pdf_pages_from_bytes(raw)
+                except Exception: d.pop('pdf_pages',None)
+            else:
+                d.pop('pdf_pages',None)
     return d
 
 REFS={'property_id':'properties','lease_id':'leases','call_id':'calls'}
@@ -5574,7 +5593,7 @@ def save_record(c,p):
         if kind=='documents' and previous:
             old=json.loads(previous['data'])
             if not d.get('blob'):
-                d.update({k:old[k] for k in ['blob','size','filename','mime'] if k in old})
+                d.update({k:old[k] for k in ['blob','size','filename','mime','pdf_pages','pdf_parts'] if k in old})
             if 'doc_order' not in d and 'doc_order' in old:
                 d['doc_order']=old['doc_order']
         validate_refs(c,sci,d,ident)
@@ -6910,6 +6929,11 @@ PDF_CHAR_MAP = {
     '\u2011': '-', '\u2212': '-', '\u2010': '-', '\u2013': '\u2013', '\u2014': '\u2014',
     '\u2018': "'", '\u2019': '\u2019', '\u201c': '"', '\u201d': '"',
     '\u2026': '\u2026', '\u20ac': '\u20ac',
+    # Le contenu est écrit en cp1252 : les caractères absents de cette page de
+    # code étaient remplacés par « ? ». On les translittère explicitement.
+    '\u2192': '->', '\u2190': '<-', '\u21d2': '=>', '\u21d0': '<=',
+    '\u2264': '<=', '\u2265': '>=', '\u2260': '!=', '\u2248': '~',
+    '\u2032': "'", '\u2033': '"', '\u2022': '\u2022', '\u00b7': '\u00b7',
 }
 
 
@@ -7022,7 +7046,7 @@ class PdfAnnualReport:
             self.ops = []
         self.y = PDF_PAGE_H - PDF_MARGIN
         if self.pages:
-            self.text(PDF_MARGIN, self.y - 7, 'DOMINIS · SYNTHÈSE ANNUELLE', 7.5, 'F2', PDF_GOLD)
+            self.text(PDF_MARGIN, self.y - 7, str(self.model.get('eyebrow') or 'DOMINIS · SYNTHÈSE ANNUELLE'), 7.5, 'F2', PDF_GOLD)
             self.text(PDF_PAGE_W - PDF_MARGIN, self.y - 7, _pdf_clip(self.continuation, 7.5, 400), 7.5, 'F1', PDF_MUTED, align='right')
             self.y -= 16
             self.rule(PDF_LINE)
@@ -7064,10 +7088,11 @@ class PdfAnnualReport:
             self.y -= leading
         self.y -= 3
 
-    def heading(self, title):
+    def heading(self, title, reserve=0.0):
         # Un titre ne doit jamais rester seul en bas de page : on exige la place
-        # du titre et du premier bloc de contenu avant de le poser.
-        self.need(96)
+        # du titre, puis celle du premier bloc de contenu annoncée par l'appelant
+        # (l'en-tête d'un tableau et ses premières lignes, par exemple).
+        self.need(96 + max(0.0, min(150.0, float(reserve or 0))))
         self.y -= 4
         self.rect(PDF_MARGIN, self.y - 12, 3, 12, fill=PDF_GOLD)
         self.text(PDF_MARGIN + 10, self.y - 10, title, 12.5, 'F2', PDF_INK)
@@ -7287,7 +7312,22 @@ class PdfAnnualReport:
     def section(self, sec):
         if not isinstance(sec, dict):
             return
-        self.heading(str(sec.get('title') or ''))
+        # Hauteur approximative du premier bloc : elle est réservée avec le
+        # titre pour qu'aucun tableau ne commence sur la page suivante.
+        table = sec.get('table')
+        if isinstance(table, dict):
+            probe = 24.0 + 21.0 * min(3, len(table.get('rows') or []))
+        elif isinstance(sec.get('analysis'), dict):
+            probe = 84.0
+        elif sec.get('kpis'):
+            probe = 64.0
+        elif isinstance(sec.get('chart'), dict):
+            probe = 120.0
+        elif sec.get('paragraphs'):
+            probe = 54.0
+        else:
+            probe = 0.0
+        self.heading(str(sec.get('title') or ''), probe)
         for para in (sec.get('paragraphs') or []):
             if str(para).strip():
                 self.paragraph(str(para))
@@ -7318,7 +7358,7 @@ class PdfAnnualReport:
         if not self.pages:
             self.pages = [[]]
         total = len(self.pages)
-        footer_left = _pdf_clip('Dominis · Synthèse annuelle · ' + str(self.model.get('title') or ''), 7.0, 360)
+        footer_left = _pdf_clip(str(self.model.get('footer') or ('Dominis · Synthèse annuelle · ' + str(self.model.get('title') or ''))), 7.0, 360)
         for i, ops in enumerate(self.pages, 1):
             ops.append('BT /F1 7.0 Tf %s rg 1 0 0 1 %.2f 24 Tm (%s) Tj ET' % (
                 _pdf_rgb(PDF_MUTED), PDF_MARGIN, _pdf_esc(footer_left)))
@@ -7365,6 +7405,888 @@ class PdfAnnualReport:
         return bytes(out), len(self.pages)
 
 
+# ---------------------------------------------------------------------------
+# Assemblage de pages PDF : import à la suite, suppression et réordonnancement.
+# Aucune dépendance externe : lecture des tables xref classiques et des flux
+# xref, copie des objets réellement utiles page par page, réécriture d'un PDF
+# autonome. Les flux (images, polices, contenus) sont recopiés octet pour octet
+# et seuls les dictionnaires voient leurs références renumérotées.
+# ---------------------------------------------------------------------------
+
+import re
+import zlib
+
+_PDF_WS = b'\x00\t\n\x0c\r '
+_PDF_DELIM = b'()<>[]{}/%'
+
+
+class PdfError(ValueError):
+    """Erreur de lecture ou d'écriture d'un PDF, avec un message utilisateur."""
+
+
+def _is_delim(c):
+    return (not c) or (c in _PDF_WS) or (c in _PDF_DELIM)
+
+
+def _skip_ws(raw, i):
+    n = len(raw)
+    while i < n:
+        c = raw[i:i + 1]
+        if c in _PDF_WS:
+            i += 1
+        elif c == b'%':
+            j = raw.find(b'\n', i)
+            i = (j + 1) if j != -1 else n
+        else:
+            break
+    return i
+
+
+def _literal_end(raw, i):
+    depth = 0
+    j = i
+    n = len(raw)
+    while j < n:
+        c = raw[j:j + 1]
+        if c == b'\\':
+            j += 2
+            continue
+        if c == b'(':
+            depth += 1
+        elif c == b')':
+            depth -= 1
+            if depth <= 0:
+                return j + 1
+        j += 1
+    raise PdfError('Chaîne PDF non terminée.')
+
+
+def _value_end(raw, i):
+    i = _skip_ws(raw, i)
+    if i >= len(raw):
+        raise PdfError('Valeur PDF incomplète.')
+    two = raw[i:i + 2]
+    if two == b'<<':
+        j = i + 2
+        while True:
+            j = _skip_ws(raw, j)
+            if j >= len(raw):
+                raise PdfError('Dictionnaire PDF non terminé.')
+            if raw[j:j + 2] == b'>>':
+                return j + 2
+            if raw[j:j + 1] != b'/':
+                raise PdfError('Dictionnaire PDF illisible.')
+            j += 1
+            while j < len(raw) and not _is_delim(raw[j:j + 1]):
+                j += 1
+            j = _value_end(raw, j)
+    if raw[i:i + 1] == b'[':
+        j = i + 1
+        while True:
+            j = _skip_ws(raw, j)
+            if j >= len(raw):
+                raise PdfError('Tableau PDF non terminé.')
+            if raw[j:j + 1] == b']':
+                return j + 1
+            j = _value_end(raw, j)
+    if raw[i:i + 1] == b'/':
+        j = i + 1
+        while j < len(raw) and not _is_delim(raw[j:j + 1]):
+            j += 1
+        return j
+    if raw[i:i + 1] == b'(':
+        return _literal_end(raw, i)
+    if raw[i:i + 1] == b'<':
+        k = raw.find(b'>', i)
+        if k == -1:
+            raise PdfError('Chaîne hexadécimale non terminée.')
+        return k + 1
+    j = i
+    while j < len(raw) and not _is_delim(raw[j:j + 1]):
+        j += 1
+    if j == i:
+        raise PdfError('Valeur PDF illisible.')
+    # Référence indirecte « 12 0 R » : trois jetons.
+    if raw[i:j].isdigit():
+        k = _skip_ws(raw, j)
+        k2 = k
+        while k2 < len(raw) and raw[k2:k2 + 1].isdigit():
+            k2 += 1
+        if k2 > k:
+            k3 = _skip_ws(raw, k2)
+            if raw[k3:k3 + 1] == b'R' and _is_delim(raw[k3 + 1:k3 + 2]):
+                return k3 + 1
+    return j
+
+
+def _dict_entries(value):
+    """Renvoie [(clé, valeur brute)] d'un dictionnaire PDF."""
+    entries = []
+    i = _skip_ws(value, 0)
+    if value[i:i + 2] != b'<<':
+        return entries
+    j = i + 2
+    while True:
+        j = _skip_ws(value, j)
+        if j >= len(value) or value[j:j + 2] == b'>>':
+            break
+        if value[j:j + 1] != b'/':
+            raise PdfError('Dictionnaire PDF illisible.')
+        k = j + 1
+        while k < len(value) and not _is_delim(value[k:k + 1]):
+            k += 1
+        key = value[j:k]
+        end = _value_end(value, k)
+        entries.append((key, value[_skip_ws(value, k):end]))
+        j = end
+    return entries
+
+
+def _entry(entries, name):
+    for key, val in entries:
+        if key == name:
+            return val
+    return None
+
+
+def _entry_int(entries, name):
+    val = _entry(entries, name)
+    if val is None:
+        return None
+    try:
+        return int(val.split()[0])
+    except (ValueError, IndexError):
+        return None
+
+
+def _entry_ref(entries, name):
+    val = _entry(entries, name)
+    if val is None:
+        return None
+    parts = val.split()
+    if len(parts) >= 3 and parts[2] == b'R' and parts[0].isdigit():
+        return int(parts[0])
+    return None
+
+
+def _entry_names(entries, name):
+    val = _entry(entries, name)
+    if val is None:
+        return []
+    return [m.decode('latin-1') for m in re.findall(rb'/([^\s/\[\]<>()]+)', val)]
+
+
+def _rewrite_refs(body, mapper):
+    """Remplace les références « n g R » hors chaînes littérales."""
+    out = []
+    i = 0
+    n = len(body)
+    while i < n:
+        if body[i:i + 1] == b'(':
+            end = _literal_end(body, i)
+            out.append(body[i:end])
+            i = end
+            continue
+        if body[i:i + 2] == b'<':
+            if body[i:i + 2] == b'<<':
+                out.append(b'<<')
+                i += 2
+                continue
+            end = body.find(b'>', i)
+            end = n if end == -1 else end + 1
+            out.append(body[i:end])
+            i = end
+            continue
+        if body[i:i + 1] == b'%':
+            end = body.find(b'\n', i)
+            end = n if end == -1 else end + 1
+            out.append(body[i:end])
+            i = end
+            continue
+        m = re.match(rb'(\d+)\s+(\d+)\s+R(?![A-Za-z0-9])', body[i:])
+        if m:
+            out.append(b'%d 0 R' % mapper(int(m.group(1))))
+            i += m.end()
+            continue
+        out.append(body[i:i + 1])
+        i += 1
+    return b''.join(out)
+
+
+def _png_unpredict(data, columns, colors, bpc=8):
+    """Applique le prédicteur PNG (utilisé par les flux xref)."""
+    bpp = max(1, (colors * bpc + 7) // 8)
+    row_len = (columns * colors * bpc + 7) // 8
+    out = bytearray()
+    prev = bytearray(row_len)
+    i = 0
+    n = len(data)
+    while i + 1 <= n:
+        tag = data[i]
+        row = bytearray(data[i + 1:i + 1 + row_len])
+        if len(row) < row_len:
+            row.extend(b'\x00' * (row_len - len(row)))
+        i += 1 + row_len
+        if tag == 1:
+            for k in range(bpp, row_len):
+                row[k] = (row[k] + row[k - bpp]) & 0xFF
+        elif tag == 2:
+            for k in range(row_len):
+                row[k] = (row[k] + prev[k]) & 0xFF
+        elif tag == 3:
+            for k in range(row_len):
+                left = row[k - bpp] if k >= bpp else 0
+                row[k] = (row[k] + ((left + prev[k]) >> 1)) & 0xFF
+        elif tag == 4:
+            for k in range(row_len):
+                a = row[k - bpp] if k >= bpp else 0
+                b = prev[k]
+                c = prev[k - bpp] if k >= bpp else 0
+                p = a + b - c
+                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                pr = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
+                row[k] = (row[k] + pr) & 0xFF
+        out.extend(row)
+        prev = row
+    return bytes(out)
+
+
+def _inflate(data):
+    try:
+        return zlib.decompress(data)
+    except zlib.error:
+        try:
+            return zlib.decompressobj().decompress(data)
+        except zlib.error as exc:
+            raise PdfError('Flux PDF compressé illisible.') from exc
+
+
+def _ascii_hex(data):
+    clean = bytes(c for c in data if c not in _PDF_WS)
+    if b'>' in clean:
+        clean = clean.split(b'>')[0]
+    if len(clean) % 2:
+        clean += b'0'
+    try:
+        return bytes.fromhex(clean.decode('ascii'))
+    except ValueError as exc:
+        raise PdfError('Flux hexadécimal illisible.') from exc
+
+
+def _decode_stream(entries, data):
+    filters = _entry_names(entries, b'/Filter')
+    for name in filters:
+        if name in ('FlateDecode', 'Fl'):
+            data = _inflate(data)
+        elif name in ('ASCIIHexDecode', 'AHx'):
+            data = _ascii_hex(data)
+        elif name in ('ASCII85Decode', 'A85'):
+            raise PdfError('Flux ASCII85 non pris en charge.')
+        else:
+            raise PdfError('Compression PDF non prise en charge (%s).' % name)
+    # Prédicteur PNG éventuel (flux xref, images en ligne).
+    params = _entry(entries, b'/DecodeParms')
+    if params:
+        predictor = 1
+        colors = 1
+        columns = 1
+        bpc = 8
+        for block in re.findall(rb'<<(.*?)>>', params, re.S):
+            m = re.search(rb'/Predictor\s+(\d+)', block)
+            if m:
+                predictor = int(m.group(1))
+            m = re.search(rb'/Colors\s+(\d+)', block)
+            if m:
+                colors = int(m.group(1))
+            m = re.search(rb'/Columns\s+(\d+)', block)
+            if m:
+                columns = int(m.group(1))
+            m = re.search(rb'/BitsPerComponent\s+(\d+)', block)
+            if m:
+                bpc = int(m.group(1))
+        if predictor >= 10:
+            data = _png_unpredict(data, columns, colors, bpc)
+    return data
+
+
+class PdfSource:
+    """Lecture d'un PDF : objets, page tree et pages, en lecture seule."""
+
+    def __init__(self, raw):
+        if not isinstance(raw, (bytes, bytearray)) or not bytes(raw[:4]).startswith(b'%PDF'):
+            raise PdfError('Ce fichier n’est pas un PDF lisible.')
+        self.raw = bytes(raw)
+        self.version = self._version()
+        self.xref = {}
+        self.trailer = []
+        self.cache = {}
+        self._objstm = {}
+        self._scanned = None
+        self._queue = []
+        try:
+            self._load_xref()
+        except PdfError:
+            self.xref = {}
+            self.trailer = []
+        if not self.xref:
+            self._rebuild_index()
+        for trailer in self.trailer:
+            if _entry(trailer, b'/Encrypt') is not None:
+                raise PdfError('Ce PDF est protégé (chiffrement) : il ne peut pas être réorganisé.')
+        self.pages = self._collect_pages()
+
+    # -- lecture bas niveau -------------------------------------------------
+    def _version(self):
+        m = re.match(rb'%PDF-(\d+)\.(\d+)', self.raw[:16])
+        if not m:
+            return (1, 4)
+        return (int(m.group(1)), int(m.group(2)))
+
+    def _load_xref(self):
+        idx = self.raw.rfind(b'startxref')
+        if idx == -1:
+            raise PdfError('Table des références absente.')
+        tail = self.raw[idx + 9:idx + 40].split()
+        if not tail:
+            raise PdfError('Table des références absente.')
+        offset = int(tail[0])
+        seen = set()
+        while offset and offset not in seen and 0 < offset < len(self.raw):
+            seen.add(offset)
+            trailer = self._read_xref_section(offset)
+            if trailer:
+                self.trailer.append(trailer)
+            prev = _entry_int(trailer or [], b'/Prev')
+            xs = _entry_int(trailer or [], b'/XRefStm')
+            if xs:
+                try:
+                    self._read_xref_section(xs)
+                except PdfError:
+                    pass
+            offset = prev or 0
+
+    def _read_xref_section(self, offset):
+        i = _skip_ws(self.raw, offset)
+        if self.raw[i:i + 4] == b'xref':
+            return self._read_xref_table(i + 4)
+        num, _gen, value, stream, _start = self._read_object_at(offset)
+        entries = _dict_entries(value)
+        if _entry_names(entries, b'/Type') != ['XRef']:
+            raise PdfError('Table des références illisible.')
+        widths = [int(x) for x in (_entry(entries, b'/W') or b'').strip(b'[]').split()]
+        if len(widths) < 3:
+            raise PdfError('Flux xref illisible.')
+        size = _entry_int(entries, b'/Size') or 0
+        index = _entry(entries, b'/Index')
+        ranges = [int(x) for x in index.strip(b'[]').split()] if index else [0, size]
+        data = _decode_stream(entries, stream or b'')
+        row = sum(widths)
+        pos = 0
+        for r in range(0, len(ranges) - 1, 2):
+            start, count = ranges[r], ranges[r + 1]
+            for k in range(count):
+                if pos + row > len(data):
+                    break
+                fields = []
+                cursor = pos
+                for w in widths:
+                    fields.append(int.from_bytes(data[cursor:cursor + w], 'big') if w else None)
+                    cursor += w
+                pos += row
+                kind = fields[0] if fields[0] is not None else 1
+                if kind == 0:
+                    continue
+                if kind == 1:
+                    self.xref.setdefault(start + k, ('o', fields[1]))
+                elif kind == 2:
+                    self.xref.setdefault(start + k, ('c', fields[1], fields[2] or 0))
+        return entries
+
+    def _read_xref_table(self, i):
+        entries = []
+        while True:
+            i = _skip_ws(self.raw, i)
+            if self.raw[i:i + 7] == b'trailer':
+                i += 7
+                end = _value_end(self.raw, i)
+                return _dict_entries(self.raw[_skip_ws(self.raw, i):end])
+            m = re.match(rb'(\d+)\s+(\d+)', self.raw[i:i + 64])
+            if not m:
+                raise PdfError('Table des références illisible.')
+            start, count = int(m.group(1)), int(m.group(2))
+            i += m.end()
+            for k in range(count):
+                i = _skip_ws(self.raw, i)
+                m = re.match(rb'(\d{10})\s+(\d{5})\s+([nf])', self.raw[i:i + 32])
+                if not m:
+                    raise PdfError('Entrée xref illisible.')
+                i += m.end()
+                if m.group(3) == b'n':
+                    self.xref.setdefault(start + k, ('o', int(m.group(1))))
+
+    def _read_object_at(self, offset):
+        start = _skip_ws(self.raw, offset)
+        m = re.match(rb'(\d+)\s+(\d+)\s+obj', self.raw[start:start + 40])
+        if not m:
+            raise PdfError('Objet PDF introuvable.')
+        num, gen = int(m.group(1)), int(m.group(2))
+        body_start = _skip_ws(self.raw, start + m.end())
+        if self.raw[body_start:body_start + 2] == b'>>':
+            raise PdfError('Objet PDF vide.')
+        end = _value_end(self.raw, body_start)
+        stream = None
+        j = _skip_ws(self.raw, end)
+        if self.raw[j:j + 6] == b'stream':
+            j += 6
+            if self.raw[j:j + 2] == b'\r\n':
+                j += 2
+            elif self.raw[j:j + 1] == b'\n':
+                j += 1
+            entries = _dict_entries(self.raw[body_start:end])
+            length = _entry_int(entries, b'/Length')
+            if length is not None and j + length <= len(self.raw):
+                stream = self.raw[j:j + length]
+            else:
+                stop = self.raw.find(b'endstream', j)
+                if stop == -1:
+                    raise PdfError('Flux PDF non terminé.')
+                stream = self.raw[j:stop].rstrip(b'\r\n')
+        return num, gen, self.raw[body_start:end], stream, start
+
+    def _rebuild_index(self):
+        for m in re.finditer(rb'(?<![0-9])(\d+)\s+(\d+)\s+obj\b', self.raw):
+            self.xref.setdefault(int(m.group(1)), ('o', m.start()))
+        trailer = []
+        for m in re.finditer(rb'trailer', self.raw):
+            try:
+                start = _skip_ws(self.raw, m.end())
+                entries = _dict_entries(self.raw[start:_value_end(self.raw, start)])
+                trailer.append(entries)
+            except PdfError:
+                continue
+        # Un PDF 1.5+ n'a pas forcément de « trailer » : on cherche le catalogue.
+        if not trailer:
+            for num in self.xref:
+                try:
+                    obj = self.obj(num)
+                except PdfError:
+                    continue
+                if obj[1] is None and _entry_names(_dict_entries(obj[0]), b'/Type') == ['Catalog']:
+                    trailer.append([(b'/Root', b'%d 0 R' % num)])
+                    break
+        self.trailer = trailer
+
+    # -- accès objets -------------------------------------------------------
+    def obj(self, num):
+        if num in self.cache:
+            return self.cache[num]
+        entry = self.xref.get(num)
+        value, stream = None, None
+        if entry and entry[0] == 'o':
+            try:
+                n, _gen, value, stream, _start = self._read_object_at(entry[1])
+                if n != num:
+                    value = None
+            except PdfError:
+                value = None
+        if value is None and entry and entry[0] == 'c':
+            value, stream = self._compressed_obj(entry[1], entry[2], num)
+        if value is None:
+            value, stream = self._scan_obj(num)
+        if value is None:
+            raise PdfError('Objet PDF %d introuvable.' % num)
+        self.cache[num] = (value, stream)
+        return value, stream
+
+    def _objstm_data(self, stm_num):
+        if stm_num in self._objstm:
+            return self._objstm[stm_num]
+        entry = self.xref.get(stm_num)
+        if entry and entry[0] == 'o':
+            _n, _g, value, stream, _s = self._read_object_at(entry[1])
+        else:
+            value, stream = self._scan_obj(stm_num)
+        if stream is None:
+            raise PdfError('Objet compressé illisible.')
+        entries = _dict_entries(value)
+        count = _entry_int(entries, b'/N') or 0
+        first = _entry_int(entries, b'/First') or 0
+        data = _decode_stream(entries, stream)
+        header = data[:first].split()
+        pairs = []
+        for k in range(count):
+            try:
+                pairs.append((int(header[2 * k]), int(header[2 * k + 1])))
+            except (IndexError, ValueError):
+                break
+        self._objstm[stm_num] = (data, first, pairs)
+        return self._objstm[stm_num]
+
+    def _compressed_obj(self, stm_num, index, num):
+        data, first, pairs = self._objstm_data(stm_num)
+        offset = None
+        for k, (onum, ooff) in enumerate(pairs):
+            if onum == num:
+                offset = ooff
+                break
+        if offset is None and index < len(pairs) and pairs[index][0] == num:
+            offset = pairs[index][1]
+        if offset is None:
+            return None, None
+        start = first + offset
+        end = _value_end(data, start)
+        return data[_skip_ws(data, start):end], None
+
+    def _scan_obj(self, num):
+        if self._scanned is None:
+            self._scanned = {}
+            for m in re.finditer(rb'(?<![0-9])(\d+)\s+(\d+)\s+obj\b', self.raw):
+                self._scanned[int(m.group(1))] = m.start()
+        offset = self._scanned.get(num)
+        if offset is None:
+            return None, None
+        try:
+            _n, _g, value, stream, _s = self._read_object_at(offset)
+        except PdfError:
+            return None, None
+        return value, stream
+
+    # -- pages --------------------------------------------------------------
+    def _catalog(self):
+        for trailer in self.trailer:
+            ref = _entry_ref(trailer, b'/Root')
+            if ref is not None:
+                try:
+                    return _dict_entries(self.obj(ref)[0])
+                except PdfError:
+                    continue
+        return []
+
+    def _collect_pages(self):
+        catalog = self._catalog()
+        root_ref = _entry_ref(catalog, b'/Pages')
+        pages = []
+        if root_ref is not None:
+            try:
+                self._walk(root_ref, {}, pages, set())
+            except PdfError:
+                pages = []
+        if not pages:
+            for num in list(self.xref):
+                try:
+                    value, stream = self.obj(num)
+                except PdfError:
+                    continue
+                if stream is not None:
+                    continue
+                entries = _dict_entries(value)
+                if _entry_names(entries, b'/Type') == ['Page']:
+                    pages.append({'num': num, 'value': value, 'entries': entries, 'inherit': {}})
+        if not pages:
+            raise PdfError('Aucune page lisible dans ce PDF.')
+        return pages
+
+    def _walk(self, ref, inherit, pages, seen):
+        if ref in seen or len(pages) > 4000:
+            return
+        seen.add(ref)
+        value, stream = self.obj(ref)
+        if stream is not None:
+            return
+        entries = _dict_entries(value)
+        types = _entry_names(entries, b'/Type')
+        kid_inherit = dict(inherit)
+        for key in (b'/Resources', b'/MediaBox', b'/CropBox', b'/Rotate'):
+            val = _entry(entries, key)
+            if val is not None:
+                kid_inherit[key] = val
+        kids = _entry(entries, b'/Kids')
+        if 'Pages' in types and kids:
+            for m in re.finditer(rb'(\d+)\s+\d+\s+R', kids):
+                self._walk(int(m.group(1)), kid_inherit, pages, seen)
+        elif 'Page' in types:
+            pages.append({'num': ref, 'value': value, 'entries': entries, 'inherit': inherit})
+
+    # -- export -------------------------------------------------------------
+    def page_count(self):
+        return len(self.pages)
+
+
+class _PdfWriter:
+    def __init__(self):
+        self.objects = {}
+
+    def alloc(self):
+        num = len(self.objects) + 1
+        self.objects[num] = b'null'
+        return num
+
+    def set(self, num, body):
+        self.objects[num] = body
+
+    def build(self, root_num, version=(1, 7)):
+        if not self.objects:
+            self.objects[1] = b'null'
+        total = max(self.objects)
+        out = bytearray(b'%%PDF-%d.%d\n%%\xe2\xe3\xcf\xd3\n' % version)
+        offsets = {}
+        for num in range(1, total + 1):
+            body = self.objects.get(num, b'null')
+            offsets[num] = len(out)
+            out += b'%d 0 obj\n' % num + body + b'\nendobj\n'
+        xref = len(out)
+        out += b'xref\n0 %d\n' % (total + 1)
+        out += b'0000000000 65535 f \n'
+        for num in range(1, total + 1):
+            out += b'%010d 00000 n \n' % offsets[num]
+        out += b'trailer\n<< /Size %d /Root %d 0 R >>\nstartxref\n%d\n%%%%EOF\n' % (
+            total + 1, root_num, xref)
+        return bytes(out)
+
+
+def _page_body(source, page, parent_num, mapper):
+    """Reconstruit le dictionnaire d'une page en réécrivant ses références."""
+    keep = []
+    seen = set()
+    for key, val in page['entries']:
+        if key in (b'/Parent', b'/Type'):
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        keep.append((key, _rewrite_refs(val, mapper)))
+    inherit = page['inherit']
+    present = {k for k, _v in keep}
+    for key in (b'/MediaBox', b'/Resources', b'/CropBox', b'/Rotate'):
+        if key in present:
+            continue
+        val = inherit.get(key)
+        if val is not None:
+            keep.append((key, _rewrite_refs(val, mapper)))
+    if b'/MediaBox' not in {k for k, _v in keep}:
+        keep.append((b'/MediaBox', b'[0 0 595.28 841.89]'))
+    if b'/Resources' not in {k for k, _v in keep}:
+        keep.append((b'/Resources', b'<< >>'))
+    body = b'<< ' + b' '.join(k + b' ' + v for k, v in keep) + b' /Type /Page /Parent %d 0 R >>' % parent_num
+    return body
+
+
+def compose_pdf(items):
+    """Assemble un PDF autonome à partir de [(PdfSource, index de page)]."""
+    items = list(items or [])
+    if not items:
+        raise PdfError('Aucune page à assembler.')
+    writer = _PdfWriter()
+    pages_num = writer.alloc()
+    page_nums = [writer.alloc() for _ in items]
+    mapping = {}
+    queue = []
+
+    def mapper_for(source):
+        table = mapping.setdefault(id(source), {})
+
+        def resolve(num):
+            if num in table:
+                return table[num]
+            dst = writer.alloc()
+            table[num] = dst
+            queue.append((source, num, dst))
+            return dst
+
+        return resolve
+
+    version = (1, 4)
+    for slot, (source, index) in enumerate(items):
+        version = max(version, source.version)
+        page = source.pages[index]
+        mapping.setdefault(id(source), {})[page['num']] = page_nums[slot]
+
+    bodies = {}
+    for slot, (source, index) in enumerate(items):
+        bodies[slot] = _page_body(source, source.pages[index], pages_num, mapper_for(source))
+
+    cursor = 0
+    while cursor < len(queue):
+        source, num, dst = queue[cursor]
+        cursor += 1
+        value, stream = source.obj(num)
+        body = _rewrite_refs(value, mapper_for(source))
+        if stream is not None:
+            body = body + b'\nstream\n' + stream + b'\nendstream'
+        writer.set(dst, body)
+
+    for slot, (source, index) in enumerate(items):
+        writer.set(page_nums[slot], bodies[slot])
+    writer.set(pages_num, b'<< /Type /Pages /Count %d /Kids [%s] >>' % (
+        len(page_nums), b' '.join(b'%d 0 R' % n for n in page_nums)))
+    catalog = writer.alloc()
+    writer.set(catalog, b'<< /Type /Catalog /Pages %d 0 R >>' % pages_num)
+    return writer.build(catalog, version)
+
+
+def pdf_pages_from_bytes(raw):
+    return len(PdfSource(raw).pages)
+
+
+def pdf_page_pdf(raw, index):
+    """Extrait une page dans un PDF d'une page (aperçu numéroté)."""
+    source = PdfSource(raw)
+    if not 0 <= index < len(source.pages):
+        raise PdfError('Page inexistante.')
+    return compose_pdf([(source, index)])
+
+
+def pdf_select(raw, order):
+    """Garde les pages listées (1-based), dans l'ordre demandé."""
+    source = PdfSource(raw)
+    count = len(source.pages)
+    try:
+        picked = [int(x) - 1 for x in order]
+    except (TypeError, ValueError):
+        raise PdfError('Disposition invalide.')
+    if not picked:
+        raise PdfError('Un document doit conserver au moins une page.')
+    if len(set(picked)) != len(picked):
+        raise PdfError('Une page ne peut pas apparaître deux fois.')
+    if any(i < 0 or i >= count for i in picked):
+        raise PdfError('Une page demandée n’existe pas dans ce document.')
+    if picked == list(range(count)):
+        return raw
+    return compose_pdf([(source, i) for i in picked])
+
+
+def pdf_reorder(raw, order):
+    source = PdfSource(raw)
+    count = len(source.pages)
+    try:
+        picked = [int(x) for x in order]
+    except (TypeError, ValueError):
+        raise PdfError('Ordre de pages invalide.')
+    if sorted(picked) != list(range(1, count + 1)):
+        raise PdfError('L’ordre proposé ne correspond pas aux %d pages du document.' % count)
+    return pdf_select(raw, picked)
+
+
+def pdf_remove_page(raw, page):
+    source = PdfSource(raw)
+    count = len(source.pages)
+    try:
+        page = int(page)
+    except (TypeError, ValueError):
+        raise PdfError('Numéro de page invalide.')
+    if not 1 <= page <= count:
+        raise PdfError('Page inexistante.')
+    if count <= 1:
+        raise PdfError('Un document doit conserver au moins une page.')
+    return pdf_select(raw, [i for i in range(1, count + 1) if i != page])
+
+
+def _jpeg_size(raw):
+    i = 2
+    n = len(raw)
+    while i + 9 < n:
+        if raw[i] != 0xFF:
+            i += 1
+            continue
+        marker = raw[i + 1]
+        if marker in (0xD8, 0xD9) or 0xD0 <= marker <= 0xD7:
+            i += 2
+            continue
+        length = int.from_bytes(raw[i + 2:i + 4], 'big')
+        if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+            height = int.from_bytes(raw[i + 5:i + 7], 'big')
+            width = int.from_bytes(raw[i + 7:i + 9], 'big')
+            comps = raw[i + 9] if i + 9 < n else 3
+            return width, height, comps
+        i += 2 + length
+    raise PdfError('Dimensions JPEG illisibles.')
+
+
+def _png_info(raw):
+    if raw[:8] != b'\x89PNG\r\n\x1a\n':
+        raise PdfError('Image PNG illisible.')
+    i = 8
+    width = height = depth = color = None
+    idat = bytearray()
+    trns = None
+    while i + 8 <= len(raw):
+        length = int.from_bytes(raw[i:i + 4], 'big')
+        kind = raw[i + 4:i + 8]
+        data = raw[i + 8:i + 8 + length]
+        if kind == b'IHDR':
+            width = int.from_bytes(data[0:4], 'big')
+            height = int.from_bytes(data[4:8], 'big')
+            depth = data[8]
+            color = data[9]
+        elif kind == b'IDAT':
+            idat += data
+        elif kind == b'IEND':
+            break
+        i += 12 + length
+    if not width or not height:
+        raise PdfError('Image PNG illisible.')
+    if depth != 8 or color not in (0, 2, 4, 6):
+        raise PdfError('PNG non pris en charge : utilisez un JPEG ou un PNG 8 bits sans palette.')
+    return width, height, color, bytes(idat), trns
+
+
+def image_page_pdf(raw, mime=''):
+    """Transforme une image importée en une page PDF pleine page."""
+    raw = bytes(raw or b'')
+    mime = (mime or '').lower()
+    if raw[:3] == b'\xff\xd8\xff' or 'jpeg' in mime or 'jpg' in mime:
+        width, height, comps = _jpeg_size(raw)
+        space = b'/DeviceCMYK' if comps == 4 else (b'/DeviceGray' if comps == 1 else b'/DeviceRGB')
+        stream = raw
+        extra = b' /Filter /DCTDecode'
+    elif raw[:8] == b'\x89PNG\r\n\x1a\n':
+        width, height, color, data, _trns = _png_info(raw)
+        if color == 4:
+            raise PdfError('PNG avec transparence non pris en charge : convertissez-le en JPEG.')
+        if color == 6:
+            raise PdfError('PNG avec transparence non pris en charge : convertissez-le en JPEG.')
+        space = b'/DeviceGray' if color == 0 else b'/DeviceRGB'
+        colors = 1 if color == 0 else 3
+        stream = data
+        extra = b' /Filter /FlateDecode /DecodeParms << /Predictor 15 /Colors %d /BitsPerComponent 8 /Columns %d >>' % (colors, width)
+    else:
+        raise PdfError('Format d’image non pris en charge : utilisez un PDF, un JPEG ou un PNG.')
+    page_w, page_h = 595.28, 841.89
+    scale = min(page_w / float(width), page_h / float(height))
+    draw_w, draw_h = width * scale, height * scale
+    dx, dy = (page_w - draw_w) / 2.0, (page_h - draw_h) / 2.0
+    content = b'q %.2f 0 0 %.2f %.2f %.2f cm /Im0 Do Q' % (draw_w, draw_h, dx, dy)
+    writer = _PdfWriter()
+    image_num = writer.alloc()
+    content_num = writer.alloc()
+    page_num = writer.alloc()
+    pages_num = writer.alloc()
+    writer.set(image_num, b'<< /Type /XObject /Subtype /Image /Width %d /Height %d /ColorSpace %s /BitsPerComponent 8%s /Length %d >>\nstream\n%s\nendstream' % (
+        width, height, space, extra, len(stream), stream))
+    writer.set(content_num, b'<< /Length %d >>\nstream\n%s\nendstream' % (len(content), content))
+    writer.set(page_num, b'<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %.2f %.2f] /Resources << /XObject << /Im0 %d 0 R >> >> /Contents %d 0 R >>' % (
+        pages_num, page_w, page_h, image_num, content_num))
+    writer.set(pages_num, b'<< /Type /Pages /Count 1 /Kids [%d 0 R] >>' % page_num)
+    catalog = writer.alloc()
+    writer.set(catalog, b'<< /Type /Catalog /Pages %d 0 R >>' % pages_num)
+    return writer.build(catalog, (1, 4))
+
+
+def pdf_is_pdf(raw):
+    return bytes(raw[:4]) == b'%PDF'
+
+
+def pdf_sources_from_upload(name, raw):
+    """Renvoie un PdfSource pour un PDF importé, sinon convertit l'image."""
+    raw = bytes(raw or b'')
+    if pdf_is_pdf(raw):
+        return PdfSource(raw), True
+    lower = (name or '').lower()
+    if raw[:3] == b'\xff\xd8\xff' or lower.endswith(('.jpg', '.jpeg', '.png')):
+        return PdfSource(image_page_pdf(raw, name)), False
+    raise PdfError('Seuls les PDF, JPEG et PNG peuvent être ajoutés à un document.')
+
+
 def build_annual_report_pdf(model):
     """Construit le PDF de synthèse et renvoie (octets, nombre de pages)."""
     if not isinstance(model, dict):
@@ -7392,7 +8314,13 @@ def build_document_preview(r):
         else: img_mime=mime if mime.startswith('image/') else 'image/png'
         return {**meta,'preview_type':'image','data_url':'data:'+img_mime+';base64,'+d['blob']}
     if ext=='.pdf' or mime=='application/pdf' or raw.startswith(b'%PDF'):
-        return {**meta,'preview_type':'pdf','mime':'application/pdf',
+        # Le nombre de pages sert deux choses : la modale « disposition » et le
+        # libellé du document. Un PDF abîmé ne doit pas casser l'aperçu.
+        try:
+            pages=pdf_pages_from_bytes(raw)
+        except Exception:
+            pages=0
+        return {**meta,'preview_type':'pdf','mime':'application/pdf','pages':pages,
                 'view_url':'/api/document-view?id='+quote(str(r['id']))}
     if raw[:4]==b'PK\x03\x04' or ext in ('.xlsx','.docx'):
         try:
@@ -7484,6 +8412,29 @@ class Handler(BaseHTTPRequestHandler):
                     r=c.execute("SELECT * FROM records WHERE id=? AND kind='documents'",(ident,)).fetchone()
                     if not r: raise ValueError('Document introuvable.')
                     return self.reply(build_document_preview(r))
+                if path=='/api/document-info':
+                    ident=parse_qs(urlparse(self.path).query).get('id',[''])[0]
+                    r=c.execute("SELECT * FROM records WHERE id=? AND kind='documents'",(ident,)).fetchone()
+                    if not r: raise ValueError('Document introuvable.')
+                    d=json.loads(r['data'])
+                    raw=base64.b64decode(d.get('blob') or b'')
+                    if not pdf_is_pdf(raw): raise ValueError('Ce document n’est pas un PDF.')
+                    return self.reply({'ok':True,'pages':pdf_pages_from_bytes(raw),'size':len(raw),
+                                       'parts':d.get('pdf_parts') if isinstance(d.get('pdf_parts'),list) else []})
+                if path=='/api/document-page':
+                    query=parse_qs(urlparse(self.path).query)
+                    ident=query.get('id',[''])[0]
+                    try:
+                        page=int(query.get('page',['1'])[0])
+                    except (TypeError, ValueError):
+                        raise ValueError('Numéro de page invalide.')
+                    r=c.execute("SELECT * FROM records WHERE id=? AND kind='documents'",(ident,)).fetchone()
+                    if not r: raise ValueError('Document introuvable.')
+                    d=json.loads(r['data'])
+                    raw=base64.b64decode(d.get('blob') or b'')
+                    if not pdf_is_pdf(raw): raise ValueError('Ce document n’est pas un PDF.')
+                    out=pdf_page_pdf(raw,page-1)
+                    return self.reply(out,mime='application/pdf',filename='page-%d.pdf'%page,disposition='inline')
                 if path in ('/api/document','/api/document-view'):
                     ident=parse_qs(urlparse(self.path).query).get('id',[''])[0]
                     r=c.execute("SELECT * FROM records WHERE id=? AND kind='documents'",(ident,)).fetchone()
@@ -7551,6 +8502,79 @@ class Handler(BaseHTTPRequestHandler):
                     with connect() as c: raw=backup_bytes(c)
                     return self.reply(raw,mime='application/octet-stream',filename='dominis-sauvegarde-'+dt.date.today().isoformat()+'.db')
                 with connect() as c:
+                    if path=='/api/document-pages':
+                        # Import à la suite, suppression et réordonnancement : le
+                        # PDF assemblé remplace le blob, si bien que l'aperçu, le
+                        # téléchargement et la sauvegarde restent inchangés.
+                        ident=str(p.get('id') or '')
+                        r=c.execute("SELECT * FROM records WHERE id=? AND kind='documents'",(ident,)).fetchone()
+                        if not r: raise ValueError('Document introuvable.')
+                        d=json.loads(r['data'])
+                        raw=base64.b64decode(d.get('blob') or b'')
+                        if not pdf_is_pdf(raw):
+                            raise ValueError('Seuls les PDF peuvent être modifiés page par page.')
+                        op=str(p.get('op') or '')
+                        before=pdf_pages_from_bytes(raw)
+                        added=[]
+                        if op=='append':
+                            files=p.get('files') or []
+                            if not isinstance(files,list) or not files:
+                                raise ValueError('Aucun fichier à ajouter.')
+                            if len(files)>50:
+                                raise ValueError('50 fichiers au maximum par ajout.')
+                            items=[(PdfSource(raw),i) for i in range(before)]
+                            for item in files:
+                                if not isinstance(item,dict): raise ValueError('Fichier invalide.')
+                                blob=str(item.get('blob') or '')
+                                if not blob: continue
+                                try:
+                                    data=base64.b64decode(blob,validate=True)
+                                except Exception:
+                                    raise ValueError('Fichier invalide.')
+                                if len(data)>500*1024*1024:
+                                    raise ValueError('Fichier limité à 500 Mo.')
+                                name=Path(str(item.get('name') or 'document')).name
+                                source,is_pdf=pdf_sources_from_upload(name,data)
+                                items.extend((source,i) for i in range(source.page_count()))
+                                added.append({'name':name,'pages':source.page_count(),
+                                              'kind':'PDF' if is_pdf else 'Image'})
+                            out=compose_pdf(items)
+                        elif op=='order':
+                            out=pdf_select(raw,p.get('order') or [])
+                        else:
+                            raise ValueError('Opération inconnue.')
+                        if len(out)>500*1024*1024:
+                            raise ValueError('Document trop volumineux.')
+                        pages=pdf_pages_from_bytes(out)
+                        d['blob']=base64.b64encode(out).decode('ascii')
+                        d['size']=len(out)
+                        d['mime']='application/pdf'
+                        d['pdf_pages']=pages
+                        if not str(d.get('filename') or '').lower().endswith('.pdf'):
+                            stem=Path(str(d.get('filename') or d.get('name') or 'document')).stem or 'document'
+                            d['filename']=stem+'.pdf'
+                        parts=d.get('pdf_parts') if isinstance(d.get('pdf_parts'),list) else []
+                        if op=='append':
+                            parts=parts+added
+                        d['pdf_parts']=parts[-40:]
+                        save_record(c,{'kind':'documents','id':ident,'sci':r['sci'],'data':d})
+                        audit(c,'Document complété' if op=='append' else 'Disposition modifiée',
+                              '%s · %d page(s).' % (str(d.get('name') or ident),pages))
+                        c.commit()
+                        return self.reply({'ok':True,'pages':pages,'size':len(out),
+                                           'first_new':before+1 if op=='append' else 1,
+                                           'added':len(added)})
+                    if path=='/api/declaration-pdf':
+                        # Dossier de déclaration : même moteur que la synthèse
+                        # annuelle, le modèle est calculé par la page Déclaration
+                        # pour rester identique à ce qui est affiché.
+                        raw,pages=build_annual_report_pdf(p.get('model'))
+                        if len(raw)>40*1024*1024:
+                            raise ValueError('Dossier trop volumineux.')
+                        name=str(p.get('filename') or 'declaration.pdf')
+                        name=re.sub(r'[^A-Za-z0-9._-]+','-',Path(name).name) or 'declaration.pdf'
+                        if not name.lower().endswith('.pdf'): name+='.pdf'
+                        return self.reply(raw,mime='application/pdf',filename=name)
                     if path=='/api/annual-report':
                         # Synthèse annuelle : le PDF est produit ici puis archivé
                         # comme un document ordinaire (aperçu, téléchargement,
@@ -7671,7 +8695,7 @@ HTML = r'''<!doctype html>
 #sidebar{width:244px;position:fixed;inset:0 auto 0 0;background:var(--side);border-right:1px solid var(--line);display:flex;flex-direction:column;z-index:30;transition:width .3s cubic-bezier(.22,.8,.25,1);overflow:hidden}.brand{height:101px;padding:25px 18px;display:flex;align-items:center;gap:12px;white-space:nowrap}.brand-mark{width:42px;height:42px;flex:none;object-fit:contain;border-radius:8px;background:#000}.brand-name{font-family:Georgia,serif;font-size:25px;letter-spacing:2px;line-height:1}.brand-caption{font-size:8px;letter-spacing:1.1px;margin-top:7px;color:var(--muted);text-transform:uppercase}.workspace{margin:0 17px 26px;border:1px solid var(--line);border-radius:8px;padding:12px;display:flex;gap:10px;align-items:center;white-space:nowrap}.workspace-icon{display:grid;place-items:center;width:30px;height:30px;background:var(--goldbg);color:var(--gold);border-radius:6px;flex:none}.nav-scroll{flex:1;overflow-y:auto;overflow-x:hidden;padding:0 14px}.nav-label{padding:0 13px;margin-bottom:10px}.nav-item{border:none;background:transparent;border-radius:7px;width:100%;display:flex;justify-content:flex-start;padding:12px 13px;gap:12px;white-space:nowrap;color:var(--muted);margin:3px 0;text-align:left;height:43px}.nav-item:hover{background:var(--panel2);color:var(--text)}.nav-item.active{color:var(--gold);background:var(--goldbg);position:relative}.nav-item.active:before{content:'';height:17px;width:2px;background:var(--gold);position:absolute;left:0;border-radius:2px}.nav-dot{width:9px;height:9px;border-radius:3px;display:inline-block;flex:none;margin:0 4px}.nav-divider{height:1px;background:var(--line);margin:19px 10px}.nav-bottom{padding:12px 14px 18px;border-top:1px solid var(--line)}.local-status{display:flex;gap:8px;align-items:center;font-size:10px;color:var(--muted);padding:13px 13px 5px;white-space:nowrap}.status-dot{height:6px;width:6px;background:var(--green);border-radius:50%;box-shadow:0 0 8px #86bea222;flex:none}.user-block{border-top:1px solid var(--line);padding:18px 22px;gap:10px;white-space:nowrap}.avatar{height:32px;width:32px;border-radius:50%;background:var(--goldbg);color:var(--gold);display:grid;place-items:center;font-family:Georgia,serif;font-size:15px;flex:none}
 #shell{margin-left:244px;transition:margin-left .3s cubic-bezier(.22,.8,.25,1)}header{height:70px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 35px;gap:15px}.breadcrumb{color:var(--muted);font-size:11px;gap:12px}.breadcrumb b{color:var(--text);font-weight:400}.search-btn{background:transparent;color:var(--muted);border:1px solid var(--line);font-size:11px;padding:7px 12px;width:218px;justify-content:flex-start}.search-btn kbd{margin-left:auto;border:1px solid var(--line);font-size:9px;padding:0 4px;border-radius:3px;color:var(--muted)}.top-date{font-size:11px;color:var(--muted)}main{max-width:1640px;margin:auto;padding:32px 35px 26px}.page-head{display:flex;align-items:center;justify-content:space-between;gap:18px;margin:0 0 27px}.page-head p{color:var(--muted);font-size:12px;margin-top:10px}.page-head .eyebrow{margin-bottom:9px}.toolbar{display:flex;gap:9px;align-items:center}.toolbar select{width:auto}.pill{border:1px solid var(--line);background:var(--panel2);border-radius:5px;padding:3px 8px;font-size:10px;display:inline-flex;align-items:center;gap:5px;white-space:nowrap}.pill.green{background:#6eaf8513;border-color:#78b28d25}.pill.red{background:#d87f7012;border-color:#d87f7025}.pill.gold{background:var(--goldbg);border-color:#c7ad7730}.notice{border:1px solid var(--line);border-left:2px solid var(--gold);border-radius:7px;padding:12px 15px;color:var(--muted);font-size:12px;background:var(--panel);margin-bottom:20px}.demo-notice{display:flex;justify-content:space-between;align-items:center;padding:8px 13px;margin-bottom:22px;font-size:11px;background:var(--goldbg);color:var(--gold);border-radius:6px;gap:10px}.demo-notice button{padding:2px 7px;color:var(--gold);font-size:10px;border-color:#c7ad7733;background:transparent}.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:23px}.kpi{border:1px solid var(--line);background:var(--panel);border-radius:var(--radius);padding:19px 20px 17px;min-width:0}.kpi-top{display:flex;align-items:center;justify-content:space-between;color:var(--muted);font-size:11px}.kpi-top svg{color:var(--gold);width:16px;height:16px}.kpi-value{font-size:29px;font-family:Georgia,serif;letter-spacing:-.5px;margin-top:13px;font-variant-numeric:tabular-nums;white-space:nowrap}.kpi-bottom{font-size:10px;color:var(--muted);margin-top:10px;display:flex;align-items:center;gap:7px}.panel{border:1px solid var(--line);background:var(--panel);border-radius:var(--radius);overflow:hidden}.panel-head{padding:21px 22px 0;display:flex;justify-content:space-between;gap:12px;align-items:center}.panel-head p{font-size:10px;color:var(--muted);margin-top:5px}.panel-body{padding:22px}.charts-grid{display:grid;grid-template-columns:1.8fr 1fr;gap:20px;margin-bottom:27px}.chart{height:238px;padding:15px 21px 8px}.chart svg{width:100%;height:100%;overflow:visible}.legend{font-size:10px;gap:13px}.legend span{display:flex;align-items:center;gap:5px}.legend i{width:7px;height:7px;border-radius:50%;display:inline-block}.donut-wrap{display:flex;align-items:center;justify-content:center;gap:30px;padding:27px 22px 24px;min-height:236px}.donut{width:164px;height:164px;border-radius:50%;display:grid;place-items:center;position:relative;flex:none}.donut:after{content:'';position:absolute;inset:19px;border-radius:50%;background:var(--panel)}.donut-label{z-index:1;text-align:center}.donut-label b{font-family:Georgia,serif;font-size:27px;font-weight:400}.donut-label small{display:block;color:var(--muted);font-size:10px;margin-top:2px}.donut-legend{display:flex;flex-direction:column;gap:18px;font-size:10px;min-width:95px}.donut-legend .amount{font-size:13px;color:var(--text);padding-left:13px;margin-top:3px}.section-title{display:flex;align-items:center;justify-content:space-between;margin:0 0 15px}.section-title small{color:var(--muted);font-size:11px;font-weight:400;margin-left:9px}.text-link{background:none;border:none;padding:3px 0;color:var(--gold);font-size:11px}.sci-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:17px;margin-bottom:27px}.sci-card{padding:20px;border:1px solid var(--line);background:var(--panel);border-radius:var(--radius);cursor:pointer;transition:border .2s,transform .2s}.sci-card:hover{transform:translateY(-3px);border-color:var(--gold)}.building-icon{width:37px;height:37px;display:grid;place-items:center;border:1px solid var(--line);border-radius:9px;background:var(--panel2);color:var(--gold);flex:none}.sci-card h3{font-size:13px}.sci-card .location{font-size:10px;color:var(--muted);margin-top:4px}.sci-stats{display:grid;grid-template-columns:1fr 1fr;margin-top:21px;gap:15px}.sci-stats label{color:var(--muted);font-size:10px;display:block}.sci-stats strong{font-size:17px;font-family:Georgia,serif;font-weight:400;display:block;margin-top:4px}.sci-card-bottom{border-top:1px solid var(--line);margin-top:18px;padding-top:13px;display:flex;align-items:center;justify-content:space-between;font-size:10px;color:var(--muted)}.mini-bar{display:flex;height:3px;gap:3px;margin-top:14px}.mini-bar i{height:3px;background:var(--green);border-radius:2px;flex:1}.lower-grid{display:grid;grid-template-columns:1.45fr 1fr;gap:20px}.table-wrap{overflow-x:auto}table{width:100%;border-collapse:collapse;white-space:nowrap}th{padding:12px 20px;color:var(--muted);text-align:left;font-size:9px;font-weight:500;letter-spacing:.7px;text-transform:uppercase;border-bottom:1px solid var(--line)}td{padding:14px 20px;border-bottom:1px solid var(--line);font-size:11px}tbody tr:last-child td{border-bottom:0}tbody tr:hover{background:var(--panel2)}td strong{font-size:11px;font-weight:500}.cell-sub{display:block;color:var(--muted);font-size:10px;margin-top:3px}.align-right{text-align:right}.actions{display:flex;justify-content:flex-end;gap:3px}.actions button{padding:4px 6px;min-width:27px;background:transparent;border:0}.actions button svg{width:14px;height:14px}.task-line{padding:15px 21px;display:flex;align-items:center;gap:12px;border-bottom:1px solid var(--line)}.task-line:last-child{border-bottom:0}.task-date{background:var(--panel2);border:1px solid var(--line);border-radius:7px;min-width:39px;text-align:center;padding:4px 6px;font-size:15px;line-height:1.2}.task-date small{font-size:8px;color:var(--muted);display:block;margin-top:3px;text-transform:uppercase}.task-line h3{font-size:11px}.task-line p{font-size:10px;color:var(--muted);margin-top:4px}.task-line .task-right{margin-left:auto}.footer{display:flex;justify-content:space-between;color:var(--muted);font-size:9px;padding:24px 1px 0;gap:12px}.tabs{display:flex;gap:20px;overflow:auto;border-bottom:1px solid var(--line);margin:-2px 0 23px}.tab{background:transparent;border:none;border-radius:0;color:var(--muted);font-size:12px;white-space:nowrap;padding:12px 1px 14px;position:relative}.tab.active{color:var(--gold)}.tab.active:after{content:'';position:absolute;bottom:0;left:0;right:0;height:2px;background:var(--gold)}.tab:hover{background:transparent;color:var(--text)}.filters{display:flex;gap:9px;margin-bottom:17px;align-items:center}.filters input{max-width:310px}.filters select{width:auto;max-width:220px}.empty{padding:48px 22px;text-align:center;color:var(--muted);display:flex;flex-direction:column;align-items:center;justify-content:center}.empty>svg{height:32px;width:32px;color:var(--gold);margin-bottom:12px}.empty h3{color:var(--text);margin-bottom:7px}.empty p{max-width:440px}.empty button{margin-top:18px;padding:10px 18px;border-radius:8px;font-weight:600;box-shadow:0 6px 18px rgba(0,0,0,.18)}.empty button svg{width:16px;height:16px;color:currentColor;margin:0}.settings-grid{display:grid;grid-template-columns:1fr 1fr;gap:20px}.setting-row{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:17px 0;border-bottom:1px solid var(--line)}
 .setting-row>div{flex:1 1 auto;min-width:0}
-.setting-row>.toggle,.setting-row>.theme-choice{flex:0 0 auto}.setting-row:first-child{padding-top:0}.setting-row:last-child{padding-bottom:0;border:0}.setting-row p{font-size:11px;color:var(--muted);margin-top:5px}.theme-choice{display:flex;gap:9px}.theme-choice button.active{border-color:var(--gold);color:var(--gold);background:var(--goldbg)}.order-item{padding:10px 12px;border:1px solid var(--line);border-radius:7px;margin-top:8px;display:flex;align-items:center;gap:9px;background:var(--panel2);font-size:12px}.order-item .actions{margin-left:auto}.order-item.locked{color:var(--muted);background:transparent;border-style:dashed}.toggle{height:23px;width:41px;flex:0 0 auto;border-radius:20px;background:var(--line);padding:3px;position:relative;border:0}.toggle:after{content:'';height:17px;width:17px;position:absolute;left:3px;top:3px;border-radius:50%;background:var(--muted);transition:left .2s}.toggle.on{background:var(--gold)}.toggle.on:after{left:21px;background:#fff}.info-grid{display:grid;grid-template-columns:1fr 1fr;gap:22px}.info-item label{color:var(--muted);font-size:11px;display:block;margin-bottom:5px}.info-item span{font-size:13px}.audit-list{max-height:310px;overflow:auto}.audit-line{padding:12px 0;border-bottom:1px solid var(--line);font-size:11px;display:flex;gap:16px}.audit-line time{color:var(--muted);min-width:115px}.color-dot{width:8px;height:8px;display:inline-block;border-radius:50%;margin-right:6px}.property-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}.property-card{padding:21px}.property-cover{height:100px;border-radius:8px;margin-bottom:17px;background:linear-gradient(130deg,var(--goldbg),var(--panel2));position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center;color:var(--gold)}.property-cover svg{height:65px;width:65px;opacity:.65}.property-cover.has-photo{height:auto;aspect-ratio:16/5}.property-cover img.property-cover-img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;z-index:0}.property-cover .pill{position:absolute;top:10px;right:10px;background:var(--panel);z-index:2}.property-metrics{display:flex;justify-content:space-between;margin-top:18px;border-top:1px solid var(--line);padding-top:15px}.property-metrics small{display:block;color:var(--muted);font-size:10px;margin-bottom:4px}.property-metrics strong{font-size:17px;font-family:Georgia,serif;font-weight:400}.compact-note{color:var(--muted);font-size:11px;margin-top:15px}.balance-card{padding:24px;background:linear-gradient(120deg,var(--goldbg),var(--panel));border:1px solid #c7ad7735;border-radius:12px;margin-bottom:20px}.balance-card strong{font-size:33px;font-family:Georgia,serif;font-weight:400}.annual-bars{display:flex;align-items:end;gap:6px;height:90px}.progress{height:5px;background:var(--line);border-radius:5px;overflow:hidden}.progress i{height:100%;display:block;background:var(--gold);border-radius:5px}.search-results{display:flex;flex-direction:column;gap:7px;max-height:420px;overflow:auto}.search-result{padding:13px;text-align:left;justify-content:flex-start}.search-result small{display:block;color:var(--muted)}.modal-backdrop{position:fixed;inset:0;background:#060906b8;backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;z-index:80;padding:22px;animation:fade .15s ease}.modal{background:var(--panel);border:1px solid var(--line);border-radius:15px;width:600px;max-width:100%;max-height:91vh;display:flex;flex-direction:column;box-shadow:var(--shadow)}.modal.wide{width:780px}.modal.doc-preview-modal{width:980px}.modal-head{display:flex;align-items:center;justify-content:space-between;padding:21px 25px;border-bottom:1px solid var(--line)}.modal-head h2{font-family:Georgia,serif;font-size:23px;font-weight:400}.modal-content{padding:23px 25px;overflow:auto}.modal-footer{display:flex;justify-content:flex-end;gap:9px;padding:17px 25px;border-top:1px solid var(--line)}.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:17px}.field{display:flex;flex-direction:column;gap:7px}.field.full{grid-column:1/-1}.field label{font-size:11px;color:var(--muted)}input,select,textarea{background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:10px 11px;width:100%;min-width:0}textarea{resize:vertical;min-height:75px}input[type=color]{height:40px;padding:5px}input[type=checkbox]{width:15px;height:15px;accent-color:var(--gold);flex:none;cursor:pointer}input:focus,select:focus,textarea:focus{border-color:var(--gold);outline:1px solid #c7ad7733}.checks{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin:10px 0 20px}.check{display:flex;align-items:center;gap:9px;font-size:12px;border:1px solid var(--line);border-radius:7px;padding:10px;cursor:pointer}.file-drop{border:1px dashed var(--gold);border-radius:8px;padding:19px;margin:12px 0;background:var(--goldbg);color:var(--gold)}.file-drop input{margin-top:12px}.error{padding:10px 12px;border-radius:6px;color:var(--red);background:#df8e8311;font-size:12px;margin-top:15px;white-space:pre-wrap}.toast-container{position:fixed;right:25px;bottom:23px;display:flex;flex-direction:column;gap:8px;z-index:110}.toast{padding:13px 18px;background:var(--panel2);border:1px solid var(--line);border-left:3px solid var(--green);border-radius:8px;box-shadow:var(--shadow);max-width:420px;font-size:12px;animation:slide .2s ease}.toast.error-toast{border-left-color:var(--red)}.loading{padding:120px 20px;text-align:center;color:var(--muted)}.user-lock{margin-left:auto;display:inline-flex;color:var(--muted)}body.collapsed #sidebar{width:76px}body.collapsed #shell{margin-left:76px}body.collapsed .brand{padding:25px 17px}body.collapsed .brand-text,body.collapsed .nav-text,body.collapsed .workspace,body.collapsed .nav-label,body.collapsed .user-details,body.collapsed .user-lock,body.collapsed .user-block svg,body.collapsed .local-status{display:none}body.collapsed .nav-scroll{padding:0 10px}body.collapsed .nav-bottom{padding:12px 10px}body.collapsed .nav-item{padding:12px 17px}body.collapsed .user-block{padding:18px 0;justify-content:center}body.collapsed .nav-divider{margin:18px 8px}body.collapsed .nav-item svg{flex:none}#modal:empty{display:none}.amount{font-variant-numeric:tabular-nums}.mobile-title{display:none}@keyframes fade{from{opacity:0}to{opacity:1}}@keyframes slide{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}@media(min-width:1550px){main{padding:40px 45px}.kpi-value{font-size:34px}.chart{height:260px}.donut-wrap{min-height:258px}.donut{width:180px;height:180px}}
+.setting-row>.toggle,.setting-row>.theme-choice{flex:0 0 auto}.setting-row:first-child{padding-top:0}.setting-row:last-child{padding-bottom:0;border:0}.setting-row p{font-size:11px;color:var(--muted);margin-top:5px}.theme-choice{display:flex;gap:9px}.theme-choice button.active{border-color:var(--gold);color:var(--gold);background:var(--goldbg)}.order-item{padding:10px 12px;border:1px solid var(--line);border-radius:7px;margin-top:8px;display:flex;align-items:center;gap:9px;background:var(--panel2);font-size:12px}.order-item .actions{margin-left:auto}.order-item.locked{color:var(--muted);background:transparent;border-style:dashed}.toggle{height:23px;width:41px;flex:0 0 auto;border-radius:20px;background:var(--line);padding:3px;position:relative;border:0}.toggle:after{content:'';height:17px;width:17px;position:absolute;left:3px;top:3px;border-radius:50%;background:var(--muted);transition:left .2s}.toggle.on{background:var(--gold)}.toggle.on:after{left:21px;background:#fff}.info-grid{display:grid;grid-template-columns:1fr 1fr;gap:22px}.info-item label{color:var(--muted);font-size:11px;display:block;margin-bottom:5px}.info-item span{font-size:13px}.audit-list{max-height:310px;overflow:auto}.audit-line{padding:12px 0;border-bottom:1px solid var(--line);font-size:11px;display:flex;gap:16px}.audit-line time{color:var(--muted);min-width:115px}.color-dot{width:8px;height:8px;display:inline-block;border-radius:50%;margin-right:6px}.property-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}.property-card{padding:21px}.property-cover{height:100px;border-radius:8px;margin-bottom:17px;background:linear-gradient(130deg,var(--goldbg),var(--panel2));position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center;color:var(--gold)}.property-cover svg{height:65px;width:65px;opacity:.65}.property-cover.has-photo{height:auto;aspect-ratio:16/5}.property-cover img.property-cover-img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;z-index:0}.property-cover .pill{position:absolute;top:10px;right:10px;background:var(--panel);z-index:2}.property-metrics{display:flex;justify-content:space-between;margin-top:18px;border-top:1px solid var(--line);padding-top:15px}.property-metrics small{display:block;color:var(--muted);font-size:10px;margin-bottom:4px}.property-metrics strong{font-size:17px;font-family:Georgia,serif;font-weight:400}.compact-note{color:var(--muted);font-size:11px;margin-top:15px}.balance-card{padding:24px;background:linear-gradient(120deg,var(--goldbg),var(--panel));border:1px solid #c7ad7735;border-radius:12px;margin-bottom:20px}.balance-card strong{font-size:33px;font-family:Georgia,serif;font-weight:400}.annual-bars{display:flex;align-items:end;gap:6px;height:90px}.progress{height:5px;background:var(--line);border-radius:5px;overflow:hidden}.progress i{height:100%;display:block;background:var(--gold);border-radius:5px}.search-results{display:flex;flex-direction:column;gap:7px;max-height:420px;overflow:auto}.search-result{padding:13px;text-align:left;justify-content:flex-start}.search-result small{display:block;color:var(--muted)}.modal-backdrop{position:fixed;inset:0;background:#060906b8;backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;z-index:80;padding:22px;animation:fade .15s ease}.modal{background:var(--panel);border:1px solid var(--line);border-radius:15px;width:600px;max-width:100%;max-height:91vh;display:flex;flex-direction:column;box-shadow:var(--shadow);animation:modalIn .22s cubic-bezier(.22,1,.36,1)}@keyframes modalIn{from{opacity:0;transform:translateY(10px) scale(.985)}to{opacity:1;transform:none}}.modal.wide{width:780px}.modal.doc-preview-modal{width:980px}.modal-head{display:flex;align-items:center;justify-content:space-between;padding:21px 25px;border-bottom:1px solid var(--line)}.modal-head h2{font-family:Georgia,serif;font-size:23px;font-weight:400}.modal-content{padding:23px 25px;overflow:auto}.modal-footer{display:flex;justify-content:flex-end;gap:9px;padding:17px 25px;border-top:1px solid var(--line)}.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:17px}.field{display:flex;flex-direction:column;gap:7px}.field.full{grid-column:1/-1}.field label{font-size:11px;color:var(--muted)}input,select,textarea{background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:10px 11px;width:100%;min-width:0}textarea{resize:vertical;min-height:75px}input[type=color]{height:40px;padding:5px}input[type=checkbox]{width:15px;height:15px;accent-color:var(--gold);flex:none;cursor:pointer}input:focus,select:focus,textarea:focus{border-color:var(--gold);outline:1px solid #c7ad7733}.checks{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin:10px 0 20px}.check{display:flex;align-items:center;gap:9px;font-size:12px;border:1px solid var(--line);border-radius:7px;padding:10px;cursor:pointer}.file-drop{border:1px dashed var(--gold);border-radius:8px;padding:19px;margin:12px 0;background:var(--goldbg);color:var(--gold)}.file-drop input{margin-top:12px}.error{padding:10px 12px;border-radius:6px;color:var(--red);background:#df8e8311;font-size:12px;margin-top:15px;white-space:pre-wrap}.toast-container{position:fixed;right:25px;bottom:23px;display:flex;flex-direction:column;gap:8px;z-index:110}.toast{padding:13px 18px;background:var(--panel2);border:1px solid var(--line);border-left:3px solid var(--green);border-radius:8px;box-shadow:var(--shadow);max-width:420px;font-size:12px;animation:slide .2s ease}.toast.error-toast{border-left-color:var(--red)}.loading{padding:120px 20px;text-align:center;color:var(--muted)}.user-lock{margin-left:auto;display:inline-flex;color:var(--muted)}body.collapsed #sidebar{width:76px}body.collapsed #shell{margin-left:76px}body.collapsed .brand{padding:25px 17px}body.collapsed .brand-text,body.collapsed .nav-text,body.collapsed .workspace,body.collapsed .nav-label,body.collapsed .user-details,body.collapsed .user-lock,body.collapsed .user-block svg,body.collapsed .local-status{display:none}body.collapsed .nav-scroll{padding:0 10px}body.collapsed .nav-bottom{padding:12px 10px}body.collapsed .nav-item{padding:12px 17px}body.collapsed .user-block{padding:18px 0;justify-content:center}body.collapsed .nav-divider{margin:18px 8px}body.collapsed .nav-item svg{flex:none}#modal:empty{display:none}.amount{font-variant-numeric:tabular-nums}.mobile-title{display:none}@keyframes fade{from{opacity:0}to{opacity:1}}@keyframes slide{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}@media(min-width:1550px){main{padding:40px 45px}.kpi-value{font-size:34px}.chart{height:260px}.donut-wrap{min-height:258px}.donut{width:180px;height:180px}}
 @media(max-width:1180px){#sidebar{width:218px}#shell{margin-left:218px}main{padding:26px 24px}header{padding:0 24px}.kpi{padding:16px}.kpi-value{font-size:25px}.donut-wrap{gap:17px;padding:28px 15px}.donut{width:140px;height:140px}.sci-grid{gap:12px}.sci-card{padding:16px}.top-date{display:none}.charts-grid{grid-template-columns:1.5fr 1fr}.property-grid{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:950px){.kpis{grid-template-columns:repeat(2,1fr)}.charts-grid,.lower-grid,.settings-grid{grid-template-columns:1fr}.sci-grid{grid-template-columns:1fr}.donut-wrap{min-height:225px}.sci-stats{grid-template-columns:1fr 1fr}.chart{height:250px}.page-head{align-items:flex-start}.toolbar{flex-wrap:wrap;justify-content:flex-end}.search-btn{width:150px}.search-btn kbd{display:none}.sci-card-bottom{margin-top:14px}}
 @media(max-width:640px){#sidebar{width:76px}#shell{margin-left:76px}.brand{padding:25px 17px}.brand-text,.nav-text,.workspace,.nav-label,.user-details,.user-lock,.user-block svg,.local-status{display:none}.nav-scroll{padding:0 10px}.nav-bottom{padding:12px 10px}.nav-item{padding:12px 17px}.user-block{padding:18px 0;justify-content:center}.nav-divider{margin:18px 8px}header{padding:0 15px;height:60px}.breadcrumb{display:none}.search-btn{width:145px}main{padding:22px 14px}.page-head{flex-direction:column;gap:16px}h1{font-size:29px}.toolbar{justify-content:flex-start}.kpis{gap:10px}.kpi{padding:13px}.kpi-value{font-size:24px}.kpi-top{font-size:10px}.kpi-bottom{font-size:9px}.property-grid{grid-template-columns:1fr}.form-grid,.info-grid{grid-template-columns:1fr}.checks{grid-template-columns:1fr}.modal-backdrop{padding:10px}.modal-content{padding:18px}.modal-head{padding:17px}.footer{flex-direction:column}.legend{gap:7px;font-size:9px}.filters{flex-wrap:wrap}.panel-head{padding:18px 16px 0}.panel-body{padding:17px}.chart{padding:15px 10px}.demo-notice{align-items:flex-start} .setting-row{flex-wrap:wrap}.tabs{gap:17px}}
@@ -7705,6 +8729,21 @@ tfoot td{border-top:1px solid var(--line);border-bottom:0;background:var(--panel
 .decl-cases .setting-row h3{font-size:12px}
 .decl-cases .setting-row p{font-size:10px}
 .decl-cases .setting-row:first-child{padding-top:0}
+/* Le montant reste lisible à côté du bouton de copie, et les boutons de copie
+   ne prennent de place que là où ils servent. */
+.decl-copy{font-size:10px;padding:3px 7px;border-radius:5px;border-color:var(--line);background:transparent;color:var(--muted);gap:4px;white-space:nowrap}
+.decl-copy svg{width:11px;height:11px}
+.decl-copy:hover{color:var(--gold);border-color:var(--gold)}
+.decl-amount{display:block;font-variant-numeric:tabular-nums;font-weight:600;margin-top:1px}
+.decl-copy-cell{width:1%;white-space:nowrap;text-align:right;padding-left:6px}
+.decl-line-num{width:52px;white-space:nowrap;color:var(--muted)}
+.balance-table tr.decl-total-row td{font-weight:600;background:var(--panel2)}
+.balance-table tr.decl-dont-row td{color:var(--muted);font-style:italic}
+.balance-table tr.decl-zero-row td{opacity:.55}
+.decl-prov{background:none;border:0;padding:0;color:var(--muted);font-size:9px;cursor:pointer;text-align:left;text-decoration:underline dotted var(--line);text-underline-offset:2px}
+.decl-prov:hover{color:var(--gold);text-decoration-color:var(--gold)}
+.balance-2072 td,.balance-2072 th{white-space:nowrap}
+.balance-2072 td:nth-child(2){white-space:normal;min-width:220px}
 /* Bilan : une colonne par adresse distincte, montants arrondis à l'euro. */
 .balance-table th,.balance-table td{padding:7px 10px;font-size:11px;vertical-align:top}
 .balance-table thead th{font-size:8px;letter-spacing:.5px}
@@ -7737,12 +8776,34 @@ tfoot td{border-top:1px solid var(--line);border-bottom:0;background:var(--panel
 .rail-bar-value{grid-area:value;font-variant-numeric:tabular-nums}
 .rail-bar-track{grid-area:track;height:5px;border-radius:3px;background:var(--line);overflow:hidden}
 .rail-bar-track i{display:block;height:100%;background:var(--red);border-radius:3px}.sci-cell{display:inline-flex;align-items:center;gap:7px;white-space:nowrap}.col-society{width:40px;text-align:center;padding-left:8px;padding-right:4px}.sci-dot{display:inline-block;width:11px;height:11px;border-radius:50%;background:var(--gold);border:2px solid var(--panel);box-shadow:0 0 0 1px var(--line);vertical-align:middle}tr.doc-row{cursor:pointer}.doc-preview-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:10px 14px;background:var(--panel2);border:1px solid var(--line);border-radius:9px;margin-bottom:14px}.doc-preview-zoom-bar{display:flex;align-items:center;gap:7px;flex-wrap:wrap}.doc-preview-zoom-bar input[type=range]{width:130px;padding:0;accent-color:var(--gold)}.doc-preview-viewport{height:64vh;min-height:390px;background:var(--bg);border:1px solid var(--line);border-radius:10px;overflow:auto;position:relative;padding:0;overscroll-behavior:contain}
-/* Le zoom agrandit réellement le contenu : la scène grandit avec le facteur,
-   le contenu est aligné en haut à gauche pour que le débordement soit
-   atteignable au défilement (un contenu centré verticalement coupait le haut). */
-.doc-preview-stage{margin:0 auto;width:calc(100% * var(--doc-zoom,1));height:calc(100% * var(--doc-zoom,1));min-width:120px;min-height:120px;display:flex;align-items:flex-start;justify-content:center;flex:none;padding:16px;box-sizing:border-box}
-.doc-preview-stage.doc-preview-sheet-stage{width:100%;height:100%;min-height:100%;align-items:flex-start}
-.doc-preview-stage.doc-preview-pdf{width:calc(100% * var(--doc-zoom,1));height:calc(100% * var(--doc-zoom,1));align-items:flex-start;justify-content:flex-start}.doc-preview-img{max-width:100%;max-height:100%;width:100%;height:100%;object-fit:contain;display:block;border-radius:6px;box-shadow:0 8px 28px rgba(0,0,0,.28)}.doc-preview-frame{width:calc(100% / var(--doc-zoom,1));height:calc(100% / var(--doc-zoom,1));border:0;border-radius:6px;background:#fff;transform:scale(var(--doc-zoom,1));transform-origin:top left}
+/* Aperçu : la zone de visualisation garde sa taille, seul le document zoome.
+   La scène occupe toujours toute la zone ; le document est un enfant
+   dimensionné par le facteur de zoom et centré par margin:auto — quand il
+   dépasse, la marge auto tombe à zéro et le défilement reste possible. */
+.doc-preview-stage{width:100%;height:100%;min-width:100%;min-height:100%;display:flex;padding:16px;box-sizing:border-box}
+.doc-preview-stage>*{margin:auto}
+.doc-preview-doc{flex:none;width:calc(100% * var(--doc-zoom,1));height:calc(100% * var(--doc-zoom,1));display:flex;align-items:center;justify-content:center;will-change:width,height}
+.doc-preview-sheet-stage{align-items:flex-start}
+.doc-preview-img{max-width:100%;max-height:100%;width:100%;height:100%;object-fit:contain;display:block;border-radius:6px;box-shadow:0 8px 28px rgba(0,0,0,.28)}
+.doc-preview-frame{display:block;width:100%;height:100%;border:0;border-radius:6px;background:#fff;box-shadow:0 8px 28px rgba(0,0,0,.28)}
+/* Import de pages et disposition : grille de vignettes numérotées. */
+.modal.doc-arrange-modal{width:min(1080px,96vw)}
+.doc-pages-add{border:1px dashed var(--line);border-radius:10px;padding:13px 15px;display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:16px;background:var(--panel2);transition:border-color .18s,background .18s}
+.doc-pages-add:hover{border-color:var(--gold)}
+.doc-pages{display:grid;grid-template-columns:repeat(auto-fill,minmax(142px,1fr));gap:14px;max-height:58vh;overflow:auto;padding:2px}
+.doc-page-card{margin:0;border:1px solid var(--line);border-radius:9px;background:var(--panel2);padding:7px;display:flex;flex-direction:column;gap:7px;cursor:grab;position:relative;transition:border-color .18s,box-shadow .18s,opacity .16s,transform .16s}
+.doc-page-card:hover{border-color:var(--gold);box-shadow:0 6px 18px rgba(0,0,0,.24)}
+.doc-page-card.dragging{opacity:.45}
+.doc-page-card.leaving{opacity:0;transform:scale(.9)}
+.doc-page-frame{aspect-ratio:1/1.414;background:#fff;border-radius:5px;overflow:hidden;position:relative}
+.doc-page-frame iframe{width:100%;height:100%;border:0;display:block;pointer-events:none}
+.doc-page-cap{display:flex;align-items:center;justify-content:space-between;gap:6px}
+.doc-page-num{font-size:10px;letter-spacing:.6px;text-transform:uppercase;color:var(--muted);font-weight:600}
+.doc-page-btns{display:flex;gap:3px}
+.doc-page-btns button{padding:3px 6px;border-radius:5px;font-size:11px;line-height:1;background:transparent;border-color:transparent;color:var(--muted)}
+.doc-page-btns button:hover{background:var(--panel);border-color:var(--line);color:var(--text)}
+.doc-page-btns button[data-doc-page-del]:hover{color:var(--red)}
+.doc-page-btns button:disabled{opacity:.3}
 /* Le texte des feuilles de calcul était en pixels fixes : le zoom ne changeait
    que le cadre. Ces tailles suivent désormais le facteur de zoom. */
 .doc-preview-sheet th{font-size:calc(9px * var(--doc-zoom,1));padding:calc(12px * var(--doc-zoom,1)) calc(20px * var(--doc-zoom,1))}
@@ -8381,31 +9442,55 @@ function photoCropShow(src){
     img.onerror=()=>{photoCrop.error=true;notify('Image illisible : utilisez un fichier PNG, JPEG, WebP ou GIF.',true);photoCropShow('');};
     img.src=src;
 }
-let docPreviewId='',docPreviewZoom=1,docPreviewSheets=[];
+let docPreviewId='',docPreviewZoom=1,docPreviewSheets=[],docPreviewFrame=0,docPreviewStartPage=1,docPreviewMeta=null;
 function docPreviewClampZoom(z){let n=Number(z);if(!Number.isFinite(n)||n<=0)n=1;return Math.min(4,Math.max(0.25,Math.round(n*100)/100));}
-function docPreviewStageZoom(z){
-    let vp=$('#doc-preview-viewport'),stage=$('#doc-preview-stage');
-    let next=docPreviewClampZoom(z);
-    docPreviewZoom=next;
-    // Un seul facteur pilote réellement l'affichage : les feuilles de calcul
-    // (tailles en calc() de --doc-zoom), les images (scène dimensionnée) et les
-    // PDF (iframe mise à l'échelle) suivent tous ce facteur.
-    if(stage)stage.style.setProperty('--doc-zoom',String(next));
-    if(vp&&stage){
-        // Le point du document placé au centre de la zone d'aperçu avant le zoom
-        // reste au centre après redimensionnement : le document ne dérive plus
-        // vers la droite et reste dans la zone d'aperçu.
-        let sw=Math.max(1,stage.offsetWidth),sh=Math.max(1,stage.offsetHeight);
-        let cx=(vp.scrollLeft+vp.clientWidth/2)/sw,cy=(vp.scrollTop+vp.clientHeight/2)/sh;
-        let apply=()=>{
-            if(!document.body.contains(stage))return;
-            vp.scrollLeft=Math.max(0,cx*stage.offsetWidth-vp.clientWidth/2);
-            vp.scrollTop=Math.max(0,cy*stage.offsetHeight-vp.clientHeight/2);
-        };
-        if(typeof requestAnimationFrame==='function')requestAnimationFrame(apply);else apply();
+// Point du document (0..1) placé au centre de la zone d'aperçu : il reste sous
+// le curseur pendant tout le zoom, d'où un agrandissement centré.
+function docPreviewAnchor(x,y){
+    let vp=$('#doc-preview-viewport'),doc=$('#doc-preview-doc');
+    if(!vp||!doc)return null;
+    if(!doc.getBoundingClientRect)return null;
+    let dr=doc.getBoundingClientRect(),vr=vp.getBoundingClientRect();
+    if(!dr.width||!dr.height)return null;
+    let cx=(x===undefined||x===null)?vr.left+vr.width/2:x;
+    let cy=(y===undefined||y===null)?vr.top+vr.height/2:y;
+    return {x:(cx-dr.left)/dr.width,y:(cy-dr.top)/dr.height};
+}
+function docPreviewApply(zoom,anchor){
+    let vp=$('#doc-preview-viewport'),stage=$('#doc-preview-stage'),doc=$('#doc-preview-doc');
+    docPreviewZoom=zoom;
+    if(stage)stage.style.setProperty('--doc-zoom',String(zoom));
+    if(vp&&doc&&anchor){
+        let dr=doc.getBoundingClientRect(),vr=vp.getBoundingClientRect();
+        vp.scrollLeft=Math.max(0,vp.scrollLeft+(dr.left+anchor.x*dr.width)-(vr.left+vr.width/2));
+        vp.scrollTop=Math.max(0,vp.scrollTop+(dr.top+anchor.y*dr.height)-(vr.top+vr.height/2));
     }
-    let range=$('#doc-zoom-range');if(range)range.value=String(Math.round(next*100));
-    let label=$('#doc-zoom-label');if(label)label.textContent='×'+next.toFixed(2).replace('.',',');
+    let range=$('#doc-zoom-range');if(range)range.value=String(Math.round(zoom*100));
+    let label=$('#doc-zoom-label');if(label)label.textContent='×'+zoom.toFixed(2).replace('.',',');
+}
+// opts.instant pour le curseur (le glissement est déjà continu), sinon la
+// valeur est atteinte en une interpolation courte et régulière.
+function docPreviewStageZoom(z,opts={}){
+    let next=docPreviewClampZoom(z);
+    let anchor=docPreviewAnchor(opts.x,opts.y);
+    if(docPreviewFrame){cancelAnimationFrame(docPreviewFrame);docPreviewFrame=0;}
+    let reduced=window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    let from=docPreviewZoom,animate=!opts.instant&&typeof requestAnimationFrame==='function'&&!reduced;
+    if(!animate||Math.abs(next-from)<0.005){docPreviewApply(next,anchor);return;}
+    let now=()=>(window.performance&&performance.now)?performance.now():Date.now();
+    let t0=now(),dur=170;
+    let step=()=>{
+        let k=Math.min(1,(now()-t0)/dur),e=1-Math.pow(1-k,3);
+        docPreviewApply(from+(next-from)*e,anchor);
+        docPreviewFrame=k<1?requestAnimationFrame(step):0;
+    };
+    docPreviewFrame=requestAnimationFrame(step);
+}
+function docPreviewPdfUrl(p,page){
+    let base=p.view_url||('/api/document-view?id='+encodeURIComponent(p.id));
+    let hash='#toolbar=0&navpanes=0&statusbar=0&view=Fit';
+    if(page&&Number(page)>1)hash='#page='+Number(page)+'&toolbar=0&navpanes=0&statusbar=0&view=Fit';
+    return base+(base.includes('?')?'&':'?')+'token='+encodeURIComponent(TOKEN)+hash;
 }
 function docPreviewSheetHtml(index){
     let sheet=docPreviewSheets[index];
@@ -8424,8 +9509,8 @@ function docPreviewToolbar(p){
     return `<div class="doc-preview-toolbar"><div class="row gap8 wrap">${p.category?`<span class="pill gold">${esc(p.category)}</span>`:''}${p.filename?`<span class="sub">${esc(p.filename)}</span>`:''}${p.size?`<span class="muted">${fmtBytes(p.size)}</span>`:''}${p.date?`<span class="muted">${date(p.date)}</span>`:''}</div><div class="doc-preview-zoom-bar"><button type="button" data-doc-zoom="out" title="Réduire" aria-label="Réduire le zoom">−</button><input id="doc-zoom-range" type="range" min="25" max="400" step="5" value="100" aria-label="Niveau de zoom de l’aperçu"><span id="doc-zoom-label" class="pill">×1,00</span><button type="button" data-doc-zoom="100" title="Revenir à ×1" aria-label="Revenir au zoom par défaut">×1</button><button type="button" data-doc-zoom="in" title="Agrandir" aria-label="Agrandir le zoom">+</button></div></div>`;
 }
 function docPreviewBody(p){
-    if(p.preview_type==='image')return docPreviewToolbar(p)+`<div class="doc-preview-viewport" id="doc-preview-viewport"><div class="doc-preview-stage" id="doc-preview-stage" style="--doc-zoom:1"><img class="doc-preview-img" src="${p.data_url}" alt="Aperçu de ${esc(p.name)}"></div></div>`;
-    if(p.preview_type==='pdf')return docPreviewToolbar(p)+`<div class="doc-preview-viewport" id="doc-preview-viewport"><div class="doc-preview-stage doc-preview-pdf" id="doc-preview-stage" style="--doc-zoom:1"><iframe class="doc-preview-frame" src="${esc(p.view_url||('/api/document-view?id='+encodeURIComponent(p.id)))}&token=${encodeURIComponent(TOKEN)}" title="Aperçu PDF de ${esc(p.name)}"></iframe></div></div>`;
+    if(p.preview_type==='image')return docPreviewToolbar(p)+`<div class="doc-preview-viewport" id="doc-preview-viewport"><div class="doc-preview-stage" id="doc-preview-stage" style="--doc-zoom:1"><div class="doc-preview-doc" id="doc-preview-doc"><img class="doc-preview-img" src="${p.data_url}" alt="Aperçu de ${esc(p.name)}"></div></div></div>`;
+    if(p.preview_type==='pdf')return docPreviewToolbar(p)+`<div class="doc-preview-viewport" id="doc-preview-viewport"><div class="doc-preview-stage" id="doc-preview-stage" style="--doc-zoom:1"><div class="doc-preview-doc" id="doc-preview-doc"><iframe class="doc-preview-frame" src="${esc(docPreviewPdfUrl(p,docPreviewStartPage))}" title="Aperçu PDF de ${esc(p.name)}"></iframe></div></div></div>`;
     if(p.preview_type==='xlsx'){
         docPreviewSheets=(p.sheets||[]).map(s=>({name:s.name,rows:s.rows,active:false}));
         if(!docPreviewSheets.length)return docPreviewToolbar(p)+'<p class="sub">Aucune feuille lisible dans ce classeur.</p>';
@@ -8443,23 +9528,199 @@ function docPreviewBody(p){
     if(p.preview_type==='note')return docPreviewToolbar(p)+`<div class="doc-preview-viewport" id="doc-preview-viewport"><div class="doc-preview-stage doc-preview-sheet-stage" id="doc-preview-stage" style="--doc-zoom:1"><div class="doc-preview-sheet"><p class="sub">Cette fiche ne contient aucune pièce jointe.</p>${p.notes?`<p style="white-space:pre-wrap;margin-top:12px">${esc(p.notes)}</p>`:''}</div></div></div>`;
     return docPreviewToolbar(p)+`<div class="doc-preview-viewport" id="doc-preview-viewport"><div class="doc-preview-stage doc-preview-sheet-stage" id="doc-preview-stage" style="--doc-zoom:1"><div class="doc-preview-sheet"><p>Ce format ne peut pas être affiché directement dans Dominis.</p><p class="sub">Le fichier reste disponible au téléchargement.</p><button type="button" class="primary" data-document="${esc(p.id)}">${icon('download')} Télécharger le fichier</button></div></div></div>`;
 }
-async function documentPreview(id){
+async function documentPreview(id,opts={}){
     let r=rec(id);
     if(!r||r.kind!=='documents')return;
     docPreviewId=id;
+    docPreviewStartPage=Math.max(1,Number(opts.page)||1);
     let folderOptions=`<option value="">Sans dossier</option>${sciDocFolders(r.sci).map(f=>`<option value="${esc(f.id)}" ${resolveDocFolder(r)===f.id?'selected':''}>${esc(f.name)}</option>`).join('')}`;
-    let footer=`<select id="doc-preview-folder" style="width:auto;min-width:190px;margin-right:auto" aria-label="Dossier de classement du document">${folderOptions}</select><button type="button" data-action="close-modal">Fermer</button>${r.size?`<button type="button" class="primary" data-document="${esc(r.id)}">${icon('download')} Télécharger</button>`:''}`;
+    // Deux actions propres aux PDF : ajouter des pages à la suite, et changer
+    // l'ordre ou retirer une page. Le téléchargement renvoie toujours
+    // l'assemblage complet, pages ajoutées comprises.
+    let isPdf=(r.mime==='application/pdf')||/\.pdf$/i.test(r.filename||'');
+    let pdfActions=isPdf?`<button type="button" data-doc-append-btn title="Importer un PDF ou une image à la suite de ce document">${icon('plus')} Ajouter au document</button><button type="button" data-doc-arrange title="Réordonner ou supprimer des pages">${icon('grid')} Modifier la disposition</button>`:'';
+    let footer=`<select id="doc-preview-folder" style="width:auto;min-width:190px;margin-right:auto" aria-label="Dossier de classement du document">${folderOptions}</select>${pdfActions}<button type="button" data-action="close-modal">Fermer</button>${r.size?`<button type="button" class="primary" data-document="${esc(r.id)}">${icon('download')} Télécharger</button>`:''}`;
     openModal('Aperçu · '+r.name,`<div id="doc-preview-body"><div class="loading" style="padding:70px 20px">Chargement de l’aperçu…</div></div>`,footer,true);
     $('#modal .modal')?.classList.add('doc-preview-modal');
     try{
         let p=await (await api('document-preview?id='+encodeURIComponent(id))).json();
+        docPreviewMeta=p;
         let body=$('#doc-preview-body');
         if(body)body.innerHTML=docPreviewBody(p);
-        docPreviewStageZoom(1);
+        docPreviewStageZoom(1,{instant:true});
     }catch(e){
         let body=$('#doc-preview-body');
         if(body)body.innerHTML=`<div class="error">${esc(e.message)}</div>`;
     }
+}
+// Ctrl + molette (ou pincement) : le zoom suit le curseur au lieu du centre.
+function docPreviewWheel(ev){
+    if(!(ev.ctrlKey||ev.metaKey))return;
+    let vp=$('#doc-preview-viewport');
+    if(!vp||!vp.contains(ev.target))return;
+    ev.preventDefault();
+    let step=ev.deltaY<0?1.12:1/1.12;
+    docPreviewStageZoom(docPreviewZoom*step,{instant:true,x:ev.clientX,y:ev.clientY});
+}
+function docAppendPick(){
+    let id=docPreviewId;
+    if(!id)return;
+    let input=document.createElement('input');
+    input.type='file';
+    input.multiple=true;
+    input.accept='application/pdf,image/jpeg,image/png,.pdf,.jpg,.jpeg,.png';
+    input.style.position='fixed';
+    input.style.left='-10000px';
+    document.body.appendChild(input);
+    input.addEventListener('change',()=>{
+        let files=[...input.files];
+        input.remove();
+        if(files.length)docAppendFiles(id,files);
+    });
+    input.click();
+}
+async function docAppendFiles(id,files){
+    let btn=$('[data-doc-append-btn]'),old=btn?btn.innerHTML:'';
+    if(btn){btn.disabled=true;btn.innerHTML='Ajout en cours…';}
+    try{
+        let payload=[];
+        for(let file of files){
+            if(file.size>500*1024*1024)throw new Error('Fichier limité à 500 Mo : '+file.name);
+            payload.push({name:file.name,blob:await fileBase64(file)});
+        }
+        let res=await (await api('document-pages',{id,op:'append',files:payload})).json();
+        await load();
+        closeModal(true);
+        await documentPreview(id,{page:res.first_new||1});
+        notify(`${res.added||files.length} fichier${(res.added||files.length)>1?'s':''} ajouté${(res.added||files.length)>1?'s':''} · ${res.pages} page${res.pages>1?'s':''} au total.`);
+    }catch(e){
+        if(btn){btn.disabled=false;btn.innerHTML=old;}
+        if($('#modal-error'))modalError(e);else notify(e.message,true);
+    }
+}
+function docPageUrl(id,page){return `/api/document-page?id=${encodeURIComponent(id)}&page=${page}&token=${encodeURIComponent(TOKEN)}#toolbar=0&navpanes=0&statusbar=0&view=Fit`;}
+function docPagesRenumber(){
+    let cards=$$('#doc-pages .doc-page-card');
+    cards.forEach((c,i)=>{
+        let num=c.querySelector('.doc-page-num');
+        if(num)num.textContent='Page '+(i+1);
+        let prev=c.querySelector('[data-doc-page-move="-1"]'),next=c.querySelector('[data-doc-page-move="1"]');
+        if(prev)prev.disabled=i===0;
+        if(next)next.disabled=i===cards.length-1;
+    });
+}
+function docPagesChanged(){
+    let order=$$('#doc-pages .doc-page-card').map(c=>Number(c.dataset.page));
+    return order.length!==docPageOrder.length||order.some((v,i)=>v!==docPageOrder[i]);
+}
+// Animation FLIP : chaque vignette rejoint sa nouvelle place au lieu de sauter.
+function docPagesFlip(mutate){
+    let grid=$('#doc-pages');
+    if(!grid)return;
+    let before=new Map([...grid.children].map(c=>[c,c.getBoundingClientRect()]));
+    mutate();
+    [...grid.children].forEach(c=>{
+        let a=before.get(c);
+        if(!a)return;
+        let b=c.getBoundingClientRect();
+        let dx=a.left-b.left,dy=a.top-b.top;
+        if(!dx&&!dy)return;
+        c.style.transition='none';
+        c.style.transform=`translate(${dx}px,${dy}px)`;
+        requestAnimationFrame(()=>{
+            c.style.transition='transform .22s cubic-bezier(.22,1,.36,1)';
+            c.style.transform='';
+        });
+    });
+    docPagesRenumber();
+    let save=$('#save-doc-pages');
+    if(save)save.disabled=!docPagesChanged();
+    if(docPagesChanged())modalDirty=true;
+}
+function docPageCard(id,page,index,thumb=true){
+    let frame=thumb?`<div class="doc-page-frame"><iframe loading="lazy" title="Aperçu de la page ${index}" src="${docPageUrl(id,page)}"></iframe></div>`:`<div class="doc-page-frame" style="display:grid;place-items:center;background:var(--panel);color:var(--muted);font-size:12px">${page}</div>`;
+    return `<figure class="doc-page-card" draggable="true" data-page="${page}">${frame}<figcaption class="doc-page-cap"><span class="doc-page-num">Page ${index}</span><span class="doc-page-btns"><button type="button" data-doc-page-move="-1" title="Déplacer avant" aria-label="Déplacer la page ${index} avant">←</button><button type="button" data-doc-page-move="1" title="Déplacer après" aria-label="Déplacer la page ${index} après">→</button><button type="button" data-doc-page-del title="Supprimer cette page" aria-label="Supprimer la page ${index}">${icon('trash')}</button></span></figcaption></figure>`;
+}
+async function docArrangeModal(id){
+    let r=rec(id);
+    if(!r)return;
+    let info;
+    try{info=await (await api('document-info?id='+encodeURIComponent(id))).json();}
+    catch(e){return notify(e.message,true);}
+    let count=Number(info.pages)||0;
+    if(count<1)return notify('Aucune page lisible dans ce document.',true);
+    docPageOrder=Array.from({length:count},(_,i)=>i+1);
+    let thumb=count<=60;
+    let grid=`${thumb?'':'<p class="sub" style="margin-bottom:12px">Ce document contient '+count+' pages : au-delà de 60, l’aperçu des vignettes est désactivé mais l’ordre et la suppression restent possibles.</p>'}<div class="doc-pages" id="doc-pages">${docPageOrder.map((p,i)=>docPageCard(id,p,i+1,thumb)).join('')}</div>`;
+    openModal('Modifier la disposition',`<p class="sub" style="margin-bottom:14px">Glissez une vignette pour la déplacer, ou utilisez les flèches. La croix retire la page du document. Rien n’est appliqué avant l’enregistrement.</p>${grid}`,`<button data-action="close-modal">Annuler</button><button class="primary" id="save-doc-pages" disabled>${icon('check')} Enregistrer la disposition</button>`,true);
+    $('#modal .modal')?.classList.add('doc-arrange-modal');
+    modalDirty=false;
+    let area=$('#doc-pages');
+    let dragCard=null;
+    area.addEventListener('dragstart',ev=>{
+        let card=ev.target.closest('.doc-page-card');
+        if(!card)return;
+        dragCard=card;
+        card.classList.add('dragging');
+        if(ev.dataTransfer){ev.dataTransfer.effectAllowed='move';try{ev.dataTransfer.setData('text/plain',card.dataset.page);}catch(e){}}
+    });
+    area.addEventListener('dragend',()=>{
+        if(dragCard)dragCard.classList.remove('dragging');
+        dragCard=null;
+        docPagesFlip(()=>{});
+    });
+    area.addEventListener('dragover',ev=>{
+        if(!dragCard)return;
+        ev.preventDefault();
+        let target=ev.target.closest('.doc-page-card');
+        if(!target||target===dragCard)return;
+        let box=target.getBoundingClientRect();
+        let after=(ev.clientY-box.top)/box.height>0.5;
+        area.insertBefore(dragCard,after?target.nextSibling:target);
+    });
+    area.addEventListener('drop',ev=>{if(dragCard)ev.preventDefault();});
+    area.addEventListener('click',ev=>{
+        let del=ev.target.closest('[data-doc-page-del]');
+        if(del){
+            let card=del.closest('.doc-page-card');
+            if(area.children.length<=1)return notify('Le document doit conserver au moins une page.',true);
+            card.classList.add('leaving');
+            setTimeout(()=>{
+                let box=card.getBoundingClientRect();
+                docPagesFlip(()=>card.remove());
+            },150);
+            return;
+        }
+        let move=ev.target.closest('[data-doc-page-move]');
+        if(move){
+            let card=move.closest('.doc-page-card'),dir=Number(move.dataset.docPageMove);
+            let sibling=dir<0?card.previousElementSibling:card.nextElementSibling;
+            if(!sibling)return;
+            docPagesFlip(()=>{
+                if(dir<0)area.insertBefore(card,sibling);
+                else area.insertBefore(sibling,card);
+            });
+        }
+    });
+    docPagesRenumber();
+    $('#save-doc-pages').onclick=async()=>{
+        let btn=$('#save-doc-pages'),old=btn.innerHTML;
+        btn.disabled=true;
+        btn.innerHTML='Enregistrement…';
+        try{
+            let order=$$('#doc-pages .doc-page-card').map(c=>Number(c.dataset.page));
+            let res=await (await api('document-pages',{id,op:'order',order})).json();
+            await load();
+            modalDirty=false;
+            closeModal(true);
+            await documentPreview(id);
+            notify('Disposition enregistrée · '+res.pages+' page'+(res.pages>1?'s':'')+'.');
+        }catch(e){
+            btn.disabled=false;
+            btn.innerHTML=old;
+            modalError(e);
+        }
+    };
 }
 function newDocFolderModal(parentId){
     parentId=parentId||'';
@@ -9499,38 +10760,53 @@ function balanceTable(sections,withAmort,totalLabel){
 // reporte une case 4BA, 4BB, 4BC ou 4BD sur sa 2042.
 // Une SCI à l'IS dépose la 2065 et la liasse 2033 : la page présente alors le
 // bilan comptable, et rien d'autre.
+// --- Déclaration : 2072-S, annexes A1/A2 et 2044 des associés --------------
+// La page ne présente plus un bilan « maison » : elle reproduit les documents
+// que la SCI dépose réellement. Une SCI à l'IR dépose la 2072-S (cadres I à IV)
+// avec l'annexe A1 (cadre VII, lignes 1 à 23, une colonne par immeuble) et
+// l'annexe A2 (cadre IX, une colonne par associé). Chaque associé recopie
+// ensuite sa quote-part sur sa 2044 (rubrique 110, lignes 111 à 115) puis
+// reporte une case 4BA, 4BB, 4BC ou 4BD sur sa 2042. Une SCI à l'IS dépose la
+// 2065 et la liasse 2033 : c'est alors le bilan comptable qui est présenté.
 let declTab='checks';
 const DECL_IR_TABS=[['checks','À vérifier'],['main','2072-S'],['a1','Annexe A1'],['a2','Annexe A2'],['p2044','2044 des associés']];
+// Une SCI à l'IS ne dépose ni 2072-S ni 2044 : la page n'affiche donc que la
+// liasse 2033 et la 2065, sans les contrôles propres au régime des particuliers.
 const DECL_IS_TABS=[['is','2065 · 2033-A/B']];
 // Numérotation exacte de l'annexe 2072-S-A1 (cadre VII). Elle diffère de celle
-// de la 2072-C : pas de ligne « immeubles spéciaux » ni « amortissement ».
+// de la 2072-C : pas de ligne « immeubles spéciaux » ni « amortissement », le
+// revenu de l'immeuble est en 18, le revenu net en 21 et le montant à répartir
+// en 23.
 const DECL_A1_LINES=[
     [1,'Montant brut des fermages ou des loyers encaissés','recette'],
-    [2,'Dépenses par nature déductibles incombant normalement à la société et mises par convention à la charge des locataires','recette'],
-    [3,'Recettes brutes diverses. Subventions ANAH, indemnités d’assurance','recette'],
-    [4,'Recettes qu’aurait pu produire la location des propriétés réservées ou mises gratuitement à disposition','recette'],
+    [2,'Dépenses à la charge des locataires (convention)','recette'],
+    [3,'Recettes brutes diverses (subventions, indemnités d’assurance)','recette'],
+    [4,'Recettes qu’aurait pu produire la location des propriétés réservées','recette'],
     [5,'TOTAL DES RECETTES (lignes 1 + 2 + 3 + 4)','total'],
     [6,'Frais d’administration et de gestion','charge'],
     [7,'Autres frais de gestion non déductibles pour leur montant réel','charge'],
     [8,'Primes d’assurance','charge'],
     [9,'Dépenses de réparation, d’entretien et d’amélioration','charge'],
-    ['9bis','dont dépenses de travaux de rénovation énergétique (classe E, F ou G vers A à D)','dont'],
+    ['9bis','dont travaux de rénovation énergétique (E, F, G vers A à D)','dont'],
     [10,'Charges récupérables non récupérées au départ du locataire','charge'],
     [11,'Indemnités d’éviction, frais de relogement','charge'],
-    [12,'Impositions (y compris la CRL payée au titre de l’année considérée)','charge'],
-    [13,'Provisions pour charges de copropriété payées au titre de l’année','charge'],
-    [14,'Régularisation des provisions pour charges déduites au titre de l’année antérieure','deduction'],
+    [12,'Impositions (y compris la CRL payée au titre de l’année)','charge'],
+    [13,'Provisions pour charges de copropriété payées','charge'],
+    [14,'Régularisation des provisions déduites l’année antérieure (à déduire)','deduction'],
     [15,'Montant de la déduction spécifique','charge'],
-    [16,'TOTAL DES DÉDUCTIONS, FRAIS ET CHARGES (6+7+8+9+10+11+12+13−14+15)','total'],
-    [17,'Intérêts des emprunts contractés pour l’acquisition, la réparation, l’amélioration ou la conservation des immeubles','charge'],
-    [18,'REVENU (+) OU DÉFICIT (−) DE L’IMMEUBLE (lignes 5 − 16 − 17)','total'],
+    [16,'TOTAL DES DÉDUCTIONS, FRAIS ET CHARGES','total'],
+    [17,'Intérêts des emprunts','charge'],
+    [18,'REVENU (+) OU DÉFICIT (−) DE L’IMMEUBLE (5 − 16 − 17)','total'],
     [19,'Réintégration du supplément de déduction','charge'],
-    [20,'Rémunérations et avantages en nature attribués aux associés','charge'],
-    [21,'REVENU NET (+) OU DÉFICIT (−) (lignes 18 + 19 − 20)','total'],
-    [22,'Revenus ou déficits relatifs aux parts détenues dans d’autres sociétés immobilières non passibles de l’impôt sur les sociétés','charge'],
-    [23,'REVENU NET (+) OU DÉFICIT (−) À RÉPARTIR ENTRE LES ASSOCIÉS (lignes 21 + 22)','total']
+    [20,'Rémunérations et avantages en nature des associés','charge'],
+    [21,'REVENU NET (+) OU DÉFICIT (−) (18 + 19 − 20)','total'],
+    [22,'Revenus ou déficits des parts détenues dans d’autres SCI','charge'],
+    [23,'À RÉPARTIR ENTRE LES ASSOCIÉS (21 + 22)','total']
 ];
 const DECL_A1_LABELS=Object.fromEntries(DECL_A1_LINES.map(([n,l])=>[String(n),l]));
+const DECL_A1_KINDS=Object.fromEntries(DECL_A1_LINES.map(([n,l,k])=>[String(n),k]));
+// Seules les lignes de charge et de recette se saisissent : les totaux sont
+// calculés et « 9 bis » est un « dont » déjà compris dans la ligne 9.
 const DECL_SELECTABLE=DECL_A1_LINES.filter(l=>!['total','dont'].includes(l[2]));
 function balanceNorm(v){return String(v||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,' ').trim();}
 function balanceAddressKey(p){
@@ -9554,74 +10830,67 @@ function balanceBuildings(s){
     });
     return [...groups.values()].sort((a,b)=>a.label.localeCompare(b.label,'fr'));
 }
-// Libellé de la colonne « Immeuble » de la trésorerie : le bien rattaché,
-// puis le bail et enfin l'adresse de l'appel de loyer. Jamais inventé.
+// Libellé de la colonne « Immeuble » de la trésorerie : le bien rattaché, puis
+// le bail et enfin l'adresse de l'appel de loyer. Jamais inventé.
 function entryBuilding(r){
     if(!r)return null;
-    if(r.property_id){let p=rec(r.property_id);if(p)return p;}
-    if(r.call_id){let c=rec(r.call_id);let l=c&&c.lease_id?rec(c.lease_id):null;if(l&&l.property_id){let p=rec(l.property_id);if(p)return p;}}
+    if(r.property_id&&rec(r.property_id))return rec(r.property_id);
+    if(r.call_id){let c=rec(r.call_id);if(c&&c.lease_id)r={...r,lease_id:c.lease_id};}
+    if(r.lease_id){
+        let l=rec(r.lease_id);
+        if(l&&l.property_id&&rec(l.property_id))return rec(l.property_id);
+        if(l&&String(l.address||'').trim())return {address:l.address};
+    }
     return null;
 }
-function entryBuildingLabel(r){
-    let p=entryBuilding(r);
-    if(!p)return '<span class="muted">Non affecté</span>';
-    return `<span class="sci-cell"><span class="sci-dot" style="background:${sciColor(r.sci)}" aria-hidden="true"></span>${esc(p.name)}</span>`;
-}
-function declEntryBuilding(r){
-    let p=entryBuilding(r);
-    if(!p)return '';
-    return balanceAddressKey(p)||'__sans_adresse__';
-}
-// Le classement est mémorisé par société et par catégorie. La clé de réglage est
-// propre à la 2072-S : un classement enregistré pour l'ancienne numérotation
-// 2072-C n'est jamais réutilisé de travers.
+function entryBuildingLabel(r){let b=entryBuilding(r);return b?(String(b.address||'').trim()||'Adresse non renseignée'):'';}
+function declEntryBuilding(r){let k=balanceAddressKey(entryBuilding(r));return k||'__none__';}
 function balanceLineMap(s){
-    let all=S.settings.decl_line_map;
-    let m=all&&typeof all==='object'?all[s.id]:null;
-    return m&&typeof m==='object'?m:{};
+    let all=S.settings.decl_line_map||{};
+    let map=all[s.id]||{};
+    return (map&&typeof map==='object')?map:{};
 }
-// Lecture du libellé : proposition, jamais décision. Ce qui n'est pas reconnu
-// reste « à classer » et sort des totaux officiels.
+// Classement automatique : une catégorie de trésorerie se rattache à une ligne
+// de l'annexe A1. Le classement manuel prime toujours sur cette proposition.
 function declAutoClass(r){
-    let isRec=r.direction==='Recette';
+    let isRec=String(r.direction||'')==='Recette';
     let txt=balanceNorm(r.category)+' '+balanceNorm(r.label);
-    if(/apport|remboursement (d )?associe|depot de garantie|compte courant/.test(txt))return {line:'finance',group:'finance'};
-    // « Emprunt (capital + intérêts) » mélange une charge déductible et un
-    // remboursement de capital : la ligne 17 n'accepte que les intérêts.
-    if(/capital/.test(txt)&&/interet/.test(txt))return {line:'ventiler',group:'ventiler'};
-    if(/interet|assurance emprunteur/.test(txt))return {line:17,group:'charge'};
-    if(/emprunt|echeance|capital restant|amortissement du capital/.test(txt))return {line:'ventiler',group:'ventiler'};
-    if(/regularisation|regularisee?/.test(txt))return {line:14,group:'deduction'};
-    if(/copropriet|syndic/.test(txt))return {line:13,group:'charge'};
-    if(/assurance|axa|maif|mma|pno|generali|allianz|groupama|aviva/.test(txt))return {line:8,group:'charge'};
-    if(/travaux|entretien|reparation|bricoman|leroy|castorama|maintenance|renovation|ravalement|chaudiere|toiture/.test(txt))return {line:9,group:'charge'};
-    if(/taxe|foncier|impot|imposition|cfe|crl|ordures/.test(txt))return {line:12,group:'charge'};
-    if(/frais de gestion|honoraire|comptable|avocat|procedure|gestion|tenue de compte|frais bancaire|banque|commission|agios/.test(txt))return {line:6,group:'charge'};
-    if(/recuperable/.test(txt))return {line:10,group:'charge'};
-    if(/eviction|relogement|indemnite/.test(txt))return {line:11,group:'charge'};
-    if(isRec&&/loyer|fermage|recette|location/.test(txt))return {line:1,group:'recette'};
-    if(isRec&&/provision/.test(txt))return {line:2,group:'recette'};
+    // Opérations de financement : ni recette ni charge pour la 2072-S.
+    if(/apport|depot de garantie|compte courant|avance .*associe|remboursement .*associe|remboursement associe/.test(txt))return {line:'finance',group:'finance'};
+    // Une échéance d'emprunt mélange capital et intérêts : la ligne 17 n'accepte
+    // que les intérêts, donc tant que les deux ne sont pas séparés la dépense
+    // reste « à ventiler » au lieu d'être comptée en entier comme déductible.
+    if(/capital|principal|echeance|remboursement/.test(txt))return {line:'ventiler',group:'ventiler'};
+    if(/interet/.test(txt)||/assurance emprunteur/.test(txt))return {line:17,group:'charge'};
+    if(/emprunt/.test(txt))return {line:'ventiler',group:'ventiler'};
+    if(/regularisation/.test(txt))return {line:14,group:'deduction'};
+    if(/provision/.test(txt)&&isRec)return {line:2,group:'recette'};
+    if(/provision|copropriete|syndic/.test(txt))return {line:13,group:'charge'};
+    if(/eviction|relogement/.test(txt))return {line:11,group:'charge'};
+    if(/impot|taxe|foncier|cfe|crl|ordures/.test(txt))return {line:12,group:'charge'};
+    if(/assurance/.test(txt))return {line:8,group:'charge'};
+    if(/travaux|entretien|reparation|renovation|ravalement|chaudiere|toiture|peinture|menuiserie|plomberie|electricite/.test(txt))return {line:9,group:'charge'};
+    if(/frais|honoraire|comptable|avocat|gestion|banque|agios|commission/.test(txt))return {line:6,group:'charge'};
+    if(isRec&&/loyer|fermage|location/.test(txt))return {line:1,group:'recette'};
     if(isRec)return {line:3,group:'recette'};
     return {line:'classer',group:'classer'};
 }
 function declClassOf(r,map){
     let cat=String(r.category||'').trim()||'Autre';
     let ov=map&&Object.prototype.hasOwnProperty.call(map,cat)?map[cat]:null;
-    if(ov!==null&&ov!==undefined&&ov!==''){
-        if(ov==='finance')return {line:'finance',group:'finance',manual:true};
-        if(ov==='ventiler')return {line:'ventiler',group:'ventiler',manual:true};
-        if(ov==='classer')return {line:'classer',group:'classer',manual:true};
-        if(String(ov)==='9bis')return {line:9,group:'charge',manual:true,dont:'9bis'};
-        let n=Number(ov);
-        if(n>=1&&n<=4)return {line:n,group:'recette',manual:true};
+    if(ov!==null&&ov!==undefined&&String(ov).trim()!==''){
+        let v=String(ov);
+        if(v==='finance')return {line:'finance',group:'finance',manual:true};
+        if(v==='ventiler')return {line:'ventiler',group:'ventiler',manual:true};
+        if(v==='classer')return {line:'classer',group:'classer',manual:true};
+        if(v==='9bis')return {line:9,group:'charge',manual:true,dont:'9bis'};
+        let n=Number(v);
         if(n===14)return {line:14,group:'deduction',manual:true};
-        if((n>=6&&n<=15)||n===17||n===19||n===20||n===22)return {line:n,group:'charge',manual:true};
+        if(n>=1&&n<=4)return {line:n,group:'recette',manual:true};
+        if(DECL_A1_LABELS[n]&&!['total','dont'].includes(DECL_A1_KINDS[n]))return {line:n,group:'charge',manual:true};
     }
     return declAutoClass(r);
 }
-// Modèle de la déclaration : chaque mouvement est rattaché à une ligne officielle
-// et à un immeuble. Les montants restent exacts ici ; l'arrondi à l'euro est fait
-// au rendu, colonne par colonne, puis additionné (jamais l'inverse).
 function declModel(s,period){
     let buildings=balanceBuildings(s);
     let map=balanceLineMap(s);
@@ -9658,25 +10927,21 @@ function declModel(s,period){
     return {buildings,lines,cats,dontBy,entries,unassigned,unclassified,toSplit,financing};
 }
 function declCols(m){
-    let cols=m.buildings.map(b=>({key:b.key,label:b.label,short:b.label.length>30?b.label.slice(0,28)+'…':b.label}));
+    let cols=m.buildings.map(b=>({key:b.key,label:b.label,short:b.label.length>28?b.label.slice(0,26)+'…':b.label}));
     if(m.unassigned.length)cols.push({key:'__none__',label:'Non affecté',short:'Non affecté'});
     return cols;
 }
-// Arrondi à l'euro de chaque colonne, puis seulement ensuite addition.
+// Arrondi à l'euro de chaque colonne, puis seulement ensuite addition : la
+// déclaration en ligne reçoit des euros entiers.
 function declCells(m,n,keys){
     let L=m.lines.get(n);
     return keys.map(k=>Math.round(L&&L.by[k]?L.by[k]:0));
 }
-function declDontCells(m,token,keys){
-    let D=m.dontBy.get(token);
-    return keys.map(k=>Math.round(D&&D.by[k]?D.by[k]:0));
-}
 function declExact(m,n){
-    if(n==='9bis'){let D=m.dontBy.get('9bis');return D?D.exact:0;}
+    if(String(n)==='9bis'){let D=m.dontBy.get('9bis');return D?D.exact:0;}
     let L=m.lines.get(n);
     return L?L.exact:0;
 }
-// Toutes les lignes de l'annexe A1, calculées dans l'ordre officiel.
 function declA1Rows(m,keys){
     let rowsOut={};
     let get=n=>rowsOut[String(n)]?rowsOut[String(n)]:keys.map(()=>0);
@@ -9684,7 +10949,8 @@ function declA1Rows(m,keys){
     [1,2,3,4].forEach(n=>put(n,declCells(m,n,keys)));
     put(5,keys.map((_,i)=>get(1)[i]+get(2)[i]+get(3)[i]+get(4)[i]));
     [6,7,8,9,10,11,12,13,14,15].forEach(n=>put(n,declCells(m,n,keys)));
-    put('9bis',declDontCells(m,'9bis',keys));
+    let D=m.dontBy.get('9bis');
+    put('9bis',keys.map(k=>Math.round(D&&D.by[k]?D.by[k]:0)));
     put(16,keys.map((_,i)=>get(6)[i]+get(7)[i]+get(8)[i]+get(9)[i]+get(10)[i]+get(11)[i]+get(12)[i]+get(13)[i]-get(14)[i]+get(15)[i]));
     put(17,declCells(m,17,keys));
     put(18,keys.map((_,i)=>get(5)[i]-get(16)[i]-get(17)[i]));
@@ -9696,22 +10962,15 @@ function declA1Rows(m,keys){
     return rowsOut;
 }
 function declSum(cells){return (cells||[]).reduce((a,b)=>a+b,0);}
-// Cadre I du formulaire principal : les cinq cases R1 à R5.
 function declMainCases(m,keys){
     let r=declA1Rows(m,keys);
     let sum=n=>declSum(r[String(n)]||[]);
-    return {
-        R1:sum(5)+sum(19)-sum(20)+sum(22),
-        R2:sum(9),
-        R3:sum(16),
-        R4:sum(17),
-        R5:sum(23)
-    };
+    return {R1:sum(5)+sum(19)-sum(20)+sum(22),R2:sum(9),R3:sum(16),R4:sum(17),R5:sum(23)};
 }
-function declCopyBtn(value,label,extra={}){
-    let v=Math.round(Number(value)||0);
-    let txt=v?money(v,0):'<span class="muted">—</span>';
-    return `<button type="button" class="decl-cell ${extra.cls||''}" data-decl-copy="${v}" data-decl-label="${esc(label)}" title="Copier ${v} € — ${esc(label)}">${txt}</button>`;
+function declMoney(v,d=0){return (Number(v)||0)===0?'—':money(v,d);}
+function declCopyBtn(value,label){
+    let n=Math.round(Number(value)||0);
+    return `<button type="button" class="decl-copy" data-decl-copy="${n}" data-decl-label="${esc(label)}" title="Copier ${esc(label)} dans la déclaration en ligne" aria-label="Copier ${esc(label)}">${icon('file')} Copier</button>`;
 }
 async function declCopyAmount(v,label){
     let txt=String(Math.round(Number(v)||0));
@@ -9719,96 +10978,33 @@ async function declCopyAmount(v,label){
     try{if(navigator.clipboard&&navigator.clipboard.writeText){await navigator.clipboard.writeText(txt);ok=true;}}catch(e){}
     if(!ok){
         try{
-            let ta=document.createElement('textarea');
-            ta.value=txt;ta.setAttribute('readonly','');ta.style.position='fixed';ta.style.opacity='0';
-            document.body.appendChild(ta);ta.select();
-            ok=document.execCommand&&document.execCommand('copy');
-            ta.remove();
+            let ta=document.createElement('textarea');ta.value=txt;ta.setAttribute('readonly','');
+            ta.style.position='fixed';ta.style.left='-10000px';document.body.appendChild(ta);
+            ta.select();document.execCommand('copy');ta.remove();ok=true;
         }catch(e){}
     }
-    notify((label?label+' : ':'Montant copié : ')+txt+' €'+(ok?' — collé dans la déclaration en ligne.':''));
+    notify((label?label+' : ':'Montant ')+txt+(ok?' — copié dans le presse-papiers':''),!ok);
 }
-// Chaque montant affiché dit d'où il vient et peut être ouvert.
+// Provenance : ce que contient réellement une ligne, mouvement par mouvement.
 function declProvenance(m,n){
-    let list=[...m.cats.values()].filter(c=>String(c.line)===String(n));
-    if(!list.length)return '';
-    return list.sort((a,b)=>b.exact-a.exact).map(c=>`${esc(c.cat)} · ${c.count} mouvement${c.count>1?'s':''}`).join(' · ');
-}
-function declLineRowsHtml(m,rowsOut,keys,opts={}){
-    let body='';
-    DECL_A1_LINES.forEach(([n,label,kind])=>{
-        let cells=rowsOut[String(n)]||keys.map(()=>0);
-        let total=declSum(cells);
-        let isDont=kind==='dont';
-        let isTotal=kind==='total';
-        let cls=isTotal?'balance-subtotal':isDont?'balance-dont':'';
-        let prov=declProvenance(m,n);
-        let name=isTotal?`<strong>${esc(label)}</strong>`:esc(label);
-        let labelHtml=prov?`<button type="button" class="decl-line-label" data-decl-detail="${n}">${name}</button>`:name;
-        body+=`<tr class="${cls}"><td>${labelHtml}${prov?`<span class="cell-sub">${prov}</span>`:''}</td>
-        <td class="align-right"><span class="pill ${isTotal?'gold':''}">${n}</span></td>
-        ${cells.map((v,i)=>{
-            if(!v)return `<td class="align-right muted">—</td>`;
-            if(isDont)return `<td class="align-right muted">${money(v,0)}</td>`;
-            let colLabel=(opts.cols&&opts.cols[i])?opts.cols[i].label:'total';
-            return `<td class="align-right">${declCopyBtn(v,`Ligne ${n} · ${colLabel}`)}</td>`;
-        }).join('')}
-        <td class="align-right">${total?declCopyBtn(total,`Ligne ${n} · total`,{cls:'decl-total'}):'<span class="muted">—</span>'}</td></tr>`;
+    let list=[];let key=String(n);
+    m.entries.forEach(r=>{
+        let cls=declClassOf(r,balanceLineMap(currentSCI()||{}));
+        if(cls.group==='finance'||cls.group==='ventiler'||cls.group==='classer')return;
+        let hit=String(cls.line)===key||(key==='9bis'&&cls.dont==='9bis');
+        if(hit)list.push(r);
     });
-    return body;
-}
-function declA1Head(cols){
-    return `<thead><tr><th style="min-width:280px">Cadre VII · annexe 2072-S-A1</th><th class="align-right" style="min-width:56px">Ligne</th>${cols.map(c=>`<th class="align-right" title="${esc(c.label)}">${esc(c.short)}</th>`).join('')}<th class="align-right">Total</th></tr></thead>`;
-}
-// --- Modales --------------------------------------------------------------
-function declMappingModal(){
-    let s=currentSCI();if(!s)return;
-    let map=balanceLineMap(s);
-    let cats=[...new Set(rows('entries',s.id).filter(r=>entryDate(r)).map(r=>String(r.category||'').trim()||'Autre'))].sort((a,b)=>a.localeCompare(b,'fr'));
-    let options=(sel)=>{
-        let out=`<option value="" ${sel===''?'selected':''}>Classement automatique</option>`;
-        out+=`<option value="finance" ${sel==='finance'?'selected':''}>Hors formulaire · opération de financement</option>`;
-        out+=`<option value="ventiler" ${sel==='ventiler'?'selected':''}>À ventiler (capital d’emprunt, non déductible)</option>`;
-        out+=`<option value="classer" ${sel==='classer'?'selected':''}>Non classé (exclu des totaux)</option>`;
-        DECL_SELECTABLE.forEach(([n,label])=>{
-            out+=`<option value="${n}" ${String(sel)===String(n)?'selected':''}>Ligne ${n} · ${esc(label.length>72?label.slice(0,70)+'…':label)}</option>`;
-        });
-        return out;
-    };
-    let automap={};
-    rows('entries',s.id).filter(r=>entryDate(r)).forEach(r=>{let c=String(r.category||'').trim()||'Autre';if(!automap[c])automap[c]=declAutoClass(r);});
-    let body=cats.map(c=>{
-        let ov=map&&Object.prototype.hasOwnProperty.call(map,c)?map[c]:'';
-        let auto=automap[c]||{line:'classer'};
-        return `<div class="col-config-item" style="align-items:flex-start"><div style="flex:1;min-width:0"><strong>${esc(c)}</strong><span class="cell-sub">Lecture automatique : ${auto.line==='finance'?'hors formulaire':auto.line==='ventiler'?'à ventiler':auto.line==='classer'?'non classé':'ligne '+auto.line}</span></div><select data-decl-map="${esc(c)}" aria-label="Ligne de ${esc(c)}" style="max-width:330px">${options(ov)}</select></div>`;
-    }).join('');
-    openModal('Classer les catégories · annexe 2072-S-A1',`<p class="sub" style="margin-bottom:12px">Chaque catégorie de trésorerie est rattachée à une ligne officielle de l’annexe A1. Un classement explicite l’emporte sur la lecture automatique du libellé. Ce qui reste non classé n’est pas compté dans les totaux et bloque la déclaration.</p><div class="col-config-list">${body||'<p class="sub">Aucune catégorie sur cet exercice.</p>'}</div>`,`<button data-action="close-modal">Annuler</button><button class="primary" data-action="decl-map-save">Enregistrer le classement</button>`);
-}
-function declAssignModal(){
-    let s=currentSCI();if(!s)return;
-    let period=declPeriod(s),m=declModel(s,period);
-    if(!m.unassigned.length)return notify('Tous les mouvements de la période sont rattachés à un immeuble.');
-    let props=rows('properties',s.id);
-    let opts=(sel)=>`<option value="">Sans immeuble (non affecté)</option>`+props.map(p=>`<option value="${esc(p.id)}" ${sel===p.id?'selected':''}>${esc(p.name)} · ${esc(p.address||'adresse non renseignée')}</option>`).join('');
-    let guess=props.length===1?props[0].id:'';
-    let body=m.unassigned.slice(0,80).map(r=>`<tr><td>${date(r.date)}<span class="cell-sub">${esc(truncate(r.label,48))}</span></td><td class="align-right">${money(Math.abs(entrySigned(r)),2)}</td><td><select data-decl-assign="${esc(r.id)}" aria-label="Immeuble de ${esc(truncate(r.label,30))}" style="min-width:220px">${opts(guess)}</select></td></tr>`).join('');
-    openModal('Affecter les mouvements · colonnes de l’annexe A1',`<p class="sub" style="margin-bottom:12px">${m.unassigned.length} mouvement${m.unassigned.length>1?'s':''} de la période n’${m.unassigned.length>1?'ont':'a'} pas d’immeuble. L’annexe A1 demande une colonne par immeuble : sans affectation, ces montants restent en « Non affecté ».</p><div class="table-wrap"><table><thead><tr><th>Mouvement</th><th class="align-right">Montant</th><th>Immeuble</th></tr></thead><tbody>${body}</tbody></table></div>`,`<button data-action="close-modal">Annuler</button><button class="primary" data-action="decl-assign-save">Affecter</button>`);
+    return list;
 }
 function declDetailModal(n){
     let s=currentSCI();if(!s)return;
     let period=declPeriod(s),m=declModel(s,period);
-    let keys=declCols(m).map(c=>c.key);
-    let list=[...m.cats.values()].filter(c=>String(c.line)===String(n)).map(c=>c.cat);
-    let moves=m.entries.filter(r=>list.includes(String(r.category||'').trim()||'Autre'));
-    let total=r2(moves.reduce((a,r)=>a+r2(Math.abs(entrySigned(r))),0));
-    let rowsHtml=moves.sort((a,b)=>String(a.date).localeCompare(String(b.date))).map(r=>{
-        let b=m.buildings.find(x=>x.key===declEntryBuilding(r));
-        return `<tr><td>${date(r.date)}</td><td>${esc(r.label||'')}</td><td>${esc(String(r.category||'').trim()||'Autre')}</td><td>${b?esc(b.label):'<span class="muted">Non affecté</span>'}</td><td class="align-right">${money(Math.abs(entrySigned(r)),2)}</td></tr>`;
-    }).join('');
-    openModal(`Ligne ${n} · ${truncate(DECL_A1_LABELS[String(n)]||'',70)}`,`<p class="sub" style="margin-bottom:12px">${moves.length} mouvement${moves.length>1?'s':''} · ${money(total,2)} au total. Ces montants sont la source exacte de la ligne ${n}.</p><div class="table-wrap"><table><thead><tr><th>Date</th><th>Libellé</th><th>Catégorie</th><th>Immeuble</th><th class="align-right">Montant</th></tr></thead><tbody>${rowsHtml||'<tr><td colspan="5" class="muted">Aucun mouvement.</td></tr>'}</tbody></table></div>`,`<button data-action="close-modal">Fermer</button>`);
+    let list=declProvenance(m,n);
+    let total=r2(list.reduce((a,r)=>a+Math.abs(entrySigned(r)),0));
+    let body=list.length?`<p class="sub" style="margin-bottom:12px">${list.length} mouvement${list.length>1?'s':''} · ${money(total,2)} au total. C’est exactement ce qui alimente la ligne ${esc(String(n))}.</p><div class="table-wrap" style="max-height:52vh;overflow:auto"><table><thead><tr><th>Date</th><th>Libellé</th><th>Catégorie</th><th>Immeuble</th><th class="align-right">Montant</th></tr></thead><tbody>${list.map(r=>`<tr><td>${date(r.date)}</td><td>${esc(r.label||'')}</td><td>${esc(r.category||'—')}</td><td>${esc(entryBuildingLabel(r)||'Non affecté')}</td><td class="align-right">${money(Math.abs(entrySigned(r)),2)}</td></tr>`).join('')}</tbody></table></div>`
+        :`<p class="sub">Aucun mouvement ne se rattache à la ligne ${esc(String(n))} sur ${esc(period.label)}.</p>`;
+    openModal('Ligne '+n+' · provenance du montant',body,`<button data-action="close-modal">Fermer</button>`,true);
 }
-function truncate(t,n){t=String(t||'');return t.length>n?t.slice(0,n-1)+'…':t;}
-// Adresse du siège : la ville n'est répétée que si elle n'est pas déjà écrite.
 function declSiege(s){
     let a=String(s.address||'').trim(),c=String(s.city||'').trim();
     if(!a)return c||'';
@@ -9822,41 +11018,38 @@ function declCheckItem(level,title,note,action){
     return `<div class="decl-check" style="border-left:3px solid ${color}"><div class="row between wrap"><strong>${esc(title)}</strong><span class="pill ${pill}">${level==='ok'?'Prêt':level==='warn'?'À compléter':'Bloquant'}</span></div><p class="sub" style="margin-top:6px">${note}</p>${action||''}</div>`;
 }
 function declChecksView(s,period,m){
-    let items=[];
-    let issues=0,blocks=0;
+    let items=[],issues=0,blocks=0;
     let add=(level,title,note,action)=>{items.push(declCheckItem(level,title,note,action));if(level==='warn')issues++;if(level==='error')blocks++;};
-    // Identité de la société (cadre II).
+    // Cadre II : identité de la société.
     if(!String(s.siren||'').trim())add('warn','SIREN absent','Le cadre II de la 2072-S demande le SIREN de la société : sans lui, la déclaration ne peut pas être rattachée à votre dossier fiscal.',`<button data-action="edit-sci" style="margin-top:9px">${icon('edit')} Compléter la fiche société</button>`);
     else add('ok','Identité de la société',`${esc(s.name)} · SIREN ${esc(s.siren)} · clôture ${esc(s.closing||'31/12')} · gérant ${esc(s.manager||'non renseigné')}.`);
-    if(!String(s.manager||'').trim())add('warn','Gérant non renseigné','Le cadre II demande le nom, l’adresse et le téléphone du gérant, ainsi que le nombre d’associés et de parts.',`<button data-action="edit-sci" style="margin-top:9px">${icon('edit')} Compléter la fiche société</button>`);
-    // Associés (annexe A2).
+    if(!String(s.manager||'').trim())add('warn','Gérant non renseigné','Le cadre II demande le nom, l’adresse et le téléphone du gérant.',`<button data-action="edit-sci" style="margin-top:9px">${icon('edit')} Compléter la fiche société</button>`);
+    // Annexe A2 : associés et parts.
     let partners=rows('partners',s.id);
     let shares=partners.reduce((a,p)=>a+(Number(p.shares)||0),0);
     if(!partners.length)add('error','Aucun associé','L’annexe A2 répartit le résultat entre les associés : sans associé, il n’y a personne à qui répartir.',`<button data-add="partners" style="margin-top:9px">${icon('plus')} Ajouter un associé</button>`);
-    else if(shares<=0)add('error','Nombre de parts manquant','Le pourcentage de détention est calculé à partir des parts. Sans parts renseignées, aucune quote-part ne peut être établie.',`<button data-edit="${esc(partners[0].id)}" style="margin-top:9px">${icon('edit')} Renseigner les parts</button>`);
-    else add('ok','Associés et parts',`${partners.length} associé${partners.length>1?'s':''} · ${num(shares)} part${shares>1?'s':''} au total. La quote-part de chacun est proportionnelle à ses parts.`);
+    else if(shares<=0)add('error','Nombre de parts manquant','Le pourcentage de détention se calcule à partir des parts : sans parts, aucune quote-part n’est possible.',`<button data-edit="${esc(partners[0].id)}" style="margin-top:9px">${icon('edit')} Renseigner les parts</button>`);
+    else add('ok','Associés et parts',`${partners.length} associé${partners.length>1?'s':''} · ${num(shares)} part${shares>1?'s':''} au total.`);
     let noAddr=partners.filter(p=>!String(p.address||'').trim());
-    if(noAddr.length)add('warn','Adresse d’associé manquante',`L’annexe A2 identifie chaque associé par son nom, son adresse et son nombre de parts. ${noAddr.length} fiche${noAddr.length>1?'s':''} sans adresse : ${noAddr.map(p=>esc(p.name)).join(', ')}.`,`<button data-edit="${esc(noAddr[0].id)}" style="margin-top:9px">${icon('edit')} Compléter</button>`);
-    // Immeubles (cadre IV).
-    if(!m.buildings.length)add('error','Aucun immeuble','Le cadre IV liste les immeubles détenus, avec leur adresse et leur nombre de locaux. Sans bien renseigné, l’annexe A1 n’a aucune colonne.',`<button data-add="properties" style="margin-top:9px">${icon('plus')} Ajouter un bien</button>`);
+    if(noAddr.length)add('warn','Adresse d’associé manquante',`L’annexe A2 identifie chaque associé par son nom, son adresse et son nombre de parts. Manque : ${noAddr.map(p=>esc(p.name)).join(', ')}.`,`<button data-edit="${esc(noAddr[0].id)}" style="margin-top:9px">${icon('edit')} Compléter</button>`);
+    // Cadre IV + annexe A1 : immeubles et locaux.
+    if(!m.buildings.length)add('error','Aucun immeuble','Le cadre IV liste les immeubles détenus avec leur adresse et leur nombre de locaux. Sans bien, l’annexe A1 n’a aucune colonne.',`<button data-add="properties" style="margin-top:9px">${icon('plus')} Ajouter un bien</button>`);
     else{
         add('ok','Immeubles',`${m.buildings.length} adresse${m.buildings.length>1?'s':''} distincte${m.buildings.length>1?'s':''} : ${m.buildings.map(b=>esc(b.label)).join(' · ')}.`);
         let noLocaux=m.buildings.filter(b=>!b.locauxSet);
-        if(noLocaux.length)add('warn','Nombre de locaux non renseigné','Le cadre IV demande le nombre de locaux de chaque immeuble. Il se renseigne dans la fiche du bien.',`<button data-add="properties" style="margin-top:9px">${icon('plus')} Renseigner les biens</button>`);
+        if(noLocaux.length)add('warn','Nombre de locaux non renseigné',`Le cadre IV demande le nombre de locaux de chaque immeuble. Il se renseigne dans la fiche du bien.`,`<button data-add="properties" style="margin-top:9px">${icon('plus')} Renseigner les biens</button>`);
     }
-    // Classement des mouvements.
+    // Annexes A1 : classement des mouvements.
     if(m.unclassified.length){
         let total=r2(m.unclassified.reduce((a,u)=>a+u.amount,0));
-        add('error',`${m.unclassified.length} mouvement${m.unclassified.length>1?'s':''} non classé${m.unclassified.length>1?'s':''}`,`${money(total,2)} ne sont rattachés à aucune ligne officielle : les totaux de l’annexe A1 seraient faux.`,`<button data-action="balance-mapping" style="margin-top:9px">${icon('settings')} Classer les catégories</button>`);
+        add('error',`${m.unclassified.length} mouvement${m.unclassified.length>1?'s':''} non classé${m.unclassified.length>1?'s':''}`,`${money(total,2)} ne se rattachent à aucune ligne officielle : les totaux de l’annexe A1 seraient faux.`,`<button data-action="balance-mapping" style="margin-top:9px">${icon('settings')} Classer les catégories</button>`);
     }else add('ok','Toutes les catégories sont classées','Chaque catégorie de trésorerie est rattachée à une ligne de l’annexe A1.');
     if(m.toSplit.length){
         let total=r2(m.toSplit.reduce((a,u)=>a+u.amount,0));
-        add('warn',`${m.toSplit.length} échéance${m.toSplit.length>1?'s':''} d’emprunt à ventiler`,`${money(total,2)} : seule la part d’intérêts est déductible en ligne 17, le capital remboursé ne l’est pas. Séparez les intérêts dans une catégorie « Intérêts ».`,'');
+        add('warn',`${m.toSplit.length} échéance${m.toSplit.length>1?'s':''} d’emprunt à ventiler`,`${money(total,2)} : seule la part d’intérêts est déductible en ligne 17, le capital remboursé ne l’est pas.`);
     }
-    if(m.unassigned.length){
-        add('warn',`${m.unassigned.length} mouvement${m.unassigned.length>1?'s':''} sans immeuble`,'Ils restent en « Non affecté » : la déduction par immeuble du cadre VII ne peut pas être établie.','<button data-action="balance-assign" style="margin-top:9px">'+icon('building')+' Affecter les mouvements</button>');
-    }
-    if(m.financing.length)add('ok',`${m.financing.length} opération${m.financing.length>1?'s':''} de financement`,`${money(r2(m.financing.reduce((a,u)=>a+u.amount,0)),2)} : apports, comptes courants et dépôts de garantie ne sont ni recettes ni charges. Ils sont exclus, comme le veut le formulaire.`,'');
+    if(m.unassigned.length)add('warn',`${m.unassigned.length} mouvement${m.unassigned.length>1?'s':''} sans immeuble`,'Ils restent en « Non affecté » : la déduction par immeuble du cadre VII ne peut pas être établie.',`<button data-action="balance-assign" style="margin-top:9px">${icon('building')} Affecter les mouvements</button>`);
+    if(m.financing.length)add('ok',`${m.financing.length} opération${m.financing.length>1?'s':''} de financement`,`${money(r2(m.financing.reduce((a,u)=>a+u.amount,0)),2)} : apports, comptes courants et dépôts de garantie ne sont ni recettes ni charges. Ils sont exclus, comme le veut le formulaire.`);
     let verdict=blocks?`${blocks} point${blocks>1?'s':''} bloquant${blocks>1?'s':''}`:issues?`${issues} point${issues>1?'s':''} à compléter`:'Tout est prêt';
     return `<div class="panel" style="margin-bottom:18px"><div class="panel-head"><h2>Pouvez-vous déclarer ?</h2><span class="pill ${blocks?'red':issues?'gold':'green'}">${verdict}</span></div><div class="panel-body"><p class="sub" style="margin-bottom:14px">Dominis vérifie ce que chaque case du formulaire exige. Rien n’est corrigé en silence : ce qui manque est signalé, avec le bouton pour le renseigner.</p>${items.join('')}</div></div>`;
 }
@@ -9865,28 +11058,44 @@ function declMainView(s,period,m,keys){
     let c=declMainCases(m,keys);
     let partners=rows('partners',s.id);
     let shares=partners.reduce((a,p)=>a+(Number(p.shares)||0),0);
-    let cadres1=[[ 'R1','Revenus bruts',c.R1,'Total des lignes 5 + 19 − 20 + 22 de l’annexe A1'],[ 'R2','Paiement sur travaux',c.R2,'Total de la ligne 9 de l’annexe A1'],[ 'R3','Frais et charges autres qu’intérêts d’emprunts',c.R3,'Total de la ligne 16 de l’annexe A1'],[ 'R4','Intérêts d’emprunts',c.R4,'Total de la ligne 17 de l’annexe A1'],[ 'R5','Revenu net (+) ou déficit net (−)',c.R5,'Total de la ligne 23 de l’annexe A1 — c’est ce montant qui est réparti']];
-    let rowsHtml=cadres1.map(([code,label,val,note])=>`<tr><td><strong>${code}</strong> · ${esc(label)}<span class="cell-sub">${esc(note)}</span></td><td class="align-right">${val?declCopyBtn(val,code+' · '+label,{cls:'decl-total'}):'<span class="muted">—</span>'}</td></tr>`).join('');
+    let cases=[['R1','Revenus bruts',c.R1,'Total des lignes 5 + 19 − 20 + 22 de l’annexe A1'],['R2','Paiement sur travaux',c.R2,'Total de la ligne 9 de l’annexe A1'],['R3','Frais et charges autres qu’intérêts d’emprunts',c.R3,'Total de la ligne 16 de l’annexe A1'],['R4','Intérêts d’emprunts',c.R4,'Total de la ligne 17 de l’annexe A1'],['R5','Revenu net (+) ou déficit net (−)',c.R5,'Total de la ligne 23 — c’est ce montant qui est réparti']];
+    let rowsHtml=cases.map(([code,label,val,note])=>`<tr><td><strong>${code}</strong> · ${esc(label)}<span class="cell-sub">${esc(note)}</span></td><td class="align-right">${val?declCopyBtn(val,code+' · '+label):'<span class="muted">—</span>'}</td></tr>`).join('');
     let ident=[['Dénomination',s.name],['SIREN',s.siren||'Non renseigné'],['Adresse du siège',declSiege(s)||'Non renseignée'],['Clôture de l’exercice',s.closing||'31/12'],['Gérant',s.manager||'Non renseigné'],['Nombre d’associés',String(partners.length)],['Nombre total de parts',shares?num(shares):'Non renseigné'],['Nominal des parts',shares&&Number(s.capital)?money(r2(Number(s.capital)/shares),2):'—']];
-    return `<div class="panel" style="margin-bottom:18px"><div class="panel-head"><h2>Cadre I · résultat net à répartir</h2><span class="pill gold">2072-S-SD</span></div><div class="panel-body"><p class="sub" style="margin-bottom:12px">Les cinq cases du formulaire principal, calculées depuis l’annexe A1. C’est la ligne R5 que vous répartissez ensuite entre les associés.</p><div class="table-wrap"><table class="balance-table"><thead><tr><th>Case</th><th class="align-right">Montant</th></tr></thead><tbody>${rowsHtml}</tbody></table></div></div></div>
+    let bis=Math.round(declExact(m,'9bis'));
+    return `<div class="panel" style="margin-bottom:18px"><div class="panel-head"><h2>Cadre I · résultat net à répartir</h2><span class="pill gold">2072-S-SD</span></div><div class="panel-body"><p class="sub" style="margin-bottom:12px">Les cinq cases du formulaire principal, calculées depuis l’annexe A1. C’est la ligne R5 que vous répartissez ensuite entre les associés.</p><div class="table-wrap"><table class="balance-table"><thead><tr><th>Case</th><th class="align-right">Montant</th><th></th></tr></thead><tbody>${rowsHtml}</tbody></table></div></div></div>
     <div class="settings-grid" style="margin-bottom:18px">
       <div class="panel"><div class="panel-head"><h2>Cadre II · renseignements généraux</h2><button data-action="edit-sci">${icon('edit')} Modifier</button></div><div class="panel-body info-grid">${ident.map(([k,v])=>`<div class="info-item"><label>${esc(k)}</label><span>${esc(v)}</span></div>`).join('')}</div></div>
-      <div class="panel"><div class="panel-head"><h2>Cadre IV · immeubles détenus</h2><span class="pill">${m.buildings.length} adresse${m.buildings.length>1?'s':''}</span></div><div class="panel-body"><div class="table-wrap"><table><thead><tr><th>Adresse</th><th class="align-right">Locaux</th><th>Nature</th></tr></thead><tbody>${m.buildings.map(b=>`<tr><td>${esc(b.label)}<span class="cell-sub">${b.properties.map(p=>esc(p.type||'Bien')).join(' · ')}</span></td><td class="align-right">${b.locaux||'<span class="muted">—</span>'}</td><td>${b.properties.map(p=>esc(p.type||'—')).filter((v,i,a)=>a.indexOf(v)===i).join(', ')}</td></tr>`).join('')||'<tr><td colspan="3" class="muted">Aucun immeuble renseigné.</td></tr>'}</tbody></table></div><p class="sub" style="margin-top:10px">La codification officielle de la « nature » (A/B) figure dans la notice 2072-S-NOT-SD : Dominis affiche le type saisi, à vous de choisir le code.</p></div></div>
+      <div class="panel"><div class="panel-head"><h2>Cadre IV · immeubles détenus</h2><span class="pill">${m.buildings.length} adresse${m.buildings.length>1?'s':''}</span></div><div class="panel-body"><div class="table-wrap"><table><thead><tr><th>Adresse</th><th class="align-right">Locaux</th><th>Nature</th></tr></thead><tbody>${m.buildings.map(b=>`<tr><td>${esc(b.label)}<span class="cell-sub">${b.properties.map(p=>esc(p.type||'Bien')).join(' · ')}</span></td><td class="align-right">${b.locauxSet?b.locaux:'<span class="muted">—</span>'}</td><td>${b.properties.map(p=>esc(p.type||'—')).filter((v,i,a)=>a.indexOf(v)===i).join(', ')}</td></tr>`).join('')||'<tr><td colspan="3" class="muted">Aucun immeuble renseigné.</td></tr>'}</tbody></table></div><p class="sub" style="margin-top:10px">La codification officielle de la « nature » (A/B) figure dans la notice 2072-S-NOT-SD : Dominis affiche le type saisi, à vous de choisir le code.</p></div></div>
     </div>
-    <div class="panel"><div class="panel-head"><h2>Cadre III · produits et charges hors immeubles</h2></div><div class="panel-body"><p class="sub">R6 produits financiers · R7 plus-values de cession · R8 moins-values de cession. Ces montants ne figurent dans aucune case de Dominis : ils se lisent sur vos relevés bancaires et vos actes de cession. Laisser vide s’il n’y en a pas.</p></div></div>`;
+    <div class="panel"><div class="panel-head"><h2>Cadre III · produits et charges hors immeubles</h2></div><div class="panel-body"><p class="sub">R6 produits financiers · R7 plus-values de cession · R8 moins-values de cession. Ces montants ne figurent dans aucune case de Dominis : ils se lisent sur vos relevés bancaires et vos actes de cession. Laisser vide s’il n’y en a pas.</p>${bis?`<p class="sub" style="margin-top:10px">Rénovation énergétique de l’exercice (ligne 9 bis) : <strong>${money(bis,0)}</strong> — ce montant majore le plafond de déficit imputable de la 2044, il ne se déclare pas séparément sur la 2072-S.</p>`:''}</div></div>`;
 }
 // --- Onglet annexe A1 -----------------------------------------------------
+function declA1Head(cols){
+    return `<thead><tr><th class="decl-line-num">Ligne</th><th>Libellé officiel</th>${cols.map(c=>`<th class="align-right">${esc(c.short)}</th>`).join('')}<th class="align-right">Total</th><th></th></tr></thead>`;
+}
+function declLineRowsHtml(m,rowsOut,keys,opts={}){
+    let cols=opts.cols||[];
+    let body=DECL_A1_LINES.map(([n,label,kind])=>{
+        let cells=rowsOut[String(n)]||[];
+        let total=declSum(cells);
+        let zero=!total&&cells.every(v=>!v);
+        let cls=kind==='total'?'decl-total-row':kind==='dont'?'decl-dont-row':'';
+        let prov=declProvenance(m,n);
+        let provTxt=prov.length?`${prov.length} mouvement${prov.length>1?'s':''}`:'aucun mouvement';
+        return `<tr class="${cls} ${zero?'decl-zero-row':''}"><td class="decl-line-num"><strong>${String(n).replace('bis',' bis')}</strong></td><td>${esc(label)}<span class="cell-sub"><button type="button" class="decl-prov" data-decl-detail="${esc(String(n))}">${esc(provTxt)} · voir le détail</button></span></td>${keys.map((k,i)=>`<td class="align-right">${zero?'<span class="muted">—</span>':money(cells[i],0)}</td>`).join('')}<td class="align-right"><strong>${zero?'<span class="muted">—</span>':money(total,0)}</strong></td><td class="decl-copy-cell">${zero?'':declCopyBtn(total,'Ligne '+String(n)+' · '+label)}</td></tr>`;
+    }).join('');
+    return body;
+}
 function declA1View(s,period,m){
     let cols=declCols(m),keys=cols.map(c=>c.key);
     let rowsOut=declA1Rows(m,keys);
-    let table=`<div class="table-wrap"><table class="balance-table balance-2072">${declA1Head(cols)}<tbody>${declLineRowsHtml(m,rowsOut,keys,{cols})}</tbody></table></div>`;
     let notes=[];
     if(m.unclassified.length)notes.push(`<div class="notice" style="border-left:3px solid var(--red)"><strong>${m.unclassified.length} mouvement${m.unclassified.length>1?'s':''} non classé${m.unclassified.length>1?'s':''}</strong><p class="sub" style="margin-top:6px">Ils ne sont pas comptés dans ce tableau. <button class="text-link" data-action="balance-mapping">Classer les catégories →</button></p></div>`);
     if(m.toSplit.length)notes.push(`<div class="notice" style="border-left:3px solid var(--gold)"><strong>${m.toSplit.length} échéance${m.toSplit.length>1?'s':''} d’emprunt à ventiler</strong><p class="sub" style="margin-top:6px">La ligne 17 n’accepte que les intérêts. Le capital remboursé n’est pas déductible : classez les intérêts dans une catégorie dédiée.</p></div>`);
     if(m.unassigned.length)notes.push(`<div class="notice" style="border-left:3px solid var(--gold)"><strong>${m.unassigned.length} mouvement${m.unassigned.length>1?'s':''} sans immeuble</strong><p class="sub" style="margin-top:6px">Ils apparaissent dans la colonne « Non affecté ». <button class="text-link" data-action="balance-assign">Affecter les mouvements →</button></p></div>`);
     return `<div class="panel" style="margin-bottom:18px"><div class="panel-head"><h2>Annexe 1 · cadre VII</h2><span class="pill gold">${esc(period.label)}</span></div><div class="panel-body">
-    <p class="sub" style="margin-bottom:12px">Une colonne par <strong>immeuble</strong>, c’est-à-dire par adresse distincte. Les lignes 9 bis est un « dont » : elle est déjà comprise dans la ligne 9 et ne s’ajoute jamais au total. La ligne 14 se déduit. Cliquez sur un montant pour le copier et le coller dans la déclaration en ligne.</p>
-    ${table}
+    <p class="sub" style="margin-bottom:12px">Une colonne par <strong>immeuble</strong>, c’est-à-dire par adresse distincte. La ligne 9 bis est un « dont » : elle est déjà comprise dans la ligne 9 et ne s’ajoute jamais au total. La ligne 14 se déduit. Cliquez sur « Copier » pour coller le montant dans la déclaration en ligne.</p>
+    <div class="table-wrap"><table class="balance-table balance-2072">${declA1Head(cols)}<tbody>${declLineRowsHtml(m,rowsOut,keys,{cols})}</tbody></table></div>
     <div class="row gap8 wrap" style="margin-top:14px"><button type="button" data-action="balance-mapping">${icon('settings')} Classer les catégories</button><button type="button" data-action="balance-assign">${icon('building')} Affecter les mouvements</button></div>
     ${notes.join('')}
     </div></div>`;
@@ -9900,8 +11109,7 @@ function declPartners(s){
 function declShares(s,period,m){
     let keys=declCols(m).map(c=>c.key);
     let c=declMainCases(m,keys);
-    let partners=declPartners(s);
-    return partners.map(p=>{
+    return declPartners(s).map(p=>{
         let A=Math.round((c.R1)*p.quote);
         let B=Math.round((c.R3)*p.quote);
         let D=Math.round((c.R4)*p.quote);
@@ -9913,18 +11121,18 @@ function declA2View(s,period,m){
     let list=declShares(s,period,m);
     let sumE=list.reduce((a,p)=>a+p.E,0);
     let ecart=r2(c.R5-sumE);
-    let body=list.map(p=>`<tr><td><strong>${esc(p.name)}</strong><span class="cell-sub">${esc(p.role||'Associé')} · ${p.shares?num(p.shares):'0'} part${Number(p.shares)>1?'s':''} · ${(p.quote*100).toFixed(2).replace('.',',')} %</span></td><td class="align-right">${declCopyBtn(p.A,'Quote-part revenus bruts · '+p.name)}</td><td class="align-right">${declCopyBtn(p.B,'Quote-part frais et charges · '+p.name)}</td><td class="align-right">${declCopyBtn(p.D,'Quote-part intérêts · '+p.name)}</td><td class="align-right">${p.E?declCopyBtn(p.E,'Quote-part résultat · '+p.name,{cls:'decl-total'}):'<span class="muted">—</span>'}</td></tr>`).join('');
+    let body=list.map(p=>`<tr><td><strong>${esc(p.name)}</strong><span class="cell-sub">${esc(p.role||'Associé')} · ${p.shares?num(p.shares):'0'} part${Number(p.shares)>1?'s':''} · ${(p.quote*100).toFixed(2).replace('.',',')} %</span></td><td class="align-right">${declCopyBtn(p.A,'Quote-part revenus bruts · '+p.name)}<span class="decl-amount">${money(p.A,0)}</span></td><td class="align-right">${declCopyBtn(p.B,'Quote-part frais et charges · '+p.name)}<span class="decl-amount">${money(p.B,0)}</span></td><td class="align-right">${declCopyBtn(p.D,'Quote-part intérêts · '+p.name)}<span class="decl-amount">${money(p.D,0)}</span></td><td class="align-right">${declCopyBtn(p.E,'Quote-part résultat · '+p.name)}<span class="decl-amount ${p.E<0?'red':''}">${money(p.E,0)}</span></td></tr>`).join('');
     let foot=`<tfoot><tr><td><strong>Total</strong><span class="cell-sub">Colonnes A + B + D + E</span></td><td class="align-right"><strong>${money(declSum(list.map(p=>p.A)),0)}</strong></td><td class="align-right"><strong>${money(declSum(list.map(p=>p.B)),0)}</strong></td><td class="align-right"><strong>${money(declSum(list.map(p=>p.D)),0)}</strong></td><td class="align-right"><strong>${money(sumE,0)}</strong></td></tr></tfoot>`;
     return `<div class="panel" style="margin-bottom:18px"><div class="panel-head"><h2>Annexe 2 · cadre IX</h2><span class="pill gold">${list.length} associé${list.length>1?'s':''}</span></div><div class="panel-body">
-    <p class="sub" style="margin-bottom:12px">Une colonne par associé. <strong>A</strong> = quote-part des revenus bruts (5+19−20+22), <strong>B</strong> = quote-part des frais et charges (16), <strong>D</strong> = quote-part des intérêts (17), <strong>E</strong> = A − B − D, soit exactement la quote-part du résultat à répartir. Chaque colonne est calculée à partir du pourcentage de parts détenues.</p>
-    <div class="table-wrap"><table class="balance-table"><thead><tr><th style="min-width:230px">Associé</th><th class="align-right">A · revenus bruts</th><th class="align-right">B · frais et charges</th><th class="align-right">D · intérêts</th><th class="align-right">E · résultat</th></tr></thead><tbody>${body||'<tr><td colspan="5" class="muted">Aucun associé renseigné.</td></tr>'}</tbody>${list.length?foot:''}</table></div>
+    <p class="sub" style="margin-bottom:12px">Une ligne par associé. <strong>A</strong> = quote-part des revenus bruts (5+19−20+22), <strong>B</strong> = quote-part des frais et charges (16), <strong>D</strong> = quote-part des intérêts (17), <strong>E</strong> = A − B − D, soit exactement la quote-part du résultat à répartir. Chaque colonne est calculée à partir du pourcentage de parts détenues.</p>
+    <div class="table-wrap"><table class="balance-table"><thead><tr><th style="min-width:210px">Associé</th><th class="align-right">A · revenus bruts</th><th class="align-right">B · frais et charges</th><th class="align-right">D · intérêts</th><th class="align-right">E · résultat</th></tr></thead><tbody>${body||'<tr><td colspan="5" class="muted">Aucun associé renseigné.</td></tr>'}</tbody>${list.length?foot:''}</table></div>
     ${Math.abs(ecart)>0.004?`<p class="sub" style="margin-top:10px">La somme des quotes-parts (${money(sumE,0)}) diffère de la case R5 (${money(c.R5,0)}) de ${money(ecart,2)} : c’est l’arrondi à l’euro de chaque associé. La déclaration en ligne fait le même arrondi.</p>`:`<p class="sub" style="margin-top:10px">La somme des quotes-parts est égale à la case R5 : ${money(sumE,0)}.</p>`}
     ${list.length?`<p class="sub">Une annexe libre est jointe au-delà de quatre associés ; Dominis affiche toutes les lignes.</p>`:''}
     </div></div>`;
 }
 // --- Onglet 2044 des associés --------------------------------------------
 function decl2044Cases(p,renov){
-    // Page 4 de la 2044 : calcul du résultat foncier et répartition du déficit.
+    // Page 4 de la 2044 : résultat foncier puis répartition du déficit.
     let rec=p.A,int=p.D,autres=p.B;
     let r420=p.E;
     // Plafond d'imputation sur le revenu global : 10 700 €, majorés de la ligne
@@ -9939,19 +11147,27 @@ function decl2044Cases(p,renov){
         return {r420,ba:0,bb:reste+interetsExcedent,bc,detail:'intérêts supérieurs aux revenus : la part des intérêts n’est jamais imputable sur le revenu global'};
     }
     let bc=Math.min(deficit,cap);
-    return {r420,ba:0,bb:deficit-bc,bc,detail:deficit>cap?'déficit plafonné à 10 700 € sur le revenu global, le reste est reportable 10 ans':'déficit entièrement imputable sur le revenu global'};
+    return {r420,ba:0,bb:deficit-bc,bc,detail:deficit>cap?'déficit plafonné sur le revenu global, le reste est reportable 10 ans':'déficit entièrement imputable sur le revenu global'};
 }
 function decl2044View(s,period,m){
     let list=declShares(s,period,m);
     if(!list.length)return `<div class="panel"><div class="panel-body"><p class="sub">Aucun associé renseigné : la 2044 de chacun ne peut pas être préparée.</p><button data-add="partners" style="margin-top:12px">${icon('plus')} Ajouter un associé</button></div></div>`;
+    let renovTotal=Math.round(declExact(m,'9bis'));
     let cards=list.map(p=>{
-        let k=decl2044Cases(p,Math.round(declExact(m,'9bis')*p.quote));
-        let lines=[['110','Nom et adresse de la société',`${s.name} · ${declSiege(s)||'adresse non renseignée'}`,null],['111','Revenus bruts',p.A,p.A],['112','Frais et charges (sauf intérêts d’emprunt)',p.B,p.B],['112 bis','dont travaux de rénovation énergétique',Math.round(declExact(m,'9bis')*p.quote),null],['113','Intérêts d’emprunt',p.D,p.D],['114','Bénéfice (+) ou déficit (−) · 111 − 112 − 113',p.E,p.E]];
-        let body=lines.map(([code,label,val,copy])=>`<tr><td><span class="pill">${code}</span> ${esc(label)}</td><td class="align-right">${(copy===null||!val)?`<span class="muted">${copy===null&&val?esc(String(val)):'—'}</span>`:declCopyBtn(val,code+' · '+label)}</td></tr>`).join('');
-        body+=`<tr class="balance-subtotal"><td><span class="pill gold">115</span> Total de chaque ligne, à reporter page 4</td><td class="align-right"><strong>${money(p.E,0)}</strong></td></tr>`;
-        let cases=`<div class="decl-cases"><div class="setting-row"><div><h3>4BA · bénéfice foncier imposable</h3><p>Ligne 420 si elle est positive.</p></div><div>${k.ba?declCopyBtn(k.ba,'4BA · '+p.name,{cls:'decl-total'}):'<span class="muted">—</span>'}</div></div><div class="setting-row"><div><h3>4BB · déficit reportable sur les revenus fonciers</h3><p>Reportable 10 ans, jamais sur le revenu global.</p></div><div>${k.bb?declCopyBtn(k.bb,'4BB · '+p.name,{cls:'decl-total'}):'<span class="muted">—</span>'}</div></div><div class="setting-row"><div><h3>4BC · déficit imputable sur le revenu global</h3><p>Plafonné à 10 700 € (jusqu’à 21 400 € en rénovation énergétique).</p></div><div>${k.bc?declCopyBtn(k.bc,'4BC · '+p.name,{cls:'decl-total'}):'<span class="muted">—</span>'}</div></div><div class="setting-row"><div><h3>4BD · déficits antérieurs</h3><p>Stock des années passées, à reprendre de votre avis d’imposition.</p></div><div><span class="muted">à saisir</span></div></div></div>`;
+        let renov=Math.round(renovTotal*p.quote);
+        let k=decl2044Cases(p,renov);
+        let lines=[['110','Nom et adresse de la société',`${s.name} · ${declSiege(s)||'adresse non renseignée'}`,null],['111','Revenus bruts',p.A],['112','Frais et charges (sauf intérêts d’emprunt)',p.B],['112 bis','dont travaux de rénovation énergétique',renov],['113','Intérêts d’emprunt',p.D],['114','Bénéfice (+) ou déficit (−) · 111 − 112 − 113',p.E]];
+        // Rubrique 110 : du texte, pas un montant. Les autres lignes sont des
+        // montants à recopier, avec le bouton de copie correspondant.
+        let body=lines.map(([code,label,val])=>{
+            if(code==='110')return `<tr><td><span class="pill">110</span> ${esc(label)}<span class="cell-sub">${esc(val)}</span></td><td class="align-right muted">—</td><td class="decl-copy-cell"></td></tr>`;
+            let n=Math.round(Number(val)||0);
+            return `<tr><td><span class="pill">${code}</span> ${esc(label)}</td><td class="align-right">${n?`<strong>${money(n,0)}</strong>`:'<span class="muted">—</span>'}</td><td class="decl-copy-cell">${n?declCopyBtn(n,code+' · '+p.name):''}</td></tr>`;
+        }).join('');
+        body+=`<tr class="decl-total-row"><td><span class="pill gold">115</span> Total de chaque ligne, à reporter page 4</td><td class="align-right"><strong>${money(p.E,0)}</strong></td><td class="decl-copy-cell">${p.E?declCopyBtn(p.E,'115 · '+p.name):''}</td></tr>`;
+        let cases=`<div class="decl-cases"><div class="setting-row"><div><h3>4BA · bénéfice foncier imposable</h3><p>Ligne 420 de la 2042, si elle est positive.</p></div><div class="row gap8">${k.ba?`<strong>${money(k.ba,0)}</strong>`:'<span class="muted">—</span>'}${k.ba?declCopyBtn(k.ba,'4BA · '+p.name):''}</div></div><div class="setting-row"><div><h3>4BB · déficit reportable sur les revenus fonciers</h3><p>Reportable 10 ans, jamais sur le revenu global.</p></div><div class="row gap8">${k.bb?`<strong>${money(k.bb,0)}</strong>`:'<span class="muted">—</span>'}${k.bb?declCopyBtn(k.bb,'4BB · '+p.name):''}</div></div><div class="setting-row"><div><h3>4BC · déficit imputable sur le revenu global</h3><p>Plafonné à 10 700 €, majorés de la ligne 112 bis (${money(renov,0)}) sans dépasser 21 400 €.</p></div><div class="row gap8">${k.bc?`<strong>${money(k.bc,0)}</strong>`:'<span class="muted">—</span>'}${k.bc?declCopyBtn(k.bc,'4BC · '+p.name):''}</div></div><div class="setting-row"><div><h3>4BD · déficits antérieurs</h3><p>Stock des années passées, à reprendre de votre avis d’imposition.</p></div><div><span class="muted">à saisir</span></div></div></div>`;
         return `<div class="panel" style="margin-bottom:18px"><div class="panel-head"><h2>${esc(p.name)}</h2><span class="pill gold">${(p.quote*100).toFixed(2).replace('.',',')} % des parts</span></div><div class="panel-body">
-        <p class="sub" style="margin-bottom:12px">Rubrique 110 de la 2044. Si cet associé n’a <strong>aucun autre revenu foncier</strong>, il peut reporter directement ces montants sur sa 2042, avec une annexe libre : la 2044 n’est alors pas obligatoire.</p>
+        <p class="sub" style="margin-bottom:12px">Rubrique 110 de la 2044. Si cet associé n’a <strong>aucun autre revenu foncier</strong>, il peut reporter directement ces montants sur sa 2042 avec une annexe libre : la 2044 n’est alors pas obligatoire.</p>
         <div class="settings-grid"><div><div class="table-wrap"><table class="balance-table"><tbody>${body}</tbody></table></div></div><div>${cases}</div></div>
         <p class="sub" style="margin-top:12px">${esc(k.detail)}. La case 4BD dépend de l’avis d’imposition de l’an dernier : Dominis ne peut pas la déduire.</p>
         </div></div>`;
@@ -9976,22 +11192,14 @@ function declPage(s){
     let custom=period.mode==='custom';
     let yearOptions=years.map(y=>`<option value="${y}" ${!custom&&y===period.year?'selected':''}>Exercice ${y}</option>`).join('');
     let controls=`<div class="row gap8 wrap" style="margin-bottom:16px"><label class="sub" for="balance-year">Exercice déclaré</label><select id="balance-year" style="width:auto;min-width:190px">${yearOptions}<option value="custom" ${custom?'selected':''}>Période personnalisée</option></select>${custom?`<input id="balance-start" type="date" value="${esc(period.start)}" aria-label="Début de la période"><span class="muted">→</span><input id="balance-end" type="date" value="${esc(period.end)}" aria-label="Fin de la période">`:''}<span class="pill gold">${esc(period.label)}</span><span class="pill">Clôture ${esc(s.closing||'31/12')}</span><span class="pill">${isIS?'Régime IS · 2065 + 2033':'Régime IR · 2072-S'}</span></div>`;
-    let nav=`<nav class="tabs" role="tablist" aria-label="Documents à déposer" style="margin-top:6px">${tabs.map(([id,label])=>`<button type="button" class="tab ${declTab===id?'active':''}" data-decl-tab="${id}" role="tab" aria-selected="${declTab===id}">${label}</button>`).join('')}</nav>`;
+    let nav=`<div class="tabs" role="tablist" style="margin-bottom:18px">${tabs.map(([id,label])=>`<button type="button" role="tab" class="tab ${declTab===id?'active':''}" data-decl-tab="${id}" aria-selected="${declTab===id}">${label}</button>`).join('')}</div>`;
     let content='';
-    if(declTab==='checks'){
-        content=declChecksView(s,period,declModel(s,period))+(isIS?'':declQuickSummary(s,period));
-    }else if(declTab==='main'){
-        let m=declModel(s,period);
-        content=declMainView(s,period,m,declCols(m).map(c=>c.key));
-    }else if(declTab==='a1'){
-        content=declA1View(s,period,declModel(s,period));
-    }else if(declTab==='a2'){
-        content=declA2View(s,period,declModel(s,period));
-    }else if(declTab==='p2044'){
-        content=decl2044View(s,period,declModel(s,period));
-    }else{
-        content=declIsView(s,period,years);
-    }
+    if(declTab==='checks')content=declChecksView(s,period,declModel(s,period))+(isIS?'':declQuickSummary(s,period));
+    else if(declTab==='main'){let m=declModel(s,period);content=declMainView(s,period,m,declCols(m).map(c=>c.key));}
+    else if(declTab==='a1')content=declA1View(s,period,declModel(s,period));
+    else if(declTab==='a2')content=declA2View(s,period,declModel(s,period));
+    else if(declTab==='p2044')content=decl2044View(s,period,declModel(s,period));
+    else content=declIsView(s,period,years);
     return `${controls}${nav}${content}`;
 }
 function declQuickSummary(s,period){
@@ -10003,7 +11211,38 @@ function declQuickSummary(s,period){
     <div class="panel"><div class="panel-body"><div class="eyebrow">Répartition entre associés</div><div class="stack" style="margin-top:10px">${liste.map(p=>`<div class="row between"><span>${esc(p.name)}<span class="cell-sub">${(p.quote*100).toFixed(2).replace('.',',')} %</span></span><strong class="${p.E<0?'red':'green'}">${money(p.E,0)}</strong></div>`).join('')||'<span class="sub">Aucun associé renseigné.</span>'}</div><button class="text-link" style="margin-top:10px" data-decl-tab="a2">Voir l’annexe A2 →</button></div></div>
     <div class="panel"><div class="panel-body"><div class="eyebrow">Documents à déposer</div><div class="stack" style="margin-top:10px"><div class="row between"><span>2072-S-SD</span><span class="pill">société</span></div><div class="row between"><span>Annexe 2072-S-A1</span><span class="pill">${m.buildings.length} immeuble${m.buildings.length>1?'s':''}</span></div><div class="row between"><span>Annexe 2072-S-A2</span><span class="pill">${liste.length} associé${liste.length>1?'s':''}</span></div><div class="row between"><span>2044 de chaque associé</span><span class="pill">après la SCI</span></div></div><p class="sub" style="margin-top:10px">Dépôt par voie dématérialisée, environ le 2ᵉ jour ouvré suivant le 1ᵉʳ mai, avec 15 jours de plus pour la télédéclaration.</p></div></div></div>`;
 }
-
+// --- Réglages du classement (lignes de l'annexe A1) -----------------------
+function truncate(txt,len){txt=String(txt||'');return txt.length>len?txt.slice(0,len-1)+'…':txt;}
+function declLineOptions(selected){
+    let sel=String(selected===undefined||selected===null?'':selected);
+    let head=[['','— Non classé (exclu des totaux) —'],['finance','Financement : exclu du résultat'],['ventiler','Échéance d’emprunt : intérêts à séparer du capital']];
+    let opts=head.map(([v,l])=>`<option value="${v}" ${sel===v?'selected':''}>${esc(l)}</option>`);
+    opts=opts.concat(DECL_SELECTABLE.map(([n,label])=>`<option value="${n}" ${sel===String(n)?'selected':''}>Ligne ${String(n).replace('bis',' bis')} · ${esc(label)}</option>`));
+    return opts.join('');
+}
+function declMappingModal(){
+    let s=currentSCI();if(!s)return;
+    let period=declPeriod(s),m=declModel(s,period),map=balanceLineMap(s);
+    let cats=[...m.cats.values()].sort((a,b)=>b.exact-a.exact);
+    if(!cats.length)return notify('Aucune catégorie de trésorerie sur cet exercice.',true);
+    let rowsHtml=cats.map(c=>{
+        let cur=Object.prototype.hasOwnProperty.call(map,c.cat)?String(map[c.cat]):'';
+        let auto=declAutoClass({category:c.cat,label:'',direction:c.group==='recette'?'Recette':'Dépense'});
+        let autoTxt=auto.group==='classer'?'Aucune proposition automatique':auto.group==='finance'?'Financement':auto.group==='ventiler'?'Échéance d’emprunt':'Ligne '+String(auto.line);
+        return `<tr><td><strong>${esc(c.cat)}</strong><span class="cell-sub">${c.count} mouvement${c.count>1?'s':''} · ${money(c.exact,2)}<br>Proposition automatique : ${esc(autoTxt)}</span></td><td><select data-decl-map="${esc(c.cat)}">${declLineOptions(cur)}</select></td></tr>`;
+    }).join('');
+    openModal('Classer les catégories',`<p class="sub" style="margin-bottom:14px">Chaque catégorie de trésorerie se rattache à une ligne de l’annexe A1. Le classement enregistré prime sur la proposition automatique et s’applique à tous les mouvements de la catégorie.</p><div class="table-wrap" style="max-height:56vh;overflow:auto"><table><thead><tr><th>Catégorie</th><th>Ligne de la 2072-S</th></tr></thead><tbody>${rowsHtml}</tbody></table></div>`,`<button data-action="close-modal">Annuler</button><button class="primary" data-action="decl-map-save">${icon('check')} Enregistrer le classement</button>`,true);
+}
+// --- Affectation des mouvements sans immeuble -----------------------------
+function declAssignModal(){
+    let s=currentSCI();if(!s)return;
+    let period=declPeriod(s),m=declModel(s,period);
+    if(!m.unassigned.length)return notify('Tous les mouvements sont déjà rattachés à un immeuble.');
+    let props=rows('properties',s.id);
+    if(!props.length)return notify('Créez d’abord un bien pour pouvoir affecter les mouvements.',true);
+    let rowsHtml=m.unassigned.slice(0,200).map(r=>`<tr><td>${date(r.date)}</td><td>${esc(truncate(r.label||'—',54))}</td><td>${esc(r.category||'—')}</td><td class="align-right">${money(Math.abs(entrySigned(r)),2)}</td><td><select data-decl-assign="${esc(r.id)}"><option value="">— Rattacher à —</option>${props.map(p=>`<option value="${esc(p.id)}">${esc(p.address||label(p))}</option>`).join('')}</select></td></tr>`).join('');
+    openModal('Affecter les mouvements à un immeuble',`<p class="sub" style="margin-bottom:14px">${m.unassigned.length} mouvement${m.unassigned.length>1?'s':''} sans immeuble. Tant qu’ils restent en « Non affecté », la déduction par immeuble du cadre VII ne peut pas être établie.</p><div class="table-wrap" style="max-height:56vh;overflow:auto"><table><thead><tr><th>Date</th><th>Libellé</th><th>Catégorie</th><th class="align-right">Montant</th><th>Immeuble</th></tr></thead><tbody>${rowsHtml}</tbody></table></div>${m.unassigned.length>200?'<p class="sub" style="margin-top:10px">Les 200 premiers mouvements sont affichés ; recommencez l’opération après enregistrement pour les suivants.</p>':''}`,`<button data-action="close-modal">Annuler</button><button class="primary" data-action="decl-assign-save">${icon('check')} Affecter</button>`,true);
+}
 function balanceComptableView(s,period,m,years){
     let gapOk=Math.abs(m.gap)<0.005;
     let cards=`<div class="settings-grid" style="margin-bottom:20px"><div class="panel"><div class="panel-body"><div class="eyebrow">Total de l’actif · case 112</div><div style="font-size:24px;margin-top:6px">${money(m.totalActif,2)}</div><p class="sub" style="margin-top:6px">Biens ${money(m.assets,2)} · créances ${money(m.receivables,2)} · trésorerie ${money(m.cash,2)}</p></div></div><div class="panel"><div class="panel-body"><div class="eyebrow">Total du passif · case 180</div><div style="font-size:24px;margin-top:6px">${money(m.totalPassif,2)}</div><p class="sub" style="margin-top:6px">Capitaux propres ${money(r2(m.capital+m.prior+m.result),2)} · dettes ${money(r2(m.loanTotal+Math.max(0,m.cca)+m.deposits),2)}</p></div></div></div>`;
@@ -10038,7 +11277,7 @@ function balanceComptableView(s,period,m,years){
       </div></div>
     </div>
     <div class="settings-grid" style="margin-bottom:20px">
-      <div class="panel"><div class="panel-head"><h2>Compte de résultat</h2><span class="pill">${s.regime==='IS'?'2033-B · case 310':'comptable'}</span></div><div class="panel-body">${resultatTable}<p class="sub" style="margin-top:10px">${s.regime==='IS'?'Résultat comptable à reporter à la case 136 du bilan 2033-A et à la case 310 du compte de résultat 2033-B.':'Résultat comptable. Le forfait de la ligne 7 du 2072 est une déduction fiscale, pas une charge : le résultat fiscal peut donc en différer.'}</p>${financing}</div></div>
+      <div class="panel"><div class="panel-head"><h2>Compte de résultat</h2><span class="pill">${s.regime==='IS'?'2033-B · case 310':'comptable'}</span></div><div class="panel-body">${resultatTable}<p class="sub" style="margin-top:10px">${s.regime==='IS'?'Résultat comptable à reporter à la case 136 du bilan 2033-A et à la case 310 du compte de résultat 2033-B.':'Résultat comptable. La déduction spécifique de la ligne 15 et le régime fiscal de la SCI peuvent faire différer le résultat fiscal du résultat comptable.'}</p>${financing}</div></div>
       <div class="panel"><div class="panel-head"><h2>Construction de la trésorerie</h2></div><div class="panel-body">${construction}<p class="sub" style="margin-top:12px">Le solde de trésorerie suit les mêmes règles que la trésorerie : solde d’ouverture de la société, puis mouvements datés jusqu’au ${date(m.period.end)}. Les mouvements antérieurs au solde d’ouverture sont exclus.</p></div></div>
     </div>
     <div class="panel"><div class="panel-head"><h2>Comparaison des exercices</h2><span class="sub">Un bilan par année existante</span></div><div class="panel-body"><div class="table-wrap"><table><thead><tr><th>Exercice</th><th class="align-right">Produits</th><th class="align-right">Charges</th><th class="align-right">Résultat</th><th class="align-right">Trésorerie</th><th class="align-right">Actif</th><th class="align-right">Passif</th><th class="align-right">Écart</th></tr></thead><tbody>${compare}</tbody></table></div>
@@ -10046,10 +11285,270 @@ function balanceComptableView(s,period,m,years){
     </div></div>`;
 }
 
+// --- Dossier de déclaration au format PDF --------------------------------
+// Le PDF reprend exactement les montants affichés : le modèle est construit à
+// partir de declModel, jamais recalculé côté serveur.
+const DECL_A1_SHORT={
+    '1':'Loyers et fermages encaissés',
+    '2':'Dépenses à la charge des locataires',
+    '3':'Recettes diverses',
+    '4':'Jouissance gratuite',
+    '5':'TOTAL DES RECETTES',
+    '6':'Frais d’administration et de gestion',
+    '7':'Autres frais de gestion',
+    '8':'Primes d’assurance',
+    '9':'Réparations, entretien, amélioration',
+    '9bis':'dont rénovation énergétique',
+    '10':'Charges récupérables non récupérées',
+    '11':'Indemnités d’éviction et frais de relogement',
+    '12':'Impositions (dont CRL)',
+    '13':'Provisions pour charges de copropriété',
+    '14':'Régularisation de provisions (à déduire)',
+    '15':'Déduction spécifique',
+    '16':'TOTAL DES DÉDUCTIONS',
+    '17':'Intérêts des emprunts',
+    '18':'REVENU (+) OU DÉFICIT (−) DE L’IMMEUBLE',
+    '19':'Réintégration du supplément de déduction',
+    '20':'Rémunérations des associés',
+    '21':'REVENU NET (+) OU DÉFICIT (−)',
+    '22':'Parts dans d’autres SCI',
+    '23':'À RÉPARTIR ENTRE LES ASSOCIÉS'
+};
+function declPdfMoney(v){
+    let n=Math.round(Number(v)||0);
+    if(!n)return '—';
+    return (n<0?'-':'')+String(Math.abs(n)).replace(/\B(?=(\d{3})+(?!\d))/g,' ')+' €';
+}
+function declPdfSlug(txt){return String(txt||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^A-Za-z0-9]+/g,'-').replace(/^-+|-+$/g,'')||'declaration';}
+function declPdfName(s,period){
+    let year=period.mode==='custom'?(period.start||'').slice(0,4)+'-'+(period.end||'').slice(0,4):period.year;
+    return 'Declaration-'+declPdfSlug(s.name)+'-'+declPdfSlug(year)+'.pdf';
+}
+// Les contrôles de l'onglet « À vérifier », sous forme de listes lisibles.
+function declPdfChecks(s,period,m){
+    let strengths=[],watch=[];
+    let isIS=s.regime==='IS';
+    let partners=rows('partners',s.id);
+    let shares=partners.reduce((a,p)=>a+(Number(p.shares)||0),0);
+    if(String(s.siren||'').trim())strengths.push('SIREN renseigné : '+s.siren+'.');
+    else watch.push(isIS?'SIREN absent : il figure en tête de la 2065 et de la liasse 2033.':'SIREN absent : il est demandé au cadre II de la 2072-S.');
+    if(String(s.manager||'').trim())strengths.push('Gérant renseigné : '+s.manager+'.');
+    else watch.push(isIS?'Gérant non renseigné : il signe la 2065.':'Gérant non renseigné : le cadre II demande aussi son adresse et son téléphone.');
+    if(!partners.length)watch.push(isIS?'Aucun associé : la répartition du résultat ne peut pas être établie.':'Aucun associé : l’annexe A2 ne peut pas être remplie.');
+    else{
+        strengths.push(partners.length+' associé'+(partners.length>1?'s':'')+' · '+num(shares)+' part'+(shares>1?'s':'')+' au total.');
+        let noAddr=partners.filter(p=>!String(p.address||'').trim());
+        if(noAddr.length)watch.push('Adresse manquante pour '+noAddr.map(p=>p.name).join(', ')+(isIS?' (registre des associés).':' (annexe A2).'));
+    }
+    if(!m.buildings.length)watch.push(isIS?'Aucun immeuble : l’actif immobilisé de la 2033-A serait vide.':'Aucun immeuble : le cadre IV et l’annexe A1 seraient vides.');
+    else{
+        strengths.push(m.buildings.length+' adresse'+(m.buildings.length>1?'s':'')+' distincte'+(m.buildings.length>1?'s':'')+(isIS?' dans l’actif.':' dans le cadre IV.'));
+        let missing=m.buildings.filter(b=>!b.locauxSet);
+        if(missing.length)watch.push('Nombre de locaux non renseigné pour '+missing.map(b=>b.label).join(', ')+'.');
+    }
+    if(isIS){
+        let b=balanceModel(s,period);
+        if(Math.abs(b.gap)<0.005)strengths.push('Bilan équilibré : actif et passif concordent à '+money(b.totalActif,2)+'.');
+        else watch.push('Écart actif − passif de '+money(b.gap,2)+' : la 2033-A ne s’équilibre pas encore.');
+        strengths.push('Résultat de l’exercice : '+money(b.result,2)+' (case 136 de la 2033-A).');
+        watch.push('Amortissements : Dominis ne les calcule pas. Ils se saisissent dans la 2033-A et la 2033-B avec votre comptable.');
+        if(m.toSplit.length)watch.push(m.toSplit.length+' échéance'+(m.toSplit.length>1?'s':'')+' d’emprunt sans ventilation : seule la part d’intérêts est une charge de l’exercice.');
+    }else{
+        if(m.unclassified.length)watch.push(m.unclassified.length+' mouvement'+(m.unclassified.length>1?'s':'')+' non classé'+(m.unclassified.length>1?'s':'')+' : les totaux de l’annexe A1 seraient faux.');
+        else strengths.push('Toutes les catégories de trésorerie sont rattachées à une ligne officielle.');
+        if(m.toSplit.length)watch.push(m.toSplit.length+' échéance'+(m.toSplit.length>1?'s':'')+' d’emprunt à ventiler : seule la part d’intérêts est déductible en ligne 17.');
+        if(m.unassigned.length)watch.push(m.unassigned.length+' mouvement'+(m.unassigned.length>1?'s':'')+' sans immeuble : ils restent en « Non affecté ».');
+    }
+    if(m.financing.length)strengths.push(m.financing.length+' opération'+(m.financing.length>1?'s':'')+' de financement écartée'+(m.financing.length>1?'s':'')+' du résultat.');
+    return {strengths,watch};
+}
+function declPdfIdentity(s,partners,shares){
+    let nominal=shares&&Number(s.capital)?money(r2(Number(s.capital)/shares),2):'—';
+    let isIS=s.regime==='IS';
+    return {
+        title:'1 · Identité de la société'+(isIS?' (2065 et liasse 2033)':' (cadre II de la 2072-S)'),
+        table:{headers:['Rubrique','À déclarer','Où le trouver dans Dominis'],weights:[1.05,2.3,1.45],
+               rows:[
+                   ['Dénomination',s.name,'Fiche société'],
+                   ['SIREN',s.siren||'à compléter','Fiche société · SIREN (9 chiffres)'],
+                   ['Adresse du siège',declSiege(s)||'à compléter','Fiche société · adresse et ville'],
+                   ['Date de clôture de l’exercice',s.closing||'31/12','Fiche société · clôture'],
+                   ['Gérant',s.manager||'à compléter','Fiche société · gérant'],
+                   ['Nombre d’associés',String(partners.length),'Associés et parts'],
+                   ['Nombre total de parts',shares?num(shares):'à compléter','Associés et parts · total des parts'],
+                   ['Nominal des parts',nominal,'Capital social ÷ nombre de parts']
+               ]},
+        note:isIS
+            ?'La 2065 demande aussi l’adresse et le téléphone du gérant, le comptable et le conseil : ces informations ne sont pas suivies par Dominis, elles se saisissent directement dans la déclaration en ligne.'
+            :'Le cadre II demande aussi l’adresse et le téléphone du gérant, le comptable, le conseil et l’administrateur de biens : ces informations ne sont pas suivies par Dominis, elles se saisissent directement dans la déclaration en ligne.'
+    };
+}
+function declPdfMain(s,m,keys,c){
+    return {
+        title:'2 · 2072-S · cadre I — résultat de la société',
+        table:{headers:['Case','Intitulé','Montant'],weights:[0.6,4,1.2],aligns:['left','left','right'],
+               rows:[
+                   ['R1','Revenus bruts (annexe A1 : lignes 5 + 19 − 20 + 22)',declPdfMoney(c.R1)],
+                   ['R2','Paiement sur travaux (ligne 9)',declPdfMoney(c.R2)],
+                   ['R3','Frais et charges autres qu’intérêts d’emprunts (ligne 16)',declPdfMoney(c.R3)],
+                   ['R4','Intérêts d’emprunts (ligne 17)',declPdfMoney(c.R4)],
+                   ['R5','Revenu net (+) ou déficit net (−) — montant réparti (ligne 23)',declPdfMoney(c.R5)]
+               ]},
+        note:'La case R5 est le seul montant qui se répartit entre les associés : elle se recopie en tête de l’annexe A2, puis sur la 2044 de chacun.'
+    };
+}
+function declPdfBuildings(m){
+    return {
+        title:'3 · 2072-S · cadre IV — immeubles détenus',
+        table:{headers:['Adresse de l’immeuble','Locaux','Nature déclarée'],weights:[3.2,0.9,1.6],
+               rows:(m.buildings.length?m.buildings.map(b=>[
+                   b.label,
+                   b.locauxSet?String(b.locaux):'à compléter',
+                   b.properties.map(p=>p.type||'Bien').filter((v,i,a)=>a.indexOf(v)===i).join(', ')||'—'
+               ]):[['Aucun immeuble renseigné','—','—']])},
+        note:'La codification officielle de la nature (A ou B) figure dans la notice 2072-S-NOT-SD ; Dominis affiche le type saisi dans la fiche du bien.'
+    };
+}
+function declPdfA1(m,cols,keys,a1){
+    let full=cols.length<=3;
+    // Une adresse complète ne tient pas dans une colonne de 66 pt : les
+    // colonnes sont numérotées et la légende donne l'adresse en entier.
+    let long=cols.some(c=>String(c.label).length>22);
+    let addresses=cols.map((c,i)=>long&&!/non affect/i.test(c.label)?'Immeuble '+(i+1):c.label);
+    let legend=long&&full
+        ?'Colonnes : '+cols.map((c,i)=>(!/non affect/i.test(c.label)?'immeuble '+(i+1)+' = '+c.label:c.label)).join(' · ')+'.'
+        :'';
+    // Toutes les lignes officielles figurent, y compris celles à zéro : le
+    // document sert à recopier le formulaire, pas à en résumer les montants.
+    let keep=DECL_A1_LINES.map(([n,label,kind])=>[n,kind]);
+    let headers=full?['Ligne','Intitulé'].concat(addresses,['Total']):['Ligne','Intitulé','Total'];
+    let weights=full?[0.45,2.2].concat(cols.map(()=>1.05),[1.15]):[0.5,4,1.3];
+    let aligns=full?['left','left'].concat(cols.map(()=>'right'),['right']):['left','left','right'];
+    let rows=keep.map(([n])=>{
+        let cells=(a1[String(n)]||[]).map(v=>declPdfMoney(v));
+        return [String(n).replace('bis',' bis'),DECL_A1_SHORT[String(n)]||DECL_A1_LINES.find(l=>String(l[0])===String(n))[1]].concat(full?cells:[], [declPdfMoney(declSum(a1[String(n)]||[]))]);
+    });
+    return {
+        title:'4 · Annexe A1 · cadre VII — détail par immeuble',
+        paragraphs:legend?[legend]:[],
+        table:{headers,weights,aligns,rows},
+        note:full
+            ?'Une colonne par adresse distincte, arrondie à l’euro avant addition. La ligne 9 bis est un « dont » déjà compris dans la ligne 9 ; la ligne 14 se déduit.'
+            :'Le document compte plus de trois adresses : la répartition par immeuble reste disponible dans l’application (onglet Annexe A1). Les montants ci-dessus sont les totaux officiels.'
+    };
+}
+function declPdfA2(list,c){
+    let sumE=list.reduce((a,p)=>a+p.E,0),ecart=r2(c.R5-sumE);
+    let rows=list.map(p=>[p.name,(p.quote*100).toFixed(2).replace('.',',')+' %',declPdfMoney(p.A),declPdfMoney(p.B),declPdfMoney(p.D),declPdfMoney(p.E)]);
+    if(list.length)rows.push(['Total','100 %',declPdfMoney(declSum(list.map(p=>p.A))),declPdfMoney(declSum(list.map(p=>p.B))),declPdfMoney(declSum(list.map(p=>p.D))),declPdfMoney(sumE)]);
+    return {
+        title:'5 · Annexe A2 · cadre IX — répartition entre associés',
+        table:{headers:['Associé','Quote-part','A · revenus','B · frais','D · intérêts','E · résultat'],weights:[2.05,1,1.15,1.05,1.1,1.2],aligns:['left','right','right','right','right','right'],rows},
+        note:Math.abs(ecart)>0.004
+            ?'La somme des quotes-parts diffère de la case R5 de '+declPdfMoney(ecart)+' : c’est l’arrondi à l’euro de chaque associé, que la déclaration en ligne applique aussi.'
+            :'La somme des quotes-parts est égale à la case R5 ('+declPdfMoney(sumE)+').'
+    };
+}
+function declPdf2044(s,m,list){
+    let headers=['Case','Intitulé'].concat(list.length?list.map(p=>p.name):['Aucun associé']);
+    let weights=[0.55,2.1].concat(list.map(()=>1.1));
+    let aligns=['left','left'].concat(list.map(()=>'right'));
+    let lines=[['111','Revenus bruts','A'],['112','Frais et charges (sauf intérêts)','B'],['113','Intérêts d’emprunt','D'],['114','Bénéfice (+) ou déficit (−) · 111 − 112 − 113','E']];
+    let rows=lines.map(([code,label,key])=>[code,label].concat(list.map(p=>declPdfMoney(p[key]))));
+    let renovation=Math.round(declExact(m,'9bis'));
+    let cases=[['4BA','Bénéfice foncier imposable (ligne 420)','ba'],['4BB','Déficit reportable sur les revenus fonciers','bb'],['4BC','Déficit imputable sur le revenu global','bc']];
+    cases.forEach(([code,label,key])=>{
+        rows.push([code,label].concat(list.map(p=>declPdfMoney(decl2044Cases(p,Math.round(renovation*p.quote))[key]))));
+    });
+    rows.push(['4BD','Déficits antérieurs','—'].concat(list.map(()=>'à saisir')));
+    return {
+        title:'6 · 2044 de chaque associé — rubrique 110 et cases 4BA à 4BD',
+        table:{headers,weights,aligns,rows},
+        note:'Rubrique 110 : '+s.name+(declSiege(s)?' · '+declSiege(s):'')+'. Déduction spécifique et déficits antérieurs se lisent sur l’avis d’imposition : Dominis ne les invente pas. Un associé sans autre revenu foncier peut reporter directement ces montants sur sa 2042 avec une annexe libre.'
+    };
+}
+function declPdfIs(s,period,b){
+    let sections=[];
+    let actifRows=b.actif.map(l=>[l.code,l.label,declPdfMoney(l.amount)]);
+    actifRows.push(['112','TOTAL DE L’ACTIF NET',declPdfMoney(b.totalActif)]);
+    let passifRows=b.passif.map(l=>[l.code,l.label,declPdfMoney(l.amount)]);
+    passifRows.push(['180','TOTAL DU PASSIF',declPdfMoney(b.totalPassif)]);
+    sections.push({title:'2 · Liasse 2033-A — bilan simplifié (actif)',table:{headers:['Case','Poste','Montant'],weights:[0.6,4,1.3],aligns:['left','left','right'],rows:actifRows}});
+    sections.push({title:'3 · Liasse 2033-A — bilan simplifié (passif)',table:{headers:['Case','Poste','Montant'],weights:[0.6,4,1.3],aligns:['left','left','right'],rows:passifRows},
+        note:Math.abs(b.gap)<0.005?'Bilan équilibré : actif et passif concordent.':'Écart actif − passif de '+declPdfMoney(b.gap)+' : il est signalé, jamais corrigé automatiquement.'});
+    sections.push({title:'4 · Résultat de l’exercice',table:{headers:['Indicateur','Montant'],weights:[4,1.2],aligns:['left','right'],rows:[
+        ['Produits encaissés hors financement',declPdfMoney(b.totalProducts)],
+        ['Charges décaissées hors financement',declPdfMoney(b.totalCharges)],
+        ['Résultat (case 136 de la 2033-A)',declPdfMoney(b.result)],
+        ['Trésorerie à la clôture',declPdfMoney(b.cash)],
+        ['Créances de loyers',declPdfMoney(b.receivables)]
+    ]}});
+    return sections;
+}
+function declPdfModel(s,period){
+    let m=declModel(s,period);
+    let cols=declCols(m),keys=cols.map(c=>c.key);
+    let a1=declA1Rows(m,keys),c=declMainCases(m,keys);
+    let list=declShares(s,period,m);
+    let partners=rows('partners',s.id);
+    let shares=partners.reduce((a,p)=>a+(Number(p.shares)||0),0);
+    let isIS=s.regime==='IS';
+    let checks=declPdfChecks(s,period,m);
+    let sections=[declPdfIdentity(s,partners,shares)];
+    if(isIS){
+        sections=sections.concat(declPdfIs(s,period,balanceModel(s,period)));
+    }else{
+        sections.push(declPdfMain(s,m,keys,c));
+        sections.push(declPdfBuildings(m));
+        sections.push(declPdfA1(m,cols,keys,a1));
+        sections.push(declPdfA2(list,c));
+        sections.push(declPdf2044(s,m,list));
+    }
+    sections.push({
+        title:(isIS?'5':'7')+' · Points à vérifier avant de déposer',
+        analysis:{
+            strengths:checks.strengths,
+            watch:checks.watch,
+            conclusion:isIS
+                ?'La SCI relève de l’impôt sur les sociétés : elle dépose la 2065 et la liasse 2033, pas la 2072-S. Les associés ne déclarent rien au titre de la société ; les dividendes relèvent de leur 2042.'
+                :'Le dépôt est obligatoirement dématérialisé. La 2072-S se dépose avec ses annexes A1 et A2 ; chaque associé reporte ensuite sa quote-part sur sa 2044, puis les cases 4BA à 4BD sur sa 2042. Un point « à compléter » ne bloque pas la saisie, mais fausserait le montant déclaré.'
+        }
+    });
+    let year=period.mode==='custom'?(period.start||'')+' → '+(period.end||''):period.year;
+    let span=(period.start?date(period.start):'')+' → '+(period.end?date(period.end):'');
+    return {
+        eyebrow:'DOMINIS · DOSSIER DE DÉCLARATION',
+        title:s.name,
+        subtitle:(isIS?'Dossier de déclaration · 2065 et liasse 2033':'Dossier de déclaration · 2072-S et annexes')+' · Exercice '+year,
+        meta:['Établi le '+date(today()),'Régime '+(s.regime||'IR')+(isIS?' · impôt sur les sociétés':' · revenus fonciers'),'Clôture de l’exercice : '+(s.closing||'31/12'),'Période : '+span],
+        notice:'Document préparatoire : il regroupe les montants à recopier dans la déclaration en ligne et la provenance de chacun. Ce n’est pas un formulaire officiel et il ne se dépose pas en l’état. Vérifiez chaque montant avec vos relevés avant de déclarer.',
+        footer:'Dominis · Dossier de déclaration · '+s.name,
+        sections
+    };
+}
+async function declPdfDownload(){
+    let s=currentSCI();
+    if(!s)return notify('Ouvrez d’abord la page d’une SCI.',true);
+    let btn=$('[data-action="decl-pdf"]'),old=btn?btn.innerHTML:'';
+    if(btn){btn.disabled=true;btn.innerHTML='Préparation…';}
+    try{
+        let period=declPeriod(s);
+        let model=declPdfModel(s,period);
+        let name=declPdfName(s,period);
+        let res=await api('declaration-pdf',{filename:name,model});
+        await download(res,name);
+        notify('Dossier de déclaration téléchargé · '+period.label+'.');
+    }catch(e){
+        notify(e.message,true);
+    }finally{
+        if(btn){btn.disabled=false;btn.innerHTML=old;}
+    }
+}
+
 function identity(s){let openTxt=s.opening&&Number(s.opening)!==0?money(s.opening,2)+(s.opening_date?' au '+date(s.opening_date):''):'—';return `<div class="settings-grid"><div class="panel"><div class="panel-head"><h2>Identité de la société</h2><button data-action="edit-sci">${icon('edit')} Modifier</button></div><div class="panel-body info-grid">${[['Dénomination',s.name],['SIREN',s.siren||'Non renseigné'],['Gérant',s.manager||'Non renseigné'],['Siège social',s.address||'Non renseigné'],['Capital social',money(s.capital,2)],['Régime fiscal',s.regime||'IR'],['Clôture de l’exercice',s.closing||'31/12'],['Solde d’ouverture',openTxt]].map(([k,v])=>`<div class="info-item"><label>${k}</label><span>${esc(v)}</span></div>`).join('')}<div class="info-item" style="grid-column:1/-1"><label>Notes de gestion</label><span style="white-space:pre-wrap">${esc(s.notes||'Aucune note.')}</span></div></div></div><div class="stack"><div class="panel"><div class="panel-head"><h2>Repères de gestion · ${esc(s.regime||'IR')}</h2></div><div class="panel-body stack"><p class="sub">${s.regime==='IS'?'Préparer la déclaration 2065 et ses annexes avec une comptabilité d’engagement, les immobilisations et les amortissements. Dominis ne produit pas de liasse fiscale ni de FEC.':'Préparer les informations de la déclaration 2072 selon votre situation. Les recettes et dépenses enregistrées ne déterminent pas automatiquement le résultat foncier imposable.'}</p><p class="sub">Le gérant doit rendre compte annuellement de sa gestion aux associés (article 1856 du Code civil). Les modalités de décision dépendent notamment des statuts.</p><button data-add="tasks">${icon('calendar')} Ajouter une échéance de suivi</button><button data-action="annual-report">${icon('file')} Préparer une synthèse annuelle</button><p class="sub">Les dates fiscales sont à vérifier chaque année. Aucun calendrier légal automatique n’est imposé par l’application.</p></div></div><div class="panel"><div class="panel-body"><h3 class="red">Suppression de la SCI</h3><p class="sub" style="margin:8px 0 15px">Cette action supprime la société et toutes ses données liées. Exportez une sauvegarde complète auparavant.</p><button class="danger" data-action="delete-sci">${icon('trash')} Supprimer cette SCI</button><button class="danger" data-action="manage-deletions" style="margin-top:8px">${icon('trash')} Gérer la suppression</button><p class="compact-note" style="margin-top:10px">Vider une seule page de cette SCI, sans toucher aux autres sociétés.</p></div></div></div></div>`;}
 function settingsGeneral(){return `<div class="settings-grid"><div class="stack"><section class="panel"><div class="panel-head"><h2>Apparence & préférences</h2>${icon('sun')}</div><div class="panel-body"><div class="setting-row"><div><h3>Thème de l’interface</h3><p>Le même soin, de jour comme de nuit.</p></div><div class="theme-choice"><button data-theme="dark" class="${S.settings.theme==='dark'?'active':''}">${icon('moon')} Sombre</button><button data-theme="light" class="${S.settings.theme==='light'?'active':''}">${icon('sun')} Clair</button></div></div><div class="setting-row"><div><h3>Navigation compacte</h3><p>Une barre latérale discrète, plus d’espace.</p></div><button class="toggle ${S.settings.collapsed?'on':''}" data-action="collapse" aria-label="Navigation compacte" aria-pressed="${!!S.settings.collapsed}"></button></div><div class="setting-row"><div><h3>Nom de votre espace</h3><p>Affiché dans la barre latérale.</p></div><button data-action="rename-space">${icon('edit')} Modifier</button></div><div class="setting-row"><div><h3>Sauvegarde à la fermeture</h3><p>Copie complète dans le dossier sauvegardes/.</p></div><button class="toggle ${S.settings.auto_backup?'on':''}" data-action="auto-backup" aria-label="Sauvegarde à la fermeture" aria-pressed="${!!S.settings.auto_backup}"></button></div><div class="setting-row"><div><h3>Sauvegarde hebdomadaire</h3><p>Copie de data.db au premier lancement de la semaine ; deux fichiers maximum dans auto-save/.</p></div><button class="toggle ${S.settings.weekly_auto_save?'on':''}" data-action="weekly-auto-save" aria-label="Sauvegarde hebdomadaire" aria-pressed="${!!S.settings.weekly_auto_save}"></button></div></div></section><section class="panel"><div class="panel-head"><h2>Ordre de navigation</h2>${icon('panel')}</div><div class="panel-body"><p class="sub">Déplacez les pages avec les flèches. Vos nouvelles SCI apparaissent automatiquement.</p><div class="order-item locked">${icon('grid')} Tableau de bord <span style="margin-left:auto">${icon('lock')}</span></div>${navOrder().map((id,i,a)=>`<div class="order-item">${navIcon(id)}${esc(navName(id))}<div class="actions"><button data-move="${id}" data-dir="-1" ${!i?'disabled':''} title="Monter">${icon('up')}</button><button data-move="${id}" data-dir="1" ${i===a.length-1?'disabled':''} title="Descendre">${icon('down')}</button></div></div>`).join('')}<div class="order-item locked">${icon('settings')} Paramètres <span style="margin-left:auto">${icon('lock')}</span></div><p class="compact-note">Tableau de bord reste en premier, Paramètres en dernier. Quitter est une action distincte.</p></div></section></div><div class="stack"><section class="panel"><div class="panel-head"><h2>Vos données vous appartiennent</h2>${icon('database')}</div><div class="panel-body"><div class="setting-row"><div><h3>Importer des données</h3><p>JSON Dominis, CSV ou Excel (.xlsx) de mouvements multi-SCI.<br>Aperçu et destinations avant validation.</p></div><button data-action="import">${icon('upload')} Importer</button></div><div class="setting-row"><div><h3>Exporter une sélection</h3><p>Choisissez les SCI, les données et le format.</p></div><button data-action="export">${icon('download')} Exporter</button></div><div class="setting-row"><div><h3>Sauvegarde complète</h3><p>Toutes les SCI, pièces jointes et préférences.<br>${S.settings.last_backup?'Dernière : '+new Date(S.settings.last_backup).toLocaleString('fr-FR'):'Aucune sauvegarde manuelle enregistrée.'}</p></div><button class="primary" data-action="backup">${icon('database')} Sauvegarder</button></div><div class="setting-row"><div><h3>Restaurer une sauvegarde</h3><p>Remplace l’ensemble de l’espace. Une copie<br>de sécurité est créée avant restauration.</p></div><button data-action="restore">${icon('clock')} Restaurer</button></div></div></section><section class="panel"><div class="panel-head"><h2>Stockage & confidentialité</h2>${icon('lock')}</div><div class="panel-body stack"><div class="row between"><span class="sub">Base locale</span><span class="pill green"><span class="status-dot"></span>data.db · ${num(S.db_size/1024/1024)} Mo</span></div><p class="sub">Aucune télémétrie. La gestion de vos données fonctionne hors ligne. Seule la vérification des versions contacte GitHub, sans transmettre vos données patrimoniales. Documents, réglages et historique sont stockés dans SQLite. La base n’est pas chiffrée : protégez votre session et vos sauvegardes.</p><p class="sub">Usage local, mono-utilisateur. Ne placez pas une base ouverte sur un partage réseau ou dans une synchronisation cloud.</p>${S.preview?'<div class="notice" style="margin:0">Aperçu hébergé : utilisez des données fictives uniquement. Le téléchargement et les lanceurs sont destinés à l’usage local.</div>':''}</div></section>${S.settings.demo?`<section class="panel"><div class="panel-body"><h3>Données de démonstration</h3><p class="sub" style="margin:8px 0 14px">Efface toutes les données de cet espace démo, y compris vos ajouts. Sauvegardez-les avant de repartir d’un espace vierge.</p><button class="danger" data-action="reset-demo">${icon('trash')} Vider l’espace de démonstration</button></div></section>`:''}</div><section class="panel" style="grid-column:1/-1"><div class="panel-head"><h2>Journal d’activité</h2><span class="sub">80 dernières actions</span></div><div class="panel-body audit-list">${S.audit.map(r=>`<div class="audit-line"><time>${esc(new Date(r.at).toLocaleString('fr-FR'))}</time><strong style="min-width:90px">${esc(r.action)}</strong><span class="muted">${esc(r.detail)}</span></div>`).join('')||'<p class="sub">Aucune action enregistrée.</p>'}</div></section></div>`;}
 function render(){if(!['dashboard','settings',...Object.keys(navs),...S.scis.map(s=>s.id)].includes(page))page='dashboard';yearSelectSeq=0;renderShell();let content='';if(page==='dashboard'){content=head('Votre patrimoine, en perspective.','L’essentiel de vos sociétés, réuni au même endroit.',yearSelect()+exportBtn()+`<button class="primary" data-action="new-sci">${icon('plus')} Nouvelle SCI</button>`,'Tableau de bord général')+(S.scis.length?dashboard():empty('Bienvenue dans votre espace patrimonial','Créez votre première SCI. Son espace de gestion apparaîtra automatiquement dans la navigation.',`<button class="primary" data-action="new-sci">${icon('plus')} Créer ma première SCI</button>`));}
-else if(page==='settings')content=settingsPage();else if(navs[page])content=listPage({treasury:'entries',agenda:'tasks',documents:'documents'}[page]);else{let s=currentSCI();content=head(s.name,(s.city||s.address||'Société civile immobilière')+' · Régime '+(s.regime||'IR'),yearSelect(s.id)+`<button data-action="edit-sci">${icon('edit')} Société</button>`+`<button class="primary" data-action="quick">${icon('plus')} Ajouter</button>`,'Espace société')+`<nav class="tabs" aria-label="Gestion de la SCI">${tabs.map(([t,n])=>`<button class="tab ${tab===t?'active':''}" data-tab="${t}">${n}</button>`).join('')}</nav>`+(tab==='overview'?dashboard(s.id):tab==='balance'?declPage(s):tab==='identity'?identity(s):listPage(tab,s.id));}
+else if(page==='settings')content=settingsPage();else if(navs[page])content=listPage({treasury:'entries',agenda:'tasks',documents:'documents'}[page]);else{let s=currentSCI();content=head(s.name,(s.city||s.address||'Société civile immobilière')+' · Régime '+(s.regime||'IR'),(tab==='balance'?`<button data-action="decl-pdf" title="Télécharger le dossier de déclaration au format PDF">${icon('download')} Télécharger le PDF</button>`:'')+yearSelect(s.id)+`<button data-action="edit-sci">${icon('edit')} Société</button>`+`<button class="primary" data-action="quick">${icon('plus')} Ajouter</button>`,'Espace société')+`<nav class="tabs" aria-label="Gestion de la SCI">${tabs.map(([t,n])=>`<button class="tab ${tab===t?'active':''}" data-tab="${t}">${n}</button>`).join('')}</nav>`+(tab==='overview'?dashboard(s.id):tab==='balance'?declPage(s):tab==='identity'?identity(s):listPage(tab,s.id));}
 const recoveryNotice=S.primary_db_missing?`<div class="notice" role="alert" style="border-left-color:var(--red)"><strong>La base principale data.db était absente.</strong> Dominis a créé une base vide ; les fichiers de auto-save/ ne sont pas utilisés comme base. Avant toute nouvelle saisie, restaurez une copie dans data.db.<div style="margin-top:10px"><button class="danger" data-action="restore">${icon('clock')} Restaurer une sauvegarde</button></div></div>`:'';$('#main').innerHTML=recoveryNotice+content+`<div class="footer"><span>DOMINIS <span style="opacity:.5;margin:0 7px">/</span> Votre patrimoine, en toute clarté.</span><span class="row gap8">${icon('lock')} Enregistrement local · Outil de gestion, hors comptabilité certifiée</span></div>`;updateCount();checkTaskNotifications();}
 function currentListKind(){return navs[page]?{treasury:'entries',agenda:'tasks',documents:'documents'}[page]:tab;}
 function visibleCount(kind,id){let list=filtered(kind,id);if(kind==='documents')list=list.filter(inDocFolder);return list.length}
@@ -10193,15 +11692,16 @@ function receipt(id){let c=rec(id),l=rec(c.lease_id),s=sci(c.sci),p=rec(l?.prope
 function searchModal(){openModal('Retrouver l’essentiel',`<input id="global-search" type="search" placeholder="Une SCI, un locataire, un bien, un document…" aria-label="Recherche globale"><div id="search-results" class="search-results" style="margin-top:15px"></div>`);let search=()=>{let q=$('#global-search').value.toLowerCase().trim();let list=[...S.scis.map(s=>({...s,kind:'sci'})),...S.records].filter(r=>q&&Object.values(r).some(v=>typeof v==='string'&&v.toLowerCase().includes(q))).slice(0,30);$('#search-results').innerHTML=list.map(r=>`<button class="search-result" data-search-go="${r.id}" data-search-kind="${r.kind}">${icon(r.kind==='sci'?'building':'file')}<span>${esc(label(r))}<small>${r.kind==='sci'?'Société':esc(sciname(r.sci))+' · '+kindNames[r.kind]}</small></span></button>`).join('')||`<p class="sub">${q?'Aucun résultat.':'La recherche porte sur toutes les SCI et les métadonnées des documents.'}</p>`;};$('#global-search').oninput=search;search();}
 async function quit(){if(closing||updateInstalling)return;if($('#modal').innerHTML&&modalDirty&&!confirm('Des modifications de formulaire ne sont pas enregistrées. Les abandonner et quitter ?'))return;openModal('Quitter en toute sérénité',`<p>Les écritures enregistrées et les réglages seront synchronisés, puis l’intégrité de la base sera vérifiée.</p><p class="sub" style="margin-top:12px">${S.settings.auto_backup?'Une sauvegarde complète sera créée dans sauvegardes/. ':''}${S.preview?'Mode aperçu : le service de démonstration restera disponible.':S.native?'La fenêtre et le processus local seront fermés.':'En mode navigateur, la fermeture automatique de l’onglet peut être bloquée ; le serveur sera bien arrêté.'}</p>`,`<button data-action="close-modal">Rester dans Dominis</button><button class="primary" id="confirm-quit">${icon('exit')} Enregistrer et quitter</button>`);$('#confirm-quit').onclick=async()=>{closing=true;$('#confirm-quit').disabled=true;try{await settingsQueue;await api('quit',{});closeModal(true);if(S.preview){notify('Intégrité vérifiée, données sauvegardées. Le service reste actif dans cet aperçu.');await refresh();}else{$('#main').innerHTML=empty('Votre espace est fermé.','Toutes les données enregistrées ont été sauvegardées. Vous pouvez fermer cet onglet.');setTimeout(()=>window.close(),400);}}catch(e){modalError(e);$('#confirm-quit')&&($('#confirm-quit').disabled=false);}finally{closing=false;}};}
 function quickModal(){openModal('Une action, sans détour',`<div class="checks">${Object.entries(kindNames).map(([k,n])=>`<button data-add="${k}" style="justify-content:flex-start">${icon('plus')}${n}</button>`).join('')}</div>`);}
-async function handleAction(a){switch(a){case'collapse':await setPref({collapsed:!S.settings.collapsed});document.body.classList.toggle('collapsed',!!S.settings.collapsed);if(page==='settings')render();break;case'bell':openBellModal();break;case'new-sci':editForm('sci');break;case'edit-sci':editForm('sci',currentSCI());break;case'delete-sci':deletion('sci',page);break;case'manage-deletions':manageDeletions();break;case'close-modal':closeModal();break;case'export':exportModal();break;case'import':importModal();break;case'backup':await settingsQueue;await download(await api('backup',{}),'dominis-sauvegarde-'+today()+'.db');await refresh();notify('Sauvegarde complète téléchargée. Conservez-la sur un support sûr.');break;case'restore':restoreModal();break;case'generate-calls':callsModal();break;case'search':searchModal();break;case'quick':quickModal();break;case'annual-report':annualReport();break;case'balance-mapping':declMappingModal();break;case'balance-assign':declAssignModal();break;case'decl-map-save':{let s=currentSCI();if(!s)break;let map={...balanceLineMap(s)};$$('[data-decl-map]').forEach(sel=>{let c=sel.dataset.declMap,v=sel.value;if(v)map[c]=v;else delete map[c];});let all={...(S.settings.decl_line_map||{})};all[s.id]=map;setPref({decl_line_map:all}).then(()=>{closeModal(true);render();notify('Classement enregistré pour '+s.name+'.');});break;}case'decl-assign-save':{let s=currentSCI();if(!s)break;let changes=[...$$('[data-decl-assign]')].map(sel=>[sel.dataset.declAssign,sel.value]);let todo=changes.filter(([id,pid])=>pid);for(const [id,pid] of todo){let r=rec(id);if(!r)continue;await api('save',{kind:'entries',id,sci:r.sci,data:{...r,property_id:pid}});}await load();closeModal(true);render();notify(todo.length+' mouvement'+(todo.length>1?'s':'')+' rattaché'+(todo.length>1?'s':'')+' à un immeuble.');break;}case'balance-map-save':{let s=currentSCI();if(!s)break;let map={...balanceLineMap(s)};$$('[data-balance-map]').forEach(sel=>{let c=sel.dataset.balanceMap,v=sel.value;if(v)map[c]=v;else delete map[c];});let all={...(S.settings.balance_line_map||{})};all[s.id]=map;setPref({balance_line_map:all}).then(()=>{closeModal(true);render();notify('Classement enregistré pour '+s.name+'.');});break;}case'balance-assign-save':{let s=currentSCI();if(!s)break;let changes=[...$$('[data-balance-assign]')].map(sel=>[sel.dataset.balanceAssign,sel.value]);let todo=changes.filter(([id,pid])=>pid);for(const [id,pid] of todo){let r=rec(id);if(!r)continue;await api('save',{kind:'entries',id,sci:r.sci,data:{...r,property_id:pid}});}await load();closeModal(true);render();notify(todo.length+' mouvement'+(todo.length>1?'s':'')+' rattaché'+(todo.length>1?'s':'')+' à un bien.');break;}case'doc-folder-reset':await restoreDefaultDocFolders();break;case'doc-folder-new':newDocFolderModal();break;case'quit':await quit();break;case'auto-backup':await setPref({auto_backup:!S.settings.auto_backup});render();break;case'weekly-auto-save':await setPref({weekly_auto_save:!S.settings.weekly_auto_save});render();break;case'rename-space':openModal('Nom de votre espace',field('owner','Nom affiché','text',S.settings.owner),`<button data-action="close-modal">Annuler</button><button class="primary" id="save-owner">Enregistrer</button>`);$('#save-owner').onclick=async()=>{try{let v=$('#f-owner').value.trim();if(!v||v.length>45)throw new Error('Choisissez un nom de 1 à 45 caractères.');await setPref({owner:v});closeModal(true);render();}catch(e){modalError(e)}};break;case'reset-demo':openModal('Repartir d’un espace vierge',`<p class="sub">Toutes les SCI et données de cette démonstration seront supprimées, y compris vos ajouts. Vos préférences d’apparence sont conservées. Créez une sauvegarde avant de continuer.</p><div style="margin-top:15px">${field('confirm-demo','Saisissez EFFACER pour confirmer')}</div>`,`<button data-action="close-modal">Annuler</button><button class="danger" id="reset-confirm">Vider la démonstration</button>`);$('#reset-confirm').onclick=async()=>{try{await api('reset-demo',{confirmation:$('#f-confirm-demo').value});closeModal(true);page='dashboard';await refresh();notify('Votre espace est maintenant vierge.');}catch(e){modalError(e)}};break;}}
-document.addEventListener('click',async ev=>{let el=ev.target.closest('button,[data-nav],[data-doc-open],[data-doc-folder],[data-decl-detail],[data-decl-copy]');if(!el)return;if(Date.now()<folderDragSuppressUntil)return;try{if(updateInstalling)return;if(el.dataset.folderNew){newDocFolderModal(el.dataset.folderParent||'');return;}if(el.dataset.folderRename){renameDocFolderModal(el.dataset.folderRename);return;}if(el.dataset.folderMove){await moveDocFolder(docScope(),el.dataset.folderMove,Number(el.dataset.dir));return;}if(el.dataset.docFolder!==undefined&&el.dataset.docFolder!==null&&el.dataset.docOpen===undefined){docFolder=el.dataset.docFolder;docYear='';renderListing();return;}if(el.dataset.docOpen){await documentPreview(el.dataset.docOpen);return;}if(el.dataset.documentPreview){await documentPreview(el.dataset.documentPreview);return;}if(el.dataset.docZoom){let v=el.dataset.docZoom;if(v==='in')docPreviewStageZoom(docPreviewZoom+0.25);else if(v==='out')docPreviewStageZoom(docPreviewZoom-0.25);else docPreviewStageZoom(Number(v)/100);return;}if(el.dataset.docSheet!==undefined&&el.dataset.docSheet!==null){docPreviewSheetSelect(Number(el.dataset.docSheet));return;}if(el.dataset.macClose){dismissMacNotification(el.dataset.macClose);return;}if(el.dataset.macView){let id=el.dataset.macView,r=rec(id);await markTaskRemindersRead(id);if(r){closeModal(true);navigate(r.sci,'tasks');editForm('tasks',r);}return;}if(el.dataset.bellView){let id=el.dataset.bellView,r=rec(id);await markTaskRemindersRead(id);closeModal(true);if(r){navigate(r.sci,'tasks');editForm('tasks',r);}return;}if(el.dataset.bellRead){await markTaskRemindersRead(el.dataset.bellRead);if($('#bell-modal-body'))openBellModal();return;}if(el.dataset.bellReadAll){for(let r of unreadReminderTasks())await markTaskRemindersRead(r.id);if($('#bell-modal-body'))openBellModal();return;}if(el.dataset.bellAgenda){closeModal(true);navigate('agenda');return;}if(el.dataset.declTab){declTab=el.dataset.declTab;render();return;}if(el.dataset.declCopy!==undefined){await declCopyAmount(el.dataset.declCopy,el.dataset.declLabel||'');return;}if(el.dataset.declDetail){declDetailModal(el.dataset.declDetail);return;}if(el.dataset.tableConfig){openTableColumnsModal(el.dataset.tableConfig);return;}
+async function handleAction(a){switch(a){case'collapse':await setPref({collapsed:!S.settings.collapsed});document.body.classList.toggle('collapsed',!!S.settings.collapsed);if(page==='settings')render();break;case'bell':openBellModal();break;case'new-sci':editForm('sci');break;case'edit-sci':editForm('sci',currentSCI());break;case'delete-sci':deletion('sci',page);break;case'manage-deletions':manageDeletions();break;case'close-modal':closeModal();break;case'export':exportModal();break;case'import':importModal();break;case'backup':await settingsQueue;await download(await api('backup',{}),'dominis-sauvegarde-'+today()+'.db');await refresh();notify('Sauvegarde complète téléchargée. Conservez-la sur un support sûr.');break;case'restore':restoreModal();break;case'generate-calls':callsModal();break;case'search':searchModal();break;case'quick':quickModal();break;case'annual-report':annualReport();break;case'decl-pdf':await declPdfDownload();break;case'balance-mapping':declMappingModal();break;case'balance-assign':declAssignModal();break;case'decl-map-save':{let s=currentSCI();if(!s)break;let map={...balanceLineMap(s)};$$('[data-decl-map]').forEach(sel=>{let c=sel.dataset.declMap,v=sel.value;if(v)map[c]=v;else delete map[c];});let all={...(S.settings.decl_line_map||{})};all[s.id]=map;setPref({decl_line_map:all}).then(()=>{closeModal(true);render();notify('Classement enregistré pour '+s.name+'.');});break;}case'decl-assign-save':{let s=currentSCI();if(!s)break;let changes=[...$$('[data-decl-assign]')].map(sel=>[sel.dataset.declAssign,sel.value]);let todo=changes.filter(([id,pid])=>pid);for(const [id,pid] of todo){let r=rec(id);if(!r)continue;await api('save',{kind:'entries',id,sci:r.sci,data:{...r,property_id:pid}});}await load();closeModal(true);render();notify(todo.length+' mouvement'+(todo.length>1?'s':'')+' rattaché'+(todo.length>1?'s':'')+' à un immeuble.');break;}case'doc-folder-reset':await restoreDefaultDocFolders();break;case'doc-folder-new':newDocFolderModal();break;case'quit':await quit();break;case'auto-backup':await setPref({auto_backup:!S.settings.auto_backup});render();break;case'weekly-auto-save':await setPref({weekly_auto_save:!S.settings.weekly_auto_save});render();break;case'rename-space':openModal('Nom de votre espace',field('owner','Nom affiché','text',S.settings.owner),`<button data-action="close-modal">Annuler</button><button class="primary" id="save-owner">Enregistrer</button>`);$('#save-owner').onclick=async()=>{try{let v=$('#f-owner').value.trim();if(!v||v.length>45)throw new Error('Choisissez un nom de 1 à 45 caractères.');await setPref({owner:v});closeModal(true);render();}catch(e){modalError(e)}};break;case'reset-demo':openModal('Repartir d’un espace vierge',`<p class="sub">Toutes les SCI et données de cette démonstration seront supprimées, y compris vos ajouts. Vos préférences d’apparence sont conservées. Créez une sauvegarde avant de continuer.</p><div style="margin-top:15px">${field('confirm-demo','Saisissez EFFACER pour confirmer')}</div>`,`<button data-action="close-modal">Annuler</button><button class="danger" id="reset-confirm">Vider la démonstration</button>`);$('#reset-confirm').onclick=async()=>{try{await api('reset-demo',{confirmation:$('#f-confirm-demo').value});closeModal(true);page='dashboard';await refresh();notify('Votre espace est maintenant vierge.');}catch(e){modalError(e)}};break;}}
+document.addEventListener('click',async ev=>{let el=ev.target.closest('button,[data-nav],[data-doc-open],[data-doc-folder],[data-decl-detail],[data-decl-copy]');if(!el)return;if(Date.now()<folderDragSuppressUntil)return;try{if(updateInstalling)return;if(el.dataset.folderNew){newDocFolderModal(el.dataset.folderParent||'');return;}if(el.dataset.folderRename){renameDocFolderModal(el.dataset.folderRename);return;}if(el.dataset.folderMove){await moveDocFolder(docScope(),el.dataset.folderMove,Number(el.dataset.dir));return;}if(el.dataset.docFolder!==undefined&&el.dataset.docFolder!==null&&el.dataset.docOpen===undefined){docFolder=el.dataset.docFolder;docYear='';renderListing();return;}if(el.dataset.docOpen){await documentPreview(el.dataset.docOpen);return;}if(el.dataset.documentPreview){await documentPreview(el.dataset.documentPreview);return;}if(el.dataset.docZoom){let v=el.dataset.docZoom;if(v==='in')docPreviewStageZoom(docPreviewZoom+0.25);else if(v==='out')docPreviewStageZoom(docPreviewZoom-0.25);else docPreviewStageZoom(Number(v)/100);return;}if(el.dataset.docSheet!==undefined&&el.dataset.docSheet!==null){docPreviewSheetSelect(Number(el.dataset.docSheet));return;}if(el.dataset.docAppendBtn!==undefined){docAppendPick();return;}if(el.dataset.docArrange!==undefined){await docArrangeModal(el.dataset.docArrange||docPreviewId);return;}if(el.dataset.macClose){dismissMacNotification(el.dataset.macClose);return;}if(el.dataset.macView){let id=el.dataset.macView,r=rec(id);await markTaskRemindersRead(id);if(r){closeModal(true);navigate(r.sci,'tasks');editForm('tasks',r);}return;}if(el.dataset.bellView){let id=el.dataset.bellView,r=rec(id);await markTaskRemindersRead(id);closeModal(true);if(r){navigate(r.sci,'tasks');editForm('tasks',r);}return;}if(el.dataset.bellRead){await markTaskRemindersRead(el.dataset.bellRead);if($('#bell-modal-body'))openBellModal();return;}if(el.dataset.bellReadAll){for(let r of unreadReminderTasks())await markTaskRemindersRead(r.id);if($('#bell-modal-body'))openBellModal();return;}if(el.dataset.bellAgenda){closeModal(true);navigate('agenda');return;}if(el.dataset.declTab){declTab=el.dataset.declTab;render();return;}if(el.dataset.declCopy!==undefined){await declCopyAmount(el.dataset.declCopy,el.dataset.declLabel||'');return;}if(el.dataset.declDetail){declDetailModal(el.dataset.declDetail);return;}if(el.dataset.tableConfig){openTableColumnsModal(el.dataset.tableConfig);return;}
 if(el.dataset.tableDensity){await saveTableView(el.dataset.tableKind,{density:el.dataset.tableDensity});refreshTableViewUi(el.dataset.tableKind);return;}
 if(el.dataset.tableOpt){let tk=el.dataset.tableKind,cur=tableView(tk);await saveTableView(tk,{[el.dataset.tableOpt]:!cur[el.dataset.tableOpt]});refreshTableViewUi(tk);return;}if(el.dataset.colToggle){let k=el.dataset.colKind,cid=el.dataset.colToggle,cols=getTableColumns(k),c=cols.find(x=>x.id===cid);if(c){if(c.visible&&cols.filter(x=>x.visible).length<=1)return;c.visible=!c.visible;await saveTableColumns(k,cols);if(tableKindOf(k)==='entries_preview')render();else renderListing();if($('#col-config-wrap'))$('#col-config-wrap').innerHTML=renderTableColumnsList(k);}return;}if(el.dataset.colMove){let k=el.dataset.colKind,cid=el.dataset.colMove,dir=Number(el.dataset.dir),cols=getTableColumns(k),i=cols.findIndex(x=>x.id===cid),j=i+dir;if(i>=0&&j>=0&&j<cols.length){[cols[i],cols[j]]=[cols[j],cols[i]];await saveTableColumns(k,cols);if(tableKindOf(k)==='entries_preview')render();else renderListing();if($('#col-config-wrap'))$('#col-config-wrap').innerHTML=renderTableColumnsList(k);}return;}if(el.dataset.colReset){// Réinitialisation explicite : ce tableau retrouve l'ordre et la visibilité par défaut, sans toucher aux autres tableaux (même ceux du même type).
 let k=el.dataset.colReset,all={...(S.settings.table_columns||{})};all[k]={order:[],hidden:[]};await setPref({table_columns:all});if(tableKindOf(k)==='entries_preview')render();else renderListing();if($('#col-config-wrap'))$('#col-config-wrap').innerHTML=renderTableColumnsList(k);return;}if(el.dataset.settingsSection){settingsSection=el.dataset.settingsSection;render();return;}if(el.dataset.updateAction){let a=el.dataset.updateAction;if(a==='check'){updateInfo=await (await api('update/check',{})).json();render();}else if(a==='offer')showUpdateOffer();else if(a==='install')await beginUpdate();else if(a==='force')await forceUpdate();else if(a==='force-install')await beginUpdate(true);return;}if(el.dataset.nav){navigate(el.dataset.nav,el.dataset.tab||'overview');return;}if(el.dataset.tab){tab=el.dataset.tab;query='';filter='';setPref({last_tab:tab});render();return;}if(el.dataset.action){await handleAction(el.dataset.action);return;}if(el.dataset.add){editForm(el.dataset.add);return;}if(el.dataset.edit){let r=rec(el.dataset.edit);editForm(r.kind,r);return;}if(el.dataset.delete){let r=rec(el.dataset.delete);deletion(r.kind,r.id);return;}if(el.dataset.pay){let c=rec(el.dataset.pay);editForm('entries',null,{sci:c.sci,label:'Loyer '+label(rec(c.lease_id))+' · '+c.period,call_id:c.id,amount:due(c),direction:'Recette',category:'Loyers'});$('#f-sci').value=c.sci;$('#f-sci').disabled=true;return;}if(el.dataset.receipt){receipt(el.dataset.receipt);return;}if(el.dataset.document){let r=rec(el.dataset.document);await download(await api('document?id='+r.id),r.filename||'document');return;}if(el.dataset.complete){let r=rec(el.dataset.complete);dismissMacNotification(r.id);let reached=taskReminderDates(r).filter(d=>d&&d<=today());let read=[...new Set([...(Array.isArray(r.read_reminders)?r.read_reminders:[]),...reached])];await api('save',{kind:r.kind,id:r.id,sci:r.sci,data:{...r,status:'Terminé',read_reminders:read}});await refresh();notify('Échéance terminée.');return;}if(el.dataset.theme){await setPref({theme:el.dataset.theme});render();return;}if(el.dataset.move){let o=navOrder(),i=o.indexOf(el.dataset.move),j=i+Number(el.dataset.dir);if(j>=0&&j<o.length){[o[i],o[j]]=[o[j],o[i]];await setPref({order:o});render();}return;}if(el.dataset.searchGo){let id=el.dataset.searchGo,kind=el.dataset.searchKind;closeModal(true);if(kind==='sci')navigate(id);else{let r=rec(id);navigate(r.sci,kind);editForm(kind,r);}return;}}catch(e){notify(e.message,true);}});
 document.addEventListener('change',async ev=>{let el=ev.target;try{if(el.classList&&el.classList.contains('year-select')){let v=el.value===YEAR_ALL?YEAR_ALL:Number(el.value);syncYearSelects(el.value);await setPref({year:v});render();}if(el.id==='scope'){scope=el.value;render();}if(el.id==='status-filter'){filter=el.value;renderListing();}if(el.id==='doc-year-filter'){docYear=el.value;renderListing();}if(el.id==='balance-year'){let s=currentSCI();if(s){let p=balancePeriod(s);if(el.value==='custom'){balanceView={mode:'custom',year:p.year,start:p.start,end:p.end};}else{balanceView={mode:'year',year:Number(el.value),start:'',end:''};}render();}}
 if(el.id==='balance-start'||el.id==='balance-end'){let s=currentSCI();if(s){let p=balancePeriod(s);balanceView={mode:'custom',year:p.year,start:el.id==='balance-start'?el.value:p.start,end:el.id==='balance-end'?el.value:p.end};render();}}
 if(el.id==='doc-preview-folder'){moveDocToFolder(docPreviewId,el.value);}}catch(e){notify(e.message,true)}});
-document.addEventListener('input',ev=>{if(ev.target.id==='filter-search'){query=ev.target.value;renderListing();}if(ev.target.id==='doc-zoom-range'){docPreviewStageZoom((Number(ev.target.value)||100)/100);}if(ev.target.closest('#modal')&&!['global-search'].includes(ev.target.id)&&!ev.target.closest('#col-config-wrap')&&!ev.target.closest('#bell-modal-body')&&!ev.target.closest('#doc-preview-body'))modalDirty=true;});
+document.addEventListener('wheel',docPreviewWheel,{passive:false});
+document.addEventListener('input',ev=>{if(ev.target.id==='filter-search'){query=ev.target.value;renderListing();}if(ev.target.id==='doc-zoom-range'){docPreviewStageZoom((Number(ev.target.value)||100)/100,{instant:true});}if(ev.target.closest('#modal')&&!['global-search'].includes(ev.target.id)&&!ev.target.closest('#col-config-wrap')&&!ev.target.closest('#bell-modal-body')&&!ev.target.closest('#doc-preview-body'))modalDirty=true;});
 document.addEventListener('submit',ev=>{if(ev.target.id==='edit-form'){ev.preventDefault();submitForm(ev.target);}});
 document.addEventListener('keydown',ev=>{if((ev.ctrlKey||ev.metaKey)&&ev.key.toLowerCase()==='k'){ev.preventDefault();if(!modalDirty)searchModal();}if(ev.key==='Escape'&&$('#modal').innerHTML)closeModal();if(ev.key==='Enter'&&ev.target.matches('article[data-nav]'))navigate(ev.target.dataset.nav);
 if((ev.key==='Enter'||ev.key===' ')&&ev.target.matches('.doc-folder-card[data-doc-folder]')){ev.preventDefault();docFolder=ev.target.dataset.docFolder;docYear='';renderListing();}
