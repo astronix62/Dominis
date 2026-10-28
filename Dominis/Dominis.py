@@ -5899,7 +5899,11 @@ def _x_eur(value):
 
 
 def _x_header_kinds(cells):
-    """Reconnaît l'en-tête d'un tableau (toutes colonnes identifiées par leur nom)."""
+    """Reconnaît l'en-tête d'un tableau (toutes colonnes identifiées par leur nom).
+
+    Deux organisations sont acceptées : Débit + Crédit, ou une seule colonne
+    « Montant » accompagnée d'une colonne « Sens ».
+    """
     kinds = {}
     for col in sorted(cells):
         value = cells[col]
@@ -5913,8 +5917,90 @@ def _x_header_kinds(cells):
         elif 'credit' in s or re.search(r'\bcr.?dit\b', s): kind = 'credit'
         elif 'solde' in s or 'balance' in s: kind = 'solde'
         elif 'categorie' in s or 'category' in s or re.search(r'\bcat.?gorie\b', s): kind = 'category'
+        elif re.search(r'\bmontants?\b', s) or re.search(r'\bamount\b', s) or re.search(r'\bvaleurs?\b', s): kind = 'amount'
+        elif re.search(r'\bsens\b', s) or re.search(r'\bdirections?\b', s): kind = 'sens'
         if kind and kind not in kinds: kinds[kind] = col
-    return kinds if all(k in kinds for k in ('date', 'label', 'debit', 'credit')) else None
+    if not all(k in kinds for k in ('date', 'label')): return None
+    if all(k in kinds for k in ('debit', 'credit')) or 'amount' in kinds: return kinds
+    return None
+
+
+def _x_header_merge(previous, current):
+    """En-tête écrit sur deux lignes (cellules fusionnées) : « Date · Libellé » puis « Débit · Crédit ».
+
+    Renvoie les cellules fusionnées quand elles forment un en-tête complet, sinon None.
+    """
+    if not previous or not current: return None
+    if any(isinstance(v, (int, float, dt.date, dt.datetime)) and not isinstance(v, bool)
+           for v in list(previous.values()) + list(current.values())):
+        return None
+    if _x_header_kinds(current): return None      # en-tête complet : rien à fusionner
+    merged = dict(previous)
+    merged.update(current)
+    return merged if _x_header_kinds(merged) else None
+
+
+_XL_SUMMARY_RE = re.compile(
+    r'^(?:totaux|total|sous[\s\-]*total|cumul|recapitulatif|recap|bilan|synthese|montant\s+total)\b')
+_XL_SUMMARY_GENERIC = re.compile(
+    r'\b(?:depenses|depense|recettes|recette|debits|debit|credits|credit|mouvements|mouvement|'
+    r'operations|operation|charges|charge|produits|produit|entrees|entree|sorties|sortie|'
+    r'general|generale|generaux|annuel|annuelle|annuels|annuelles|mensuel|mensuelle|mensuels|mensuelles|'
+    r'annee|annees|exercice|exercices|mois|periode|banque|compte|comptes|releve|releves|'
+    r'du|de|des|le|la|les|en|et|au|aux|a|sur|pour|par|d|du|cumul|totaux|total|sous|'
+    r'janvier|fevrier|mars|avril|mai|juin|juillet|aout|septembre|octobre|novembre|decembre)\b'
+)
+
+
+def _x_summary_label(value):
+    """Ligne de synthèse (« Total des dépenses », « Cumul annuel ») : jamais une opération.
+
+    Comme pour les libellés de contrôle, un libellé qui conserve un mot métier
+    (« Total travaux salle de bain ») reste une véritable opération.
+    """
+    if not isinstance(value, str): return False
+    text = _x_norm(value)
+    if not text or not _XL_SUMMARY_RE.match(text): return False
+    text = _XL_DATE_FRAGMENT.sub(' ', text)
+    text = re.sub(r'\b\d+(?:[.,]\d+)?\b', ' ', text)
+    text = _XL_SUMMARY_GENERIC.sub(' ', text)
+    return not re.sub(r'[^a-z]+', ' ', text).strip()
+
+
+_XL_SENS_DEBIT = {'debit', 'debits', 'depense', 'depenses', 'sortie', 'sorties', 'retrait', 'retraits',
+                  'prelevement', 'prelevements', 'emission', 'emissions', 'd', 'db', 'dr', '-', '−', 'achat'}
+_XL_SENS_CREDIT = {'credit', 'credits', 'recette', 'recettes', 'entree', 'entrees', 'versement',
+                   'versements', 'depot', 'depots', 'encaissement', 'encaissements', 'c', 'cr', '+',
+                   'produit', 'vente'}
+
+
+_XL_FOOTER_STRONG = re.compile(r'^(?:recapitulatif|recap|synthese|bilan\b|total\s+general|totaux\s+generaux)')
+
+
+def _x_footer_label(value, strong=False):
+    """Ligne qui ouvre un bas de tableau : « Récapitulatif », « Total des dépenses », « Synthèse ».
+
+    « Récapitulatif », « Synthèse » ou « Bilan » annoncent un bloc de synthèse
+    même si des lignes datées suivent ; « Total janvier » peut n'être qu'un
+    intertitre de relevé mensuel, seule la suite permet de trancher.
+    """
+    if not isinstance(value, str): return False
+    text = _x_norm(value)
+    if not text: return False
+    if strong: return bool(_XL_FOOTER_STRONG.match(text))
+    return bool(_XL_SUMMARY_RE.match(text))
+
+
+def _x_sens_kind(value):
+    """Sens d'une opération rangée dans une colonne unique « Montant »."""
+    if not isinstance(value, str): return None
+    text = _x_norm(value).strip(' .:')
+    if not text: return None
+    if text in _XL_SENS_DEBIT or text.startswith(('debit', 'depense', 'sortie', 'retrait', 'prelevement')):
+        return 'debit'
+    if text in _XL_SENS_CREDIT or text.startswith(('credit', 'recette', 'entree', 'versement', 'depot', 'encaissement')):
+        return 'credit'
+    return None
 
 
 def _x_amount(value, zero_dash=False):
@@ -6095,6 +6181,40 @@ def _x_styles(zf):
     return {i for i, flagged in enumerate(flags) if flagged}
 
 
+def _x_border_styles(zf):
+    """Index de styles dont une bordure est tracée (l'étendue d'un tableau).
+
+    Les classeurs bancaires encadrent le tableau des opérations : la dernière
+    ligne bordée marque la fin des transactions, tout ce qui suit (synthèse,
+    récapitulatif, notes) est hors du tableau et ne doit jamais devenir une
+    opération. Si le classeur n'utilise aucune bordure, la détection est neutre.
+    """
+    empty = {'any': set(), 'bottom': set()}
+    try: data = zf.read('xl/styles.xml')
+    except KeyError: return empty
+    try: root = ET.fromstring(data)
+    except ET.ParseError: return empty
+    borders, xf_borders = [], []
+    for el in root.iter():
+        local = _x_local(el)
+        if local == 'borders':
+            for border in el:
+                if _x_local(border) != 'border': continue
+                sides = {_x_local(side) for side in border if side.get('style')}
+                borders.append(sides)
+        elif local == 'cellXfs':
+            for xf in el:
+                if _x_local(xf) != 'xf': continue
+                try: xf_borders.append(int(xf.get('borderId', '0')))
+                except (TypeError, ValueError): xf_borders.append(0)
+    any_side, bottom = set(), set()
+    for index, border_id in enumerate(xf_borders):
+        sides = borders[border_id] if 0 <= border_id < len(borders) else set()
+        if sides: any_side.add(index)
+        if 'bottom' in sides: bottom.add(index)
+    return {'any': any_side, 'bottom': bottom}
+
+
 def _x_sheets(zf):
     """Feuilles dans l'ordre du classeur + époque de sérial Excel."""
     names = set(zf.namelist())
@@ -6135,47 +6255,272 @@ def _x_sheets(zf):
     return sheets, epoch
 
 
-def _x_cell_value(el, shared, date_styles, epoch, col_style=None):
+class _XLFormulaError(Exception):
+    """Formule Excel sans valeur en cache et non évaluable simplement."""
+
+
+_XL_FORMULA_REF = re.compile(r'(\$?)([A-Za-z]{1,3})(\$?)(\d{1,7})')
+_XL_FORMULA_NUM = re.compile(r'\d+(?:[.,]\d*)?|[.,]\d+')
+_XL_FORMULA_NAME = re.compile(r'[A-Za-z_][A-Za-z0-9_.]*')
+
+
+def _x_col_letter(index):
+    n, out = int(index) + 1, ''
+    while n > 0:
+        n, rest = divmod(n - 1, 26)
+        out = chr(65 + rest) + out
+    return out
+
+
+def _x_formula_tokens(expr):
+    """Découpe une formule en jetons (nombres, références, plages, opérateurs, fonctions).
+
+    Toute construction non prise en charge lève _XLFormulaError : une formule
+    n'est jamais évaluée « au hasard ».
+    """
+    text = str(expr or '').strip()
+    if text.startswith('='): text = text[1:]
+    toks, i, n = [], 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch in ' \t\r\n': i += 1; continue
+        if ch in '+-*/^%&': toks.append(('op', ch)); i += 1; continue
+        if ch == '(': toks.append(('lp', '(')); i += 1; continue
+        if ch == ')': toks.append(('rp', ')')); i += 1; continue
+        if ch in ',;': toks.append(('sep', ch)); i += 1; continue
+        if ch == '"':
+            j = i + 1
+            while j < n:
+                if text[j] == '"':
+                    if j + 1 < n and text[j + 1] == '"': j += 2; continue
+                    break
+                j += 1
+            if j >= n: raise _XLFormulaError('guillemet non fermé')
+            toks.append(('str', text[i + 1:j].replace('""', '"'))); i = j + 1; continue
+        if ch.isdigit() or (ch == '.' and i + 1 < n and text[i + 1].isdigit()):
+            m = _XL_FORMULA_NUM.match(text, i)
+            toks.append(('num', float(m.group(0).replace(',', '.')))); i = m.end(); continue
+        ref = _XL_FORMULA_REF.match(text, i)
+        if ref is not None and not (ref.end() < n and text[ref.end()] == '('):
+            # Lignes numérotées comme dans le fichier (1 = première ligne), colonnes à partir de 0.
+            start_row, start_col = int(ref.group(4)), _x_col_ref(ref.group(2))
+            i = ref.end()
+        else:
+            m = _XL_FORMULA_NAME.match(text, i)
+            if not m: raise _XLFormulaError('caractère inattendu « ' + ch + ' »')
+            name = m.group(0)
+            j = m.end()
+            while j < n and text[j] in ' \t': j += 1
+            if j < n and text[j] == '(':
+                toks.append(('func', name.upper())); i = j + 1; continue
+            raise _XLFormulaError('référence « ' + name[:20] + ' » non prise en charge')
+        if i < n and text[i] == ':':
+            second = _XL_FORMULA_REF.match(text, i + 1)
+            if not second: raise _XLFormulaError('plage incomplète')
+            toks.append(('range', (start_row, start_col, int(second.group(4)), _x_col_ref(second.group(2)))))
+            i = second.end()
+        else:
+            toks.append(('ref', (start_row, start_col)))
+        if i < n and text[i] == '!': raise _XLFormulaError('référence vers une autre feuille')
+    return toks
+
+
+def _x_shift_formula(text, drow, dcol):
+    """Décale les références relatives d'une formule partagée (« shared »)."""
+    def repl(m):
+        col_abs, col, row_abs, row = m.group(1), m.group(2), m.group(3), m.group(4)
+        new_col = col if col_abs else _x_col_letter(_x_col_ref(col) + dcol)
+        new_row = row if row_abs else str(int(row) + drow)
+        return col_abs + new_col + row_abs + new_row
+    return _XL_FORMULA_REF.sub(repl, text)
+
+
+def _x_round_half_up(value, digits=0):
+    """Arrondi commercial (0,5 s'éloigne de zéro), comme Excel et non comme Python."""
+    factor = 10.0 ** int(digits)
+    scaled = value * factor
+    rounded = math.floor(scaled + 0.5) if scaled >= 0 else math.ceil(scaled - 0.5)
+    return rounded / factor
+
+
+def _x_formula_num(value):
+    if isinstance(value, bool): return 1.0 if value else 0.0
+    if isinstance(value, (int, float)): return float(value)
+    if value is None: return 0.0     # cellule vide : Excel compte zéro
+    raise _XLFormulaError('valeur non numérique')
+
+
+def _x_formula_numbers(args):
+    values = []
+    for arg in args:
+        for value in (arg if isinstance(arg, list) else [arg]):
+            if isinstance(value, bool) or value is None or isinstance(value, str): continue
+            if isinstance(value, (int, float)): values.append(float(value))
+    return values
+
+
+def _x_formula_func(name, args):
+    if name in ('SUM', 'SOMME'): return round(sum(_x_formula_numbers(args)), 10)
+    if name == 'ABS':
+        if len(args) != 1: raise _XLFormulaError('ABS attend un seul argument')
+        return abs(_x_formula_num(args[0]))
+    if name == 'MIN':
+        values = _x_formula_numbers(args); return min(values) if values else 0.0
+    if name == 'MAX':
+        values = _x_formula_numbers(args); return max(values) if values else 0.0
+    if name in ('AVERAGE', 'MOYENNE'):
+        values = _x_formula_numbers(args); return (sum(values) / len(values)) if values else 0.0
+    if name in ('ROUND', 'ARRONDI'):
+        if not 1 <= len(args) <= 2: raise _XLFormulaError('ROUND attend un ou deux arguments')
+        digits = int(_x_formula_num(args[1])) if len(args) > 1 else 0
+        return _x_round_half_up(_x_formula_num(args[0]), digits)
+    raise _XLFormulaError('fonction ' + name[:20] + ' non prise en charge')
+
+
+def _x_eval_formula(expr, lookup, lookup_range):
+    """Évalue une formule simple : opérations, références, plages et SUM/ABS/ROUND/MIN/MAX.
+
+    Lève _XLFormulaError dès qu'une construction sort de ce périmètre : l'appelant
+    signale alors la cellule au lieu d'importer un montant faux.
+    """
+    toks = _x_formula_tokens(expr)
+    if not toks: raise _XLFormulaError('formule vide')
+    pos = [0]
+
+    def peek(kind=None):
+        if pos[0] >= len(toks): return None
+        tok = toks[pos[0]]
+        return tok if kind is None else (tok if tok[0] == kind else None)
+
+    def atom():
+        tok = peek()
+        if tok is None: raise _XLFormulaError('formule incomplète')
+        kind, value = tok
+        if kind == 'num':
+            pos[0] += 1; return value
+        if kind == 'str':
+            pos[0] += 1; return value
+        if kind == 'lp':
+            pos[0] += 1
+            result = expression()
+            if peek('rp') is None: raise _XLFormulaError('parenthèse non fermée')
+            pos[0] += 1
+            return result
+        if kind == 'ref':
+            pos[0] += 1; return lookup(value[0], value[1])
+        if kind == 'range':
+            pos[0] += 1; return lookup_range(*value)
+        if kind == 'func':
+            pos[0] += 1
+            args = []
+            if peek('rp') is None:
+                while True:
+                    args.append(expression())
+                    nxt = peek()
+                    if nxt is None: raise _XLFormulaError('fonction non fermée')
+                    if nxt[0] == 'sep': pos[0] += 1; continue
+                    if nxt[0] == 'rp': break
+                    raise _XLFormulaError('argument inattendu')
+            if peek('rp') is None: raise _XLFormulaError('fonction non fermée')
+            pos[0] += 1
+            return _x_formula_func(value, args)
+        raise _XLFormulaError('expression non prise en charge')
+
+    def unary():
+        tok = peek('op')
+        if tok is not None and tok[1] == '-':
+            pos[0] += 1; return -_x_formula_num(unary())
+        if tok is not None and tok[1] == '+':
+            pos[0] += 1; return _x_formula_num(unary())
+        return atom()
+
+    def product():
+        value = unary()
+        while True:
+            tok = peek('op')
+            if tok is None or tok[1] not in '*/': return value
+            pos[0] += 1
+            right = _x_formula_num(unary())
+            if tok[1] == '*': value = _x_formula_num(value) * right
+            else:
+                if right == 0: raise _XLFormulaError('division par zéro')
+                value = _x_formula_num(value) / right
+
+    def expression():
+        value = product()
+        while True:
+            tok = peek('op')
+            if tok is None or tok[1] not in '+-': return value
+            pos[0] += 1
+            right = _x_formula_num(product())
+            value = _x_formula_num(value) + right if tok[1] == '+' else _x_formula_num(value) - right
+
+    result = expression()
+    if pos[0] != len(toks): raise _XLFormulaError('formule non prise en charge')
+    if isinstance(result, list): raise _XLFormulaError('plage utilisée comme valeur')
+    return result
+
+
+def _x_cell_raw(el, shared):
+    """(valeur, formule, formule partagée) d'une cellule <c> telle qu'écrite dans le fichier.
+
+    La valeur est celle mise en cache par le logiciel qui a produit le classeur :
+    elle peut manquer (fichier écrit par un générateur, calculs non enregistrés).
+    """
     kind = el.get('t', 'n')
-    v_el = None
-    is_el = None
+    text = formula = shared_f = is_el = None
     for child in el:
         local = _x_local(child)
-        if local == 'v': v_el = child
+        if local == 'v': text = child.text
         elif local == 'is': is_el = child
-    text = v_el.text if v_el is not None and v_el.text is not None else None
+        elif local == 'f':
+            formula = child.text or None
+            if (child.get('t') or '') == 'shared':
+                shared_f = (child.get('si') or '0', formula, child.get('ref') or '')
     if kind == 's':
-        try: return shared[int(text)]
-        except (TypeError, ValueError, IndexError): return None
-    if kind == 'inlineStr' or is_el is not None:
-        if is_el is None: return None
-        return _x_rich_text(is_el)
-    if text is None: return None
-    if kind in ('str', 'e'): return text
-    if kind == 'b': return text.strip().lower() in ('1', 'true')
-    if kind == 'd':
-        try: return dt.datetime.fromisoformat(text.replace('Z', '+00:00')).date()
+        try: value = shared[int(text)]
+        except (TypeError, ValueError, IndexError): value = None
+    elif kind == 'inlineStr' or is_el is not None:
+        value = _x_rich_text(is_el) if is_el is not None else None
+    elif text is None:
+        value = None
+    elif kind in ('str', 'e'):
+        value = text
+    elif kind == 'b':
+        value = text.strip().lower() in ('1', 'true')
+    elif kind == 'd':
+        try: value = dt.datetime.fromisoformat(text.replace('Z', '+00:00')).date()
         except ValueError:
-            try: return dt.date.fromisoformat(text[:10])
-            except ValueError: return None
-    try: num = float(text)
-    except ValueError: return text
-    style = el.get('s')
-    s_idx = int(style) if (style is not None and style.isdigit()) else col_style
-    if s_idx is not None and s_idx in date_styles and 1000 <= num <= 3000000:
-        try: return epoch + dt.timedelta(days=int(num))
+            try: value = dt.date.fromisoformat(text[:10])
+            except ValueError: value = None
+    else:
+        try: value = float(text)
+        except ValueError: value = text
+    return value, formula, shared_f
+
+
+def _x_cell_out(value, style_idx, date_styles, epoch):
+    """Convertit une valeur brute : une série numérique au format date devient une date."""
+    if isinstance(value, float) and style_idx is not None and style_idx in date_styles and 1000 <= value <= 3000000:
+        try: return epoch + dt.timedelta(days=int(value))
         except (OverflowError, ValueError): return None
-    return num
+    return value
 
 
-def _x_sheet_rows(zf, path, shared, date_styles, epoch):
-    """Parcourt une feuille : yield (numéro de ligne, {colonne: valeur}). Un trou de numérotation est une ligne vide."""
-    prev = 0
-    cells = {}
-    col_styles = {}
+def _x_sheet_rows(zf, path, shared, date_styles, epoch, border_styles=None, warn=None,
+                  sheet_name=None, max_rows=None):
+    """Parcourt une feuille : yield (n° de ligne, {colonne: valeur}, {colonnes bordées}).
+
+    Un trou de numérotation devient une ligne vide. Les formules sont lues : la
+    valeur en cache est utilisée quand elle existe, sinon la formule est
+    recalculée (sommes, références, opérations simples). Une formule illisible
+    est signalée : aucun montant ne disparaît en silence.
+    """
+    border_any = (border_styles or {}).get('any') or set()
+    row_order, buffered, col_styles = [], {}, {}
     with zf.open(path) as stream:
         for event, el in ET.iterparse(stream, events=('start', 'end')):
-            if event == 'start': continue
+            if event != 'end': continue
             local = _x_local(el)
             if local == 'col':
                 st = el.get('style')
@@ -6183,25 +6528,117 @@ def _x_sheet_rows(zf, path, shared, date_styles, epoch):
                     try:
                         cmin = max(1, int(el.get('min', '1')))
                         cmax = min(256, int(el.get('max', str(cmin))))
-                        for ci in range(cmin - 1, cmax):
-                            col_styles[ci] = int(st)
+                        for ci in range(cmin - 1, cmax): col_styles[ci] = int(st)
                     except ValueError:
                         pass
                 el.clear()
             elif local == 'c':
                 col = _x_col_ref(el.get('r'))
-                if col is None: col = (max(cells) + 1) if cells else 0
-                value = _x_cell_value(el, shared, date_styles, epoch, col_styles.get(col))
-                if value is not None: cells[col] = value
+                if col is None: col = (max(buffered) + 1) if buffered else 0
+                value, formula, shared_f = _x_cell_raw(el, shared)
+                style = el.get('s')
+                sidx = int(style) if (style is not None and style.isdigit()) else col_styles.get(col)
                 el.clear()
+                if formula is None and not _x_present(value): continue
+                buffered[col] = (value, formula, shared_f, sidx)
             elif local == 'row':
                 try: num = int(el.get('r'))
-                except (TypeError, ValueError): num = prev + 1
+                except (TypeError, ValueError): num = (row_order[-1][0] + 1) if row_order else 1
                 el.clear()
-                if prev and num > prev + 1: yield (prev + 1, {})
-                prev = num
-                yield (num, cells)
-                cells = {}
+                if row_order and num > row_order[-1][0] + 1:
+                    row_order.append((row_order[-1][0] + 1, {}))
+                row_order.append((num, buffered))
+                buffered = {}
+                if max_rows and len(row_order) >= max_rows: break
+
+    rows_by_num = {}
+    for num, cells in row_order: rows_by_num[num] = cells
+    has_formula = any(cell[1] or cell[2] for cells in rows_by_num.values() for cell in cells.values())
+
+    stats = {'calc': 0, 'failed': 0, 'first': None}
+    if has_formula:
+        shared_master = {}
+        for num, cells in row_order:
+            for col, cell in cells.items():
+                if cell[2] and cell[2][1]:
+                    shared_master[cell[2][0]] = (cell[2][1], num, col)
+        resolved, busy = {}, set()
+
+        def is_formula(cell):
+            return cell[1] is not None or (cell[2] is not None and cell[2][1] is None and cell[2][0] in shared_master)
+
+        def value_at(row, col):
+            cell = rows_by_num.get(row, {}).get(col)
+            if cell is None: return None
+            if not is_formula(cell): return cell[0]
+            return resolve(row, col)
+
+        def range_at(r1, c1, r2, c2):
+            if abs(r2 - r1) > 100000 or abs(c2 - c1) > 256: raise _XLFormulaError('plage trop grande')
+            out = []
+            for r in range(min(r1, r2), max(r1, r2) + 1):
+                for c in range(min(c1, c2), max(c1, c2) + 1):
+                    out.append(value_at(r, c))
+                    if len(out) > 20000: raise _XLFormulaError('plage trop grande')
+            return out
+
+        def resolve(row, col):
+            key = (row, col)
+            if key in resolved: return resolved[key]
+            cell = rows_by_num.get(row, {}).get(col)
+            if cell is None: return None
+            value, formula, shared_f = cell[0], cell[1], cell[2]
+            if formula is None and shared_f is not None:
+                master = shared_master.get(shared_f[0])
+                if master is None: raise _XLFormulaError('formule partagée sans modèle')
+                formula = _x_shift_formula(master[0], row - master[1], col - master[2])
+            if formula is None or value is not None:
+                resolved[key] = value
+                return value
+            if key in busy: raise _XLFormulaError('référence circulaire')
+            busy.add(key)
+            try:
+                out = _x_eval_formula(formula, value_at, range_at)
+                if out is not None: stats['calc'] += 1
+            except _XLFormulaError as exc:
+                stats['failed'] += 1
+                if stats['first'] is None: stats['first'] = (row, col, formula, str(exc))
+                out = None
+            except (ArithmeticError, TypeError, ValueError) as exc:
+                stats['failed'] += 1
+                if stats['first'] is None: stats['first'] = (row, col, formula, str(exc)[:60])
+                out = None
+            finally:
+                busy.discard(key)
+            resolved[key] = out
+            return out
+    else:
+        def is_formula(cell): return False
+        def resolve(row, col): return None
+
+    for num, cells in row_order:
+        out_cells, bordered = {}, set()
+        for col in sorted(cells):
+            cell = cells[col]
+            value = resolve(num, col) if is_formula(cell) else cell[0]
+            style_idx = cell[3] if cell[3] is not None else 0
+            if border_any and style_idx in border_any: bordered.add(col)
+            value = _x_cell_out(value, cell[3], date_styles, epoch)
+            if value is not None: out_cells[col] = value
+        yield num, out_cells, bordered
+
+    if warn is not None and (stats['calc'] or stats['failed']):
+        label = sheet_name or str(path).rsplit('/', 1)[-1]
+        if stats['failed']:
+            row, col, formula, reason = stats['first']
+            others = (' (+ %d autre(s))' % (stats['failed'] - 1)) if stats['failed'] > 1 else ''
+            warn('Feuille « ' + label + ' », cellule ' + _x_col_letter(col) + str(row) + others
+                 + ' : formule « ' + str(formula)[:80] + ' » sans valeur calculée dans le fichier'
+                 + ' et non recalculable (' + reason + ') — la valeur correspondante n’a pas été importée.')
+        if stats['calc']:
+            warn('Feuille « ' + label + ' » : ' + str(stats['calc'])
+                 + ' cellule(s) calculées par formule ont été recalculées à l’import'
+                 + ' (le classeur ne contenait pas leur valeur en cache).')
 
 
 def _x_orphan(cells, epoch, default_year=None):
@@ -6261,7 +6698,12 @@ def _x_scan_sheet(sheet_name, rows, sources, records, warn, epoch, state):
     header_names = {}
     group = None
     table_no = 0
+    table_end = None         # index de fin d'un tableau encadré par des bordures
+    closed = False           # un tableau s'est terminé : les lignes suivantes sont hors tableau
+    previous_row = {}        # dernière ligne de texte : en-tête sur deux lignes
+    outside = []             # lignes situées hors du tableau (jamais importées)
     anchor = None            # dernier solde de contrôle connu
+    anchor_date = None       # date explicite de cette ancre (None si déduite)
     seg_debit = seg_credit = 0.0     # sommes depuis le dernier contrôle (tout type)
     run_debit = run_credit = 0.0     # sommes depuis le dernier solde
     table_debit = table_credit = 0.0 # sommes cumulées du tableau courant
@@ -6304,7 +6746,7 @@ def _x_scan_sheet(sheet_name, rows, sources, records, warn, epoch, state):
     # Pré-analyse de l'année de référence de la feuille (nom de l'onglet ou titre de tableau sur la page).
     context_year = _x_find_year(sheet_name)
     if context_year is None:
-        for _rn, _cells in row_list:
+        for _rn, _cells, _brd in row_list:
             if not _cells or _x_header_kinds(_cells): continue
             for _v in _cells.values():
                 if isinstance(_v, str):
@@ -6318,16 +6760,49 @@ def _x_scan_sheet(sheet_name, rows, sources, records, warn, epoch, state):
             if context_year is not None:
                 break
 
-    for idx, (rn, cells) in enumerate(row_list):
+    def bounded_end(start, relevant):
+        """Fin du bloc encadré par des bordures (None si le classeur n'en dessine pas).
+
+        Un tableau bancaire est encadré : la dernière ligne bordée termine les
+        opérations. La détection n'est retenue que si au moins trois lignes sont
+        bordées, faute de quoi un encadrement « extérieur » ferait perdre la fin
+        du tableau.
+        """
+        last, count = None, (1 if (row_list[start][2] & relevant) else 0)
+        for j in range(start + 1, len(row_list)):
+            _rn, cells_j, brd_j = row_list[j]
+            if not cells_j: continue
+            if _x_header_kinds(cells_j): break
+            if brd_j and (brd_j & relevant):
+                last = j
+                count += 1
+        return (last + 1) if (count >= 3 and last is not None) else None
+
+    for idx, (rn, cells, bordered) in enumerate(row_list):
         if cells is None: cells = {}
+        bordered = bordered or set()
         try:
             if not any(_x_present(v) for v in cells.values()):
                 continue
 
+            if table_end is not None and idx >= table_end:
+                # Après la dernière ligne bordée : synthèses, notes, récapitulatifs.
+                # Les colonnes restent connues pour reconnaître un solde de clôture.
+                table_end = None
+                closed = True
+
             kinds = _x_header_kinds(cells)
+            header_cells = cells
+            if kinds is None:
+                merged_header = _x_header_merge(previous_row, cells)
+                if merged_header is not None:
+                    kinds = _x_header_kinds(merged_header)
+                    header_cells = merged_header
             if kinds:
                 columns = kinds
-                header_names = {k: as_text(cells.get(c)) for k, c in kinds.items()}
+                header_names = {k: as_text(header_cells.get(c)) for k, c in kinds.items()}
+                table_end = bounded_end(idx, set(kinds.values()))
+                closed = False
                 table_no += 1
                 state['tables'] += 1
                 sci_title, sub_stems = _x_pick_sci_title(titles, group, sources, state)
@@ -6350,19 +6825,31 @@ def _x_scan_sheet(sheet_name, rows, sources, records, warn, epoch, state):
                 if group != prev_group:
                     anchor = None
                     run_debit = run_credit = 0.0
+                # Même SCI sur une autre feuille : le dernier solde connu et les
+                # mouvements depuis ce solde servent au contrôle de la ligne
+                # suivante, même après un changement d'onglet. Sans cela, deux
+                # comptes bancaires d'une même SCI passaient inaperçus.
+                saved = (state.get('anchor') or {}).get(group)
+                if saved and saved[0] and anchor is None:
+                    anchor, run_debit, run_credit = saved[1], saved[2], saved[3]
                 seg_debit = seg_credit = 0.0
                 table_debit = table_credit = 0.0
+                previous_row = cells
                 continue
 
             if columns is None:
-                if _x_orphan(cells, epoch, context_year):
-                    preview = ' · '.join(as_text(cells[c]) for c in sorted(cells) if _x_present(cells[c]))[:80]
-                    raise ValueError(loc(rn, 'données sans ligne d’en-tête Date / Libellé / Débit / Crédit'
-                                         + (' (« ' + preview + ' »).' if preview else '.')))
                 parts = [as_text(cells[c]) for c in sorted(cells)]
                 text = ' · '.join(p for p in parts if p)
+                if closed:
+                    # Hors du tableau : jamais une opération, jamais une erreur.
+                    outside.append((rn, text))
+                    continue
+                if _x_orphan(cells, epoch, context_year):
+                    raise ValueError(loc(rn, 'données sans ligne d’en-tête Date / Libellé / Débit / Crédit'
+                                         + (' (« ' + text[:80] + ' »).' if text else '.')))
                 if text:
                     titles.append(text)
+                    previous_row = cells
                     yr = _x_find_year(text)
                     if yr is not None and context_year is None: context_year = yr
                 continue
@@ -6377,6 +6864,17 @@ def _x_scan_sheet(sheet_name, rows, sources, records, warn, epoch, state):
             raw_debit = cell(cells, 'debit')
             raw_credit = cell(cells, 'credit')
             raw_solde = cell(cells, 'solde')
+            raw_amount = cell(cells, 'amount')
+            raw_sens = cell(cells, 'sens')
+            amount_only = (columns.get('amount') is not None
+                           and columns.get('debit') is None and columns.get('credit') is None)
+
+            if closed and not (_x_present(raw_solde) and not _x_present(raw_debit)
+                               and not _x_present(raw_credit) and not _x_present(raw_amount)):
+                # Hors tableau : seule une ligne de solde reste un contrôle utile.
+                text = ' · '.join(as_text(cells[c]) for c in sorted(cells) if _x_present(cells[c]))
+                outside.append((rn, text))
+                continue
 
             # Si un intitulé « Solde ... » ou « Total ... » a été saisi dans la colonne Date, Débit ou Crédit :
             if not label and isinstance(raw_date, str) and _x_is_balance_label(raw_date):
@@ -6400,17 +6898,34 @@ def _x_scan_sheet(sheet_name, rows, sources, records, warn, epoch, state):
                     warn(wloc(rn) + col_desc(kind, kind) + ' : ' + str(e) + ' — valeur de ' + kind + ' ignorée.')
                     return None
 
-            has_any_amount_cell = any(_x_present(v) for v in (raw_debit, raw_credit, raw_solde))
+            has_any_amount_cell = any(_x_present(v) for v in (raw_debit, raw_credit, raw_solde, raw_amount))
             date_probe = _x_date(raw_date, epoch, context_year) if _x_present(raw_date) else None
 
-            # Ligne de texte sans montant et sans date (ex. titre d'un nouveau tableau ou ligne « Solde » vide)
+            # Ligne de texte sans montant et sans date (ex. titre d'un nouveau tableau, ligne « Solde » vide
+            # ou marqueur de fin de tableau « Récapitulatif », « Total des dépenses »…).
             if not has_any_amount_cell and date_probe is None:
                 if _x_is_balance_label(label) or (isinstance(raw_date, str) and _x_is_balance_label(raw_date)):
                     continue
                 parts = [as_text(cells[c]) for c in sorted(cells) if c in relevant_cols and _x_present(cells.get(c))]
                 text = ' · '.join(p for p in parts if p)
+                if text and (_x_footer_label(text) or (isinstance(raw_date, str) and _x_footer_label(raw_date))):
+                    # « Total janvier », « Récapitulatif »… : fin du tableau si aucune
+                    # opération datée ne suit (sinon c'est un simple intertitre).
+                    dated_next = False
+                    for _k in range(idx + 1, min(idx + 6, len(row_list))):
+                        _c = row_list[_k][1]
+                        if not _c: continue
+                        _d = _c.get(columns.get('date'))
+                        if _x_present(_d) and _x_date(_d, epoch, context_year) is not None:
+                            dated_next = True
+                            break
+                    if not dated_next or _x_footer_label(text, strong=True):
+                        closed = True
+                        outside.append((rn, text))
+                        continue
                 if text:
                     titles.append(text)
+                    previous_row = cells
                     yr = _x_find_year(text)
                     if yr is not None: context_year = yr
                 continue
@@ -6418,6 +6933,21 @@ def _x_scan_sheet(sheet_name, rows, sources, records, warn, epoch, state):
             debit = parse_col_amount(raw_debit, 'debit', True, zero_dash=False)
             credit = parse_col_amount(raw_credit, 'credit', True, zero_dash=False)
             solde = parse_col_amount(raw_solde, 'solde', False, zero_dash=True)
+
+            # Colonne unique « Montant » : le sens vient de la colonne « Sens »,
+            # sinon du signe (un montant négatif est une dépense).
+            if amount_only and _x_present(raw_amount):
+                amount = parse_col_amount(raw_amount, 'amount', True, zero_dash=False)
+                if amount is not None:
+                    sens = _x_sens_kind(raw_sens)
+                    if sens is None and _x_present(raw_sens):
+                        raise ValueError(loc(rn, col_desc('sens', 'Sens') + ' : sens illisible « '
+                                             + as_text(raw_sens)[:40] + ' » (attendu : Débit ou Crédit)'
+                                             + (' pour « ' + label[:50] + ' ».' if label else '.')))
+                    if sens is None:
+                        sens = 'debit' if amount < 0 else 'credit'
+                    if sens == 'debit': debit = abs(amount)
+                    else: credit = abs(amount)
 
             if debit == 0.0 and credit is not None and credit != 0.0:
                 debit = None
@@ -6432,13 +6962,31 @@ def _x_scan_sheet(sheet_name, rows, sources, records, warn, epoch, state):
             # « Solde notaire » restent des opérations : elles ne doivent plus
             # disparaître de l'import.
             balance_kind = _x_balance_label_kind(label)
+            summary_row = _x_summary_label(label)
             has_one_amount = (debit is not None) != (credit is not None)
             looks_like_operation = bool(label) and date_probe is not None and solde is None and has_one_amount
             is_balance_row = (
                 (balance_kind is not None and not looks_like_operation)
                 or (debit is None and credit is None and solde is not None)
                 or (not label and debit is not None and credit is not None)
+                or (summary_row and solde is not None and not looks_like_operation)
             )
+            if summary_row and not is_balance_row:
+                # « Total des dépenses », « Cumul annuel » : ligne de synthèse, pas
+                # une opération. Elle était auparavant importée comme un mouvement,
+                # ce qui gonflait le solde de la SCI.
+                checked = False
+                if debit is not None and round(debit, 2) != round(seg_debit, 2) and round(debit, 2) != round(table_debit, 2):
+                    warn(wloc(rn) + 'total annoncé ' + _x_eur(debit) + ' en débit, ' + _x_eur(seg_debit)
+                         + ' calculé depuis le contrôle précédent — ligne de synthèse non importée.')
+                    checked = True
+                if credit is not None and round(credit, 2) != round(seg_credit, 2) and round(credit, 2) != round(table_credit, 2):
+                    warn(wloc(rn) + 'total annoncé ' + _x_eur(credit) + ' en crédit, ' + _x_eur(seg_credit)
+                         + ' calculé depuis le contrôle précédent — ligne de synthèse non importée.')
+                    checked = True
+                if not checked:
+                    state['ignored_summary'] = state.get('ignored_summary', 0) + 1
+                continue
 
             if is_balance_row:
                 if debit is None and credit is None and solde is None:
@@ -6485,6 +7033,7 @@ def _x_scan_sheet(sheet_name, rows, sources, records, warn, epoch, state):
                         if expected != round(solde, 2):
                             warn(wloc(rn) + 'solde au ' + date_val.strftime('%d/%m/%Y') + ' : ' + _x_eur(expected)
                                  + ' attendu, ' + _x_eur(solde) + ' trouvé (écart ' + _x_eur(round(solde - expected, 2)) + ').')
+                        state.setdefault('checked', {}).setdefault(group, set()).add(date_val.isoformat())
                     if group not in sheet_group_has_moves:
                         state.setdefault('openings', {}).setdefault(group, []).append(
                             (date_val.isoformat(), round(solde, 2), has_explicit_date)
@@ -6502,6 +7051,7 @@ def _x_scan_sheet(sheet_name, rows, sources, records, warn, epoch, state):
                         (date_val.isoformat(), round(solde, 2))
                     )
                     anchor = solde
+                    anchor_date = date_val if has_explicit_date else None
                     run_debit = run_credit = 0.0
                 seg_debit = seg_credit = 0.0
                 continue
@@ -6509,7 +7059,9 @@ def _x_scan_sheet(sheet_name, rows, sources, records, warn, epoch, state):
             # --- Ligne d'opération (mouvement) ---
             if not _x_present(raw_date):
                 raise ValueError(loc(rn, col_desc('date', 'Date') + ' : date manquante sur une ligne de données'
-                                     + (' pour « ' + label[:60] + ' ».' if label else '.')))
+                                     + (' pour « ' + label[:60] + ' »' if label else '')
+                                     + ' (une ligne de synthèse sous le tableau doit être séparée par une'
+                                     + ' ligne « Total » ou par une ligne vide).'))
             date_val = date_probe
             if date_val is None:
                 raise ValueError(loc(rn, col_desc('date', 'Date') + ' : date illisible : « ' + as_text(raw_date)[:60] + ' »'
@@ -6564,12 +7116,20 @@ def _x_scan_sheet(sheet_name, rows, sources, records, warn, epoch, state):
                 run_debit = round(run_debit + (raw if debit is not None else 0.0), 2)
                 run_credit = round(run_credit + (raw if credit is not None else 0.0), 2)
                 if solde is None: continue
+                # Un relevé peut afficher le solde courant sur chaque ligne sans
+                # ligne de solde séparée : ces soldes servent aussi d'ancres, sinon
+                # le solde d'ouverture ne pouvait pas être déduit.
+                state.setdefault('balances', {}).setdefault(group, []).append(
+                    (date_val.isoformat(), round(solde, 2))
+                )
                 if anchor is not None:
                     expected = round(anchor + run_credit - run_debit, 2)
                     if expected != round(solde, 2):
                         warn(wloc(rn) + 'solde au ' + date_val.strftime('%d/%m/%Y') + ' : ' + _x_eur(expected)
                              + ' attendu, ' + _x_eur(solde) + ' trouvé (écart ' + _x_eur(round(solde - expected, 2)) + ').')
+                    state.setdefault('checked', {}).setdefault(group, set()).add(date_val.isoformat())
                 anchor = solde
+                anchor_date = date_val
                 seg_debit = seg_credit = 0.0
                 run_debit = run_credit = 0.0
                 continue
@@ -6583,8 +7143,17 @@ def _x_scan_sheet(sheet_name, rows, sources, records, warn, epoch, state):
         except ValueError as e:
             raise ValueError(str(e) if str(e).startswith('ligne ') else loc(rn, str(e)))
 
+    if group is not None and anchor is not None:
+        state.setdefault('anchor', {})[group] = (anchor_date is not None, anchor, run_debit, run_credit)
+    if outside:
+        shown = [text[:60] for _rn, text in outside if text][:3]
+        detail = (' : « ' + ' », « '.join(shown) + ' »') if shown else ''
+        warn('Feuille « ' + sheet_name + ' » : ' + str(len(outside))
+             + ' ligne(s) située(s) hors du tableau (après la dernière opération) non importée(s)'
+             + detail + '. Elles ne sont donc pas comptées dans le solde.')
 
-def _x_finalize_openings(sources, state):
+
+def _x_finalize_openings(sources, state, warn=None):
     """Détermine le solde d'ouverture et conserve toutes les ancres du relevé.
 
     Trois cas :
@@ -6594,6 +7163,10 @@ def _x_finalize_openings(sources, state):
        perdue, ce qui sous-évaluait le solde de la SCI ;
     3. aucun solde : la SCI démarre sans solde d'ouverture, tous les mouvements
        comptent (règle de la vue d'ensemble).
+
+    Un récapitulatif de rapprochement est joint à chaque SCI (dernier solde du
+    relevé, solde recalculé) : l'écran d'import l'affiche et permet de corriger
+    le solde d'ouverture avant d'importer.
     """
     openings_by_group = state.get('openings', {})
     first_moves = state.get('first_move_date', {})
@@ -6636,6 +7209,56 @@ def _x_finalize_openings(sources, state):
             src['opening_date'] = keep[0]
             if keep[2]: src['opening_derived'] = True
             else: src.pop('opening_derived', None)
+        # Plusieurs soldes de début distincts : soit un report d'une année sur
+        # l'autre (le solde repris égale le dernier solde connu), soit deux
+        # comptes bancaires différents dont les soldes doivent s'additionner.
+        # Le calcul retient le plus ancien ; l'écart est signalé, jamais masqué.
+        distinct = sorted({(str(day), round(value, 2)) for day, value, _ in cands})
+        if warn is not None and len(distinct) > 1:
+            for day, value in distinct[1:]:
+                before = [v for d, v in anchors if d <= day]
+                if before and abs(before[-1] - value) < 0.005: continue      # report normal
+                shown = ' / '.join(dt.date.fromisoformat(d).strftime('%d/%m/%Y') + ' : ' + _x_eur(v)
+                                   for d, v in distinct[:4])
+                warn('« ' + str(src.get('name') or gid) + ' » : plusieurs soldes de début distincts ('
+                     + shown + '). Le plus ancien est retenu comme solde d’ouverture'
+                     + (' (' + _x_eur(keep[1]) + ' au ' + dt.date.fromisoformat(keep[0]).strftime('%d/%m/%Y') + ')' if keep else '')
+                     + '. S’il s’agit de comptes bancaires différents, additionnez leurs soldes'
+                     + ' d’ouverture dans l’écran d’import.')
+                break
+        moves = moves_by_group.get(gid, [])
+        last = anchors[-1] if anchors else None
+        opening_value = keep[1] if keep else 0.0
+        opening_day = keep[0] if keep else None
+        counted = [amount for day, amount in moves if not opening_day or day >= opening_day]
+        calculated = round(opening_value + sum(counted), 2)
+        # Solde recalculé à la date du dernier solde du relevé : c'est là que la
+        # comparaison avec le classeur a un sens.
+        at_last = round(opening_value + sum(amount for day, amount in moves
+                                            if (not opening_day or day >= opening_day)
+                                            and (not last or day <= last[0])), 2) if last else None
+        gap = round(at_last - last[1], 2) if last else None
+        state.setdefault('reconcile', {})[gid] = {
+            'opening': round(opening_value, 2),
+            'opening_date': opening_day,
+            'opening_derived': bool(keep and keep[2]),
+            'movements': round(sum(counted), 2),
+            'calculated': calculated,
+            'balance_at_last': at_last,
+            'last_balance': last[1] if last else None,
+            'last_balance_date': last[0] if last else None,
+            'gap': gap,
+            'balances': len(anchors),
+        }
+        checked = state.get('checked', {}).get(gid, set())
+        if warn is not None and last and gap is not None and abs(gap) >= 0.005 and last[0] not in checked:
+            # Le classeur donne un dernier solde : si le total recalculé s'en
+            # écarte, c'est le signe d'un compte manquant, d'un solde d'ouverture
+            # incomplet ou d'une ligne non importée. Jamais silencieux.
+            warn('« ' + str(src.get('name') or gid) + ' » : le solde recalculé depuis le classeur ('
+                 + _x_eur(at_last) + ') ne correspond pas au dernier solde du relevé ('
+                 + _x_eur(last[1]) + ' au ' + dt.date.fromisoformat(last[0]).strftime('%d/%m/%Y')
+                 + ') : écart ' + _x_eur(gap) + '. Vérifiez le solde d’ouverture et les lignes non importées.')
 
 
 def parse_xlsx(text):
@@ -6658,6 +7281,7 @@ def parse_xlsx(text):
         try:
             shared = _x_shared_strings(zf)
             date_styles = _x_styles(zf)
+            border_styles = _x_border_styles(zf)
             sheets, epoch = _x_sheets(zf)
         except zipfile.BadZipFile:
             raise ValueError('Fichier Excel illisible : archive endommagée.')
@@ -6675,13 +7299,15 @@ def parse_xlsx(text):
         state = {'movements': set(), 'opening': set(), 'tables': 0}
         for sheet_name, sheet_path in sheets:
             try:
-                _x_scan_sheet(sheet_name, _x_sheet_rows(zf, sheet_path, shared, date_styles, epoch),
+                _x_scan_sheet(sheet_name, _x_sheet_rows(zf, sheet_path, shared, date_styles, epoch,
+                                                        border_styles=border_styles, warn=warn,
+                                                        sheet_name=sheet_name),
                               sources, records, warn, epoch, state)
             except ValueError as e:
                 raise ValueError('Feuille « ' + sheet_name + ' » : ' + str(e))
             except (zipfile.BadZipFile, ET.ParseError):
                 raise ValueError('Fichier Excel illisible pendant la lecture de la feuille « ' + sheet_name + ' ».')
-        _x_finalize_openings(sources, state)
+        _x_finalize_openings(sources, state, warn)
         if warn_total[0] > len(warn_msgs):
             warn_msgs.append('… et %d autre(s) avertissement(s).' % (warn_total[0] - len(warn_msgs)))
         if not state['tables']:
@@ -6689,7 +7315,8 @@ def parse_xlsx(text):
         if not records: raise ValueError('Les tableaux reconnus ne contiennent aucune opération.')
         if len(records) > XLSX_MAX_RECORDS:
             raise ValueError('Import limité à %s opérations.' % f'{XLSX_MAX_RECORDS:,}'.replace(',', ' '))
-        return {'application': 'Dominis', 'version': 1, 'scis': list(sources.values()), 'records': records, 'warnings': warn_msgs}
+        return {'application': 'Dominis', 'version': 1, 'scis': list(sources.values()), 'records': records,
+                'warnings': warn_msgs, 'reconcile': state.get('reconcile', {})}
 
 
 def _parse_tabular_csv(text, delimiter=';'):
@@ -6699,8 +7326,8 @@ def _parse_tabular_csv(text, delimiter=';'):
     reader = csv.reader(io.StringIO(text), delimiter=delimiter)
     for rn, row in enumerate(reader, 1):
         cells = {ci: val.strip() for ci, val in enumerate(row) if val and val.strip()}
-        raw_rows.append((rn, cells))
-    if not any(_x_header_kinds(c) for _, c in raw_rows if c):
+        raw_rows.append((rn, cells, set()))
+    if not any(_x_header_kinds(c) for _, c, _b in raw_rows if c):
         return None
     sources = {}
     records = []
@@ -6716,12 +7343,13 @@ def _parse_tabular_csv(text, delimiter=';'):
         _x_scan_sheet('CSV', iter(raw_rows), sources, records, warn, epoch, state)
     except ValueError as e:
         raise ValueError('Fichier CSV : ' + str(e))
-    _x_finalize_openings(sources, state)
+    _x_finalize_openings(sources, state, warn)
     if warn_total[0] > len(warn_msgs):
         warn_msgs.append('… et %d autre(s) avertissement(s).' % (warn_total[0] - len(warn_msgs)))
     if not state['tables'] or not records:
         raise ValueError('Les tableaux reconnus dans le CSV ne contiennent aucune opération.')
-    return {'application': 'Dominis', 'version': 1, 'scis': list(sources.values()), 'records': records, 'warnings': warn_msgs}
+    return {'application': 'Dominis', 'version': 1, 'scis': list(sources.values()), 'records': records,
+            'warnings': warn_msgs, 'reconcile': state.get('reconcile', {})}
 
 
 def parse_import(p):
@@ -6784,10 +7412,25 @@ def import_bundle(c,p):
     selected=[s for s in b['scis'] if s['id'] in mapping]
     if not selected: raise ValueError('Sélectionnez les SCI à importer et leur destination.')
     if p.get('format')=='csv' and any(dest=='new' and sid=='csv' for sid, dest in mapping.items()): raise ValueError('Sélectionnez une SCI existante pour le CSV.')
-    fp=hashlib.sha256((p['text']+json.dumps(mapping,sort_keys=True)).encode()).hexdigest()
+    # Le solde d'ouverture fait partie de l'empreinte : corriger l'ouverture
+    # puis réimporter n'est pas un doublon, c'est un import différent.
+    openings_sig=json.dumps(p.get('openings') if isinstance(p.get('openings'),dict) else {},sort_keys=True)
+    fp=hashlib.sha256((p['text']+json.dumps(mapping,sort_keys=True)+openings_sig).encode()).hexdigest()
     if c.execute('SELECT 1 FROM imports WHERE fingerprint=?',(fp,)).fetchone(): raise ValueError('Ce fichier a déjà été importé vers ces destinations.')
     sci_map={}; new_scis=[]
     apply_openings=p.get('openings') if isinstance(p.get('openings'),dict) else {}
+    # Solde d'ouverture corrigé dans l'écran d'import : il s'applique aussi bien
+    # à une SCI existante qu'à une SCI créée à partir du classeur.
+    for sid, raw_value in list(apply_openings.items()):
+        src=next((s for s in b['scis'] if s['id']==sid), None)
+        if src is None or raw_value is None or raw_value=='': continue
+        try: value=round(float(raw_value),2)
+        except (TypeError,ValueError): raise ValueError('Solde d’ouverture invalide pour « '+str(src.get('name') or '')+' ».')
+        src['opening']=value
+        src.pop('opening_derived',None)
+        if not src.get('opening_date'):
+            dates=sorted(r['date'] for r in b['records'] if r.get('sci')==sid and r.get('kind')=='entries' and r.get('date'))
+            src['opening_date']=dates[0] if dates else '2000-01-01'
     for s in selected:
         dest=mapping[s['id']]
         if dest=='new':
@@ -6811,7 +7454,7 @@ def import_bundle(c,p):
                         'kind':str(anchor.get('kind') or 'releve')[:16]}
                 current['balances']=[merged[k] for k in sorted(merged)]
                 changed=True
-            if apply_openings.get(s['id']) and s.get('opening') is not None:
+            if s['id'] in apply_openings and s.get('opening') is not None:
                 current['opening']=round(float(s['opening']),2)
                 current['opening_date']=s.get('opening_date') or current.get('opening_date') or '2000-01-01'
                 if s.get('opening_derived'): current['opening_derived']=True
@@ -8470,11 +9113,11 @@ def build_document_preview(r):
             with zipfile.ZipFile(io.BytesIO(raw)) as zf:
                 names=set(zf.namelist())
                 if 'xl/workbook.xml' in names or ext=='.xlsx':
-                    shared=_x_shared_strings(zf); date_styles=_x_styles(zf); sheets,epoch=_x_sheets(zf)
+                    shared=_x_shared_strings(zf); date_styles=_x_styles(zf); border_styles=_x_border_styles(zf); sheets,epoch=_x_sheets(zf)
                     sheets_out=[]
                     for sname,spath in sheets[:15]:
                         srows=[]; max_c=0
-                        for _rn,cells in _x_sheet_rows(zf,spath,shared,date_styles,epoch):
+                        for _rn,cells,_brd in _x_sheet_rows(zf,spath,shared,date_styles,epoch,border_styles=border_styles,max_rows=400):
                             if not cells: continue
                             if len(srows)>=200: break
                             mc=min(max(cells.keys())+1,25)
@@ -8822,7 +9465,7 @@ class Handler(BaseHTTPRequestHandler):
                     if path=='/api/import-preview':
                         b=parse_import(p)
                         years=sorted({int(r['date'][:4]) for r in b['records'] if r.get('kind')=='entries' and isinstance(r.get('date'),str) and len(r['date'])>=4 and r['date'][:4].isdigit()})
-                        return self.reply({'scis':b['scis'],'counts':{s['id']:{k:sum(r['sci']==s['id'] and r['kind']==k for r in b['records']) for k in KINDS} for s in b['scis']},'rows':b['records'][:5] if p.get('format') in ('csv','xlsx') else [],'warnings':b.get('warnings',[]),'years':years})
+                        return self.reply({'scis':b['scis'],'counts':{s['id']:{k:sum(r['sci']==s['id'] and r['kind']==k for r in b['records']) for k in KINDS} for s in b['scis']},'rows':b['records'][:5] if p.get('format') in ('csv','xlsx') else [],'warnings':b.get('warnings',[]),'years':years,'reconcile':b.get('reconcile',{})})
                     if path=='/api/import':
                         count=import_bundle(c,p); c.commit(); return self.reply({'ok':True,'count':count})
                     if path=='/api/generate-calls':
@@ -8984,7 +9627,7 @@ const palette=['#c7ad77','#879ad8','#70b7a6','#ce9683','#a08dcc','#7bb5c8'];
 const kindNames={properties:'Biens immobiliers',leases:'Baux & locataires',calls:'Appels de loyers',entries:'Trésorerie',partners:'Associés',loans:'Emprunts',tasks:'Échéances',documents:'Documents'};
 const navs={treasury:['Trésorerie','wallet'],agenda:['Échéancier','calendar'],documents:['Documents','folder']};
 const tabs=[['overview','Vue d’ensemble'],['properties','Biens'],['leases','Baux & locataires'],['calls','Loyers'],['entries','Trésorerie'],['partners','Associés'],['loans','Emprunts'],['tasks','Échéances'],['documents','Documents'],['balance','Déclaration'],['identity','Société']];
-let S={scis:[],records:[],settings:{},audit:[]}, page='dashboard',tab='overview',query='',scope='',filter='',docFolder='',docYear='',modalDirty=false,previousFocus=null,settingsQueue=Promise.resolve(),closing=false,importData=null;
+let S={scis:[],records:[],settings:{},audit:[]}, page='dashboard',tab='overview',query='',scope='',filter='',docFolder='',docYear='',modalDirty=false,previousFocus=null,settingsQueue=Promise.resolve(),closing=false,importData=null,importReconcile={};
 let settingsSection='general', updateInfo={status:'checking',current:'',message:'Vérification sur GitHub…'}, updateInstalling=false, updateRequestPending=false, updatePrompted=false, updateInstance=null, restartSince=0, restartNotified=false;
 const updateLabels={idle:'En attente',checking:'Vérification en cours',available:'Mise à jour disponible',current:'À jour',unavailable:'Vérification impossible',disabled:'Aperçu',downloading:'Téléchargement en cours',installing:'Installation en cours',restarting:'Redémarrage automatique',failed:'Installation annulée'};
 const busyUpdate=()=>['downloading','installing','restarting'].includes(updateInfo.status);
@@ -11919,10 +12562,10 @@ async function detectAndReadImportFile(file,chosenFmt){
     if(chosenFmt==='csv'&&trimmed.startsWith('{')&&fname.endsWith('.json'))return {format:'json',text:txt};
     return {format:chosenFmt,text:txt};
 }
-function importModal(){importData=null;openModal('Importer, en toute maîtrise',`<div class="notice">Aucune donnée existante n’est écrasée. L’import ajoute de nouveaux éléments ; vérifiez les doublons si vous importez plusieurs exports qui se recouvrent.</div>${field('import-format','Format du fichier','select','json',[['json','JSON — export Dominis'],['csv','CSV — mouvements de trésorerie'],['xlsx','Excel — tableaux de trésorerie (.xlsx)']])}<div class="file-drop">Sélectionnez le fichier à analyser<input id="import-file" type="file" accept=".json,.csv,.xlsx" aria-label="Fichier à importer"></div><p class="sub">CSV UTF-8 : <code>date;label;direction;category;amount</code> (ou tableau exporté avec colonnes <code>Date · Libellé · Débit · Crédit · Solde</code>)<br>Dates AAAA-MM-JJ ou JJ/MM/AAAA · direction Recette ou Dépense · montants positifs.<br>Colonne facultative « sci » : les lignes sont regroupées par société. Vous choisissez une destination existante pour chaque groupe avant l’import.<br><br>Excel .xlsx : un ou plusieurs tableaux <code>Date · Libellé · Débit · Crédit · Solde</code>,<br>sur une ou plusieurs feuilles (y compris une feuille par année). Titres, soldes de début/fin de mois et totaux sont reconnus ; les lignes de solde servent de contrôle de cohérence et ne sont pas importées comme opérations.</p><button class="text-link" id="csv-template" style="margin-top:10px">Télécharger un modèle CSV →</button><div id="import-preview"></div>`,`<button data-action="close-modal">Annuler</button><button class="primary" id="analyze-import">${icon('search')} Analyser le fichier</button>`,true);
+function importModal(){importData=null;importReconcile={};openModal('Importer, en toute maîtrise',`<div class="notice">Aucune donnée existante n’est écrasée. L’import ajoute de nouveaux éléments ; vérifiez les doublons si vous importez plusieurs exports qui se recouvrent.</div>${field('import-format','Format du fichier','select','json',[['json','JSON — export Dominis'],['csv','CSV — mouvements de trésorerie'],['xlsx','Excel — tableaux de trésorerie (.xlsx)']])}<div class="file-drop">Sélectionnez le fichier à analyser<input id="import-file" type="file" accept=".json,.csv,.xlsx" aria-label="Fichier à importer"></div><p class="sub">CSV UTF-8 : <code>date;label;direction;category;amount</code> (ou tableau exporté avec colonnes <code>Date · Libellé · Débit · Crédit · Solde</code>)<br>Dates AAAA-MM-JJ ou JJ/MM/AAAA · direction Recette ou Dépense · montants positifs.<br>Colonne facultative « sci » : les lignes sont regroupées par société. Vous choisissez une destination existante pour chaque groupe avant l’import.<br><br>Excel .xlsx : un ou plusieurs tableaux <code>Date · Libellé · Débit · Crédit · Solde</code> (ou <code>Montant</code> + <code>Sens</code>),<br>sur une ou plusieurs feuilles (y compris une feuille par année), en-tête sur une ou deux lignes.<br>Les formules sont relues : la valeur enregistrée dans le classeur est utilisée, sinon la formule est recalculée et signalée si elle reste illisible.<br>Les bordures délimitent le tableau : les récapitulatifs placés dessous ne deviennent jamais des opérations. Les lignes de solde servent de contrôle de cohérence et ne sont jamais importées comme mouvements ; le solde recalculé est comparé au dernier solde du relevé.</p><button class="text-link" id="csv-template" style="margin-top:10px">Télécharger un modèle CSV →</button><div id="import-preview"></div>`,`<button data-action="close-modal">Annuler</button><button class="primary" id="analyze-import">${icon('search')} Analyser le fichier</button>`,true);
 $('#csv-template').onclick=()=>downloadText('date;label;direction;category;amount\n2026-10-01;Exemple de loyer;Recette;Loyers;850.00\n','modele-mouvements.csv','text/csv;charset=utf-8');
 $('#analyze-import').onclick=analyzeImport;
-const resetImportUi=()=>{importData=null;$('#import-preview').innerHTML='';let err=$('#modal-error');if(err){err.className='';err.textContent='';}$('#csv-template').style.display=$('#f-import-format').value==='csv'?'':'none';$('#analyze-import').innerHTML=icon('search')+' Analyser le fichier';$('#analyze-import').onclick=analyzeImport;};
+const resetImportUi=()=>{importData=null;importReconcile={};$('#import-preview').innerHTML='';let err=$('#modal-error');if(err){err.className='';err.textContent='';}$('#csv-template').style.display=$('#f-import-format').value==='csv'?'':'none';$('#analyze-import').innerHTML=icon('search')+' Analyser le fichier';$('#analyze-import').onclick=analyzeImport;};
 $('#f-import-format').onchange=resetImportUi;
 $('#import-file').onchange=async()=>{
     let f=$('#import-file').files[0];
@@ -11939,7 +12582,13 @@ $('#import-file').onchange=async()=>{
     resetImportUi();
 };
 $('#csv-template').style.display=$('#f-import-format').value==='csv'?'':'none';}
-async function analyzeImport(){let btn=$('#analyze-import');btn.disabled=true;let err=$('#modal-error');if(err){err.className='';err.textContent='';}try{let file=$('#import-file').files[0];if(!file)throw new Error('Sélectionnez un fichier.');if(file.size>500*1024*1024)throw new Error('Import limité à 500 Mo.');let fmt=$('#f-import-format').value;importData=await detectAndReadImportFile(file,fmt);if($('#f-import-format')&&$('#f-import-format').value!==importData.format){$('#f-import-format').value=importData.format;$('#csv-template').style.display=importData.format==='csv'?'':'none';}let b=await (await api('import-preview',importData)).json();$('#import-preview').innerHTML=`<h3 style="margin:25px 0 12px">Vérifiez les sources et choisissez les destinations</h3>${b.scis.map(s=>{let isTableSrc=importData.format==='xlsx'||String(s.id||'').startsWith('xlsx_');let hasOpening=s.opening!=null&&Number(s.opening)!==0&&s.opening_date;return `<div class="panel" style="margin-bottom:10px;padding:15px"><label class="row"><input type="checkbox" name="import-source" value="${esc(s.id)}" checked><strong>${esc(s.name)}</strong></label><p class="sub" style="margin:9px 0">${Object.entries(b.counts[s.id]).filter(([k,n])=>n).map(([k,n])=>n+' '+kindNames[k].toLowerCase()).join(' · ')||'Fiche SCI seule'}${hasOpening?` · solde d’ouverture au ${date(s.opening_date)} : ${money(s.opening,2)}`:''}</p><select data-target="${esc(s.id)}" aria-label="Destination de ${esc(s.name)}">${(importData.format==='csv'&&!isTableSrc)?'<option value="">Choisir la SCI de destination</option>':isTableSrc?'<option value="new">Créer la nouvelle SCI (titre du tableau)</option>':'<option value="new">Créer une nouvelle SCI (copie)</option>'}${S.scis.map(t=>`<option value="${t.id}">Ajouter à ${esc(t.name)}</option>`).join('')}</select></div>`;}).join('')}${b.rows.length?`<h3>Aperçu des 5 premières lignes</h3><div class="table-wrap"><table><tbody>${b.rows.map(r=>`<tr><td>${date(r.date)}</td><td>${esc(r.label)}</td><td>${esc(r.direction)}</td><td class="align-right"><span class="${r.direction==='Recette'?'green':'red'}">${r.direction==='Recette'?'+':'−'} ${money(r.amount,2)}</span></td></tr>`).join('')}</tbody></table></div>`:''}${b.warnings&&b.warnings.length?`<div class="notice" style="margin-top:15px"><strong>Contrôles de cohérence · ${b.warnings.length} avertissement${b.warnings.length>1?'s':''}</strong><ul style="margin:9px 0 0;padding-left:18px;line-height:1.65">${b.warnings.map(w=>`<li>${esc(w)}</li>`).join('')}</ul></div>`:''}<p class="compact-note">Dans une SCI existante, la fiche société et les réglages sont conservés. Tous les éléments sélectionnés sont ajoutés, sans fusion automatique.</p>`;btn.innerHTML=icon('check')+' Confirmer l’import';btn.onclick=async()=>{btn.disabled=true;try{let mapping={};$$('input[name=import-source]:checked').forEach(e=>{let target=$$('select[data-target]').find(t=>t.dataset.target===e.value);mapping[e.value]=target.value;});if(!Object.keys(mapping).length)throw new Error('Sélectionnez au moins une source à importer.');if(Object.values(mapping).some(v=>!v))throw new Error('Choisissez une SCI de destination.');let r=await (await api('import',{...importData,mapping})).json();// Sans ce réglage, un classeur importé sur plusieurs exercices restait invisible
+function reconcileLine(rec,opening){
+    if(!rec)return '';
+    if(rec.last_balance==null)return 'Aucun solde de contrôle dans le classeur : le total repose sur les seuls mouvements importés.';
+    let base=Number(rec.balance_at_last)||0, delta=opening-(Number(rec.opening)||0), calc=base+delta, gap=calc-(Number(rec.last_balance)||0);
+    return `Dernier solde du relevé : <strong>${money(rec.last_balance,2)}</strong> au ${date(rec.last_balance_date)} · solde recalculé à cette date : <strong>${money(calc,2)}</strong> <span class="${Math.abs(gap)<0.005?'green':'red'}">(écart ${Math.abs(gap)<0.005?'nul':money(gap,2)})</span>`;
+}
+async function analyzeImport(){let btn=$('#analyze-import');btn.disabled=true;let err=$('#modal-error');if(err){err.className='';err.textContent='';}try{let file=$('#import-file').files[0];if(!file)throw new Error('Sélectionnez un fichier.');if(file.size>500*1024*1024)throw new Error('Import limité à 500 Mo.');let fmt=$('#f-import-format').value;importData=await detectAndReadImportFile(file,fmt);if($('#f-import-format')&&$('#f-import-format').value!==importData.format){$('#f-import-format').value=importData.format;$('#csv-template').style.display=importData.format==='csv'?'':'none';}let b=await (await api('import-preview',importData)).json();importReconcile=b.reconcile||{};$('#import-preview').innerHTML=`<h3 style="margin:25px 0 12px">Vérifiez les sources et choisissez les destinations</h3>${b.scis.map(s=>{let isTableSrc=importData.format==='xlsx'||String(s.id||'').startsWith('xlsx_');let rec=importReconcile[s.id];let hasOpening=s.opening!=null&&s.opening_date;return `<div class="panel" style="margin-bottom:10px;padding:15px"><label class="row"><input type="checkbox" name="import-source" value="${esc(s.id)}" checked><strong>${esc(s.name)}</strong></label><p class="sub" style="margin:9px 0">${Object.entries(b.counts[s.id]).filter(([k,n])=>n).map(([k,n])=>n+' '+kindNames[k].toLowerCase()).join(' · ')||'Fiche SCI seule'}</p>${rec?`<label class="row" style="margin:4px 0;align-items:center"><span class="sub">Solde d’ouverture</span><input type="number" step="0.01" style="max-width:160px" data-import-opening="${esc(s.id)}" value="${hasOpening?s.opening:''}" placeholder="0,00" aria-label="Solde d’ouverture de ${esc(s.name)}">${rec.opening_date?`<span class="sub">au ${date(rec.opening_date)}</span>`:''}</label><p class="sub" style="margin:6px 0" data-reconcile-lines="${esc(s.id)}">${reconcileLine(rec,Number(s.opening)||0)}</p>`:''}<select data-target="${esc(s.id)}" aria-label="Destination de ${esc(s.name)}">${(importData.format==='csv'&&!isTableSrc)?'<option value="">Choisir la SCI de destination</option>':isTableSrc?'<option value="new">Créer la nouvelle SCI (titre du tableau)</option>':'<option value="new">Créer une nouvelle SCI (copie)</option>'}${S.scis.map(t=>`<option value="${t.id}">Ajouter à ${esc(t.name)}</option>`).join('')}</select></div>`;}).join('')}${b.rows.length?`<h3>Aperçu des 5 premières lignes</h3><div class="table-wrap"><table><tbody>${b.rows.map(r=>`<tr><td>${date(r.date)}</td><td>${esc(r.label)}</td><td>${esc(r.direction)}</td><td class="align-right"><span class="${r.direction==='Recette'?'green':'red'}">${r.direction==='Recette'?'+':'−'} ${money(r.amount,2)}</span></td></tr>`).join('')}</tbody></table></div>`:''}${b.warnings&&b.warnings.length?`<div class="notice" style="margin-top:15px"><strong>Contrôles de cohérence · ${b.warnings.length} avertissement${b.warnings.length>1?'s':''}</strong><ul style="margin:9px 0 0;padding-left:18px;line-height:1.65">${b.warnings.map(w=>`<li>${esc(w)}</li>`).join('')}</ul></div>`:''}<p class="compact-note">Dans une SCI existante, la fiche société et les réglages sont conservés. Tous les éléments sélectionnés sont ajoutés, sans fusion automatique.</p>`;btn.innerHTML=icon('check')+' Confirmer l’import';btn.onclick=async()=>{btn.disabled=true;try{let mapping={};$$('input[name=import-source]:checked').forEach(e=>{let target=$$('select[data-target]').find(t=>t.dataset.target===e.value);mapping[e.value]=target.value;});if(!Object.keys(mapping).length)throw new Error('Sélectionnez au moins une source à importer.');if(Object.values(mapping).some(v=>!v))throw new Error('Choisissez une SCI de destination.');let openings={};$$('input[name=import-source]:checked').forEach(e=>{let inp=$$('[data-import-opening]').find(t=>t.dataset.importOpening===e.value);if(inp&&inp.value!=='')openings[e.value]=Number(inp.value);});let r=await (await api('import',{...importData,mapping,openings})).json();// Sans ce réglage, un classeur importé sur plusieurs exercices restait invisible
         // dans la vue d’ensemble : le filtre d’année global continuait de pointer sur
         // l’année en cours. Plusieurs années importées => « Toutes les années ».
         if(Array.isArray(b.years)&&b.years.length){
@@ -11961,7 +12610,7 @@ document.addEventListener('change',async ev=>{let el=ev.target;try{if(el.classLi
 if(el.id==='balance-start'||el.id==='balance-end'){let s=currentSCI();if(s){let p=balancePeriod(s);balanceView={mode:'custom',year:p.year,start:el.id==='balance-start'?el.value:p.start,end:el.id==='balance-end'?el.value:p.end};render();}}
 if(el.id==='doc-preview-folder'){moveDocToFolder(docPreviewId,el.value);}}catch(e){notify(e.message,true)}});
 document.addEventListener('wheel',docPreviewWheel,{passive:false});
-document.addEventListener('input',ev=>{if(ev.target.id==='filter-search'){query=ev.target.value;renderListing();}if(ev.target.id==='doc-zoom-range'){docPreviewStageZoom((Number(ev.target.value)||100)/100,{instant:true});}if(ev.target.closest('#modal')&&!['global-search'].includes(ev.target.id)&&!ev.target.closest('#col-config-wrap')&&!ev.target.closest('#bell-modal-body')&&!ev.target.closest('#doc-preview-body'))modalDirty=true;});
+document.addEventListener('input',ev=>{if(ev.target.dataset&&ev.target.dataset.importOpening){let id=ev.target.dataset.importOpening,rec=importReconcile[id],box=$$('[data-reconcile-lines]').find(n=>n.dataset.reconcileLines===id);if(rec&&box){let v=Number(ev.target.value);if(!isFinite(v))v=0;box.innerHTML=reconcileLine(rec,v);return;}}if(ev.target.id==='filter-search'){query=ev.target.value;renderListing();}if(ev.target.id==='doc-zoom-range'){docPreviewStageZoom((Number(ev.target.value)||100)/100,{instant:true});}if(ev.target.closest('#modal')&&!['global-search'].includes(ev.target.id)&&!ev.target.closest('#col-config-wrap')&&!ev.target.closest('#bell-modal-body')&&!ev.target.closest('#doc-preview-body'))modalDirty=true;});
 document.addEventListener('submit',ev=>{if(ev.target.id==='edit-form'){ev.preventDefault();submitForm(ev.target);}});
 document.addEventListener('keydown',ev=>{if((ev.ctrlKey||ev.metaKey)&&ev.key.toLowerCase()==='k'){ev.preventDefault();if(!modalDirty)searchModal();}if(ev.key==='Escape'&&$('#modal').innerHTML)closeModal();if(ev.key==='Enter'&&ev.target.matches('article[data-nav]'))navigate(ev.target.dataset.nav);
 if((ev.key==='Enter'||ev.key===' ')&&ev.target.matches('.doc-folder-card[data-doc-folder]')){ev.preventDefault();docFolder=ev.target.dataset.docFolder;docYear='';renderListing();}

@@ -46,16 +46,20 @@ def col_ref(i):
     return letters
 
 
-def build_xlsx(sheets, numfmts=None, cell_xfs=None):
+def build_xlsx(sheets, numfmts=None, cell_xfs=None, borders=None, border_xfs=None):
     """Construit un .xlsx minimal mais conforme.
 
     sheets : [(nom, lignes)] — une ligne est None (ligne omise : le trou marque
-    une ligne vide) ou une liste de cellules (colonne, type, valeur[, style]).
+    une ligne vide) ou une liste de cellules (colonne, type, valeur[, style[, cache]]).
     Types : 'inline', 'shared', 'n' (numérique), 'iso' (date Excel t="d"),
-    'str' (résultat de formule mis en cache).
+    'str' (résultat de formule mis en cache), 'f' (formule sans valeur en cache),
+    'fc' (formule avec valeur en cache donnée en 5e position).
+    borders / border_xfs : styles de bordure (indice de style -> indice de bordure).
     """
     numfmts = numfmts or {}
     xfs = cell_xfs or [0]
+    borders = borders or []
+    border_xfs = border_xfs or {}
     shared_list, shared_index, sheet_parts = [], {}, []
     for _name, rows in sheets:
         parts = []
@@ -84,6 +88,11 @@ def build_xlsx(sheets, numfmts=None, cell_xfs=None):
                 elif kind == 'str':
                     attrs += ' t="str"'
                     body = '<v>%s</v>' % xml_esc(value)
+                elif kind == 'f':
+                    body = '<f>%s</f>' % xml_esc(value)
+                elif kind == 'fc':
+                    cached = spec[4] if len(spec) > 4 else ''
+                    body = '<f>%s</f><v>%s</v>' % (xml_esc(value), '' if cached == '' else repr(float(cached)))
                 else:
                     raise AssertionError('type de cellule inconnu : %r' % (kind,))
                 if style is not None:
@@ -104,10 +113,19 @@ def build_xlsx(sheets, numfmts=None, cell_xfs=None):
         numfmt_xml = '<numFmts count="%d">%s</numFmts>' % (
             len(numfmts),
             ''.join('<numFmt numFmtId="%d" formatCode="%s"/>' % (k, xml_esc(v)) for k, v in numfmts.items()))
+    border_xml = ''
+    if borders:
+        sides = ('left', 'right', 'top', 'bottom')
+        border_xml = '<borders count="%d">%s</borders>' % (
+            len(borders),
+            ''.join('<border>%s</border>' % ''.join('<%s style="thin"/>' % side for side in item if side in sides)
+                    for item in borders))
     styles = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-              '<styleSheet xmlns="%s">%s<cellXfs count="%d">%s</cellXfs></styleSheet>'
-              % (NS_MAIN, numfmt_xml, len(xfs),
-                 ''.join('<xf numFmtId="%d" applyNumberFormat="1"/>' % fid for fid in xfs)))
+              '<styleSheet xmlns="%s">%s%s<cellXfs count="%d">%s</cellXfs></styleSheet>'
+              % (NS_MAIN, numfmt_xml, border_xml, len(xfs),
+                 ''.join('<xf numFmtId="%d"%s applyNumberFormat="1"/>'
+                         % (fid, ' borderId="%d"' % border_xfs.get(i, 0) if border_xfs else '')
+                         for i, fid in enumerate(xfs))))
 
     workbook_sheets, rel_entries, overrides = [], [], []
     for i, (name, _rows) in enumerate(sheets, 1):
@@ -563,6 +581,194 @@ class XlsxParseTests(unittest.TestCase):
         self.assertEqual(len(bundle_auto['records']), 14)
 
 
+
+def f(col, formula, style=MONEY):
+    """Formule sans valeur calculée (fichier produit par un générateur)."""
+    return (col, 'f', formula, style)
+
+
+def fc(col, formula, cached, style=MONEY):
+    """Formule avec valeur calculée en cache (fichier produit par Excel)."""
+    return (col, 'fc', formula, style, cached)
+
+
+def boxed(cells):
+    """Cellules encadrées : style 4 (bordure sur les quatre côtés)."""
+    return [(c[0], c[1], c[2], 4) + tuple(c[4:]) for c in cells]
+
+
+class XlsxReaderRegressionTests(unittest.TestCase):
+    """Défauts réels du lecteur : formules, bordures, en-têtes fusionnés, sens unique.
+
+    La ligne d'en-tête est toujours en ligne 4 (comme dans les classeurs réels
+    reproduits par les autres tests) : les formules peuvent donc référencer
+    E5/D6/C6 de façon lisible.
+    """
+
+    HEAD = [[(0, 'inline', 'SCI TEST')], None, None, HEADER]
+
+    # --- formules -----------------------------------------------------------
+    def test_formula_amounts_are_recalculated_when_no_value_is_cached(self):
+        rows = self.HEAD + [
+            [f(4, '1200+300')],                                        # E5 : 1500
+            [t(0, '05/01/26'), t(1, 'Loyer'), f(3, '1000+200'), f(4, 'E5+D6')],
+            [t(0, '06/01/26'), t(1, 'Travaux'), f(2, '500*0.5'), f(4, 'E6-C7')],
+        ]
+        bundle = parse(build_xlsx([('Formules', rows)], numfmts={164: '#,##0.00" €"'},
+                                  cell_xfs=[0, 164]))
+        self.assertEqual(bundle['scis'][0]['opening'], 1500.0)
+        self.assertEqual([(r['label'], r['direction'], r['amount']) for r in bundle['records']],
+                         [('Loyer', 'Recette', 1200.0), ('Travaux', 'Dépense', 250.0)])
+        # aucun écart de solde : les formules sont recalculées correctement
+        self.assertEqual(len(bundle['warnings']), 1)
+        self.assertIn('recalculées à l’import', bundle['warnings'][0])
+        self.assertEqual(bundle['reconcile'][bundle['scis'][0]['id']]['gap'], 0.0)
+
+    def test_cached_formula_values_are_preferred_and_silent(self):
+        rows = self.HEAD + [
+            [fc(4, '1200+300', 1500)],
+            [t(0, '05/01/26'), t(1, 'Loyer'), fc(3, '1000+200', 1200), fc(4, 'E5+D6', 2700)],
+        ]
+        bundle = parse(build_xlsx([('Cache', rows)], numfmts={164: '#,##0.00" €"'},
+                                  cell_xfs=[0, 164]))
+        self.assertEqual(bundle['warnings'], [])
+        self.assertEqual(bundle['scis'][0]['opening'], 1500.0)
+        self.assertEqual(bundle['records'][0]['amount'], 1200.0)
+
+    def test_unreadable_formula_is_reported_and_never_silently_dropped(self):
+        rows = self.HEAD + [
+            [t(0, '05/01/26'), t(1, 'Loyer'), n(3, 1200.0),
+             f(4, 'VLOOKUP(A5,Feuil2!A1:B9,2,FALSE)')],
+            [t(0, '06/01/26'), t(1, 'Travaux'), n(2, 250.0)],
+        ]
+        bundle = parse(build_xlsx([('Illisible', rows)], numfmts={164: '#,##0.00" €"'},
+                                  cell_xfs=[0, 164]))
+        joined = '\n'.join(bundle['warnings'])
+        self.assertIn('sans valeur calculée', joined)
+        self.assertIn('VLOOKUP', joined)
+        self.assertIn('E5', joined)
+        self.assertEqual(len(bundle['records']), 2)
+
+    def test_running_balance_without_opening_line_derives_the_opening(self):
+        rows = self.HEAD + [
+            [t(0, '05/01/26'), t(1, 'Loyer'), n(3, 1200.0),
+             f(4, '1000+SUM($D$5:D5)-SUM($C$5:C5)')],
+            [t(0, '03/02/26'), t(1, 'Travaux'), n(2, 250.55),
+             f(4, '1000+SUM($D$5:D6)-SUM($C$5:C6)')],
+        ]
+        bundle = parse(build_xlsx([('Soldes', rows)], numfmts={164: '#,##0.00" €"'},
+                                  cell_xfs=[0, 164]))
+        sci = bundle['scis'][0]
+        self.assertEqual(sci['opening'], 1000.0)
+        self.assertEqual(sci['opening_date'], '2026-01-04')
+        self.assertTrue(sci.get('opening_derived'))
+        self.assertEqual(bundle['reconcile'][sci['id']]['calculated'], 1949.45)
+
+    # --- structure du tableau ----------------------------------------------
+    def test_two_line_header_with_merged_group(self):
+        rows = [[t(0, 'SCI FUSION')], None,
+                [t(0, 'Date'), t(1, 'Libellé'), t(2, 'Montant')],
+                [(2, 'inline', 'Débit'), (3, 'inline', 'Crédit'), (4, 'inline', 'Solde')],
+                [t(0, '05/01/26'), t(1, 'Loyer'), n(3, 1200.0), n(4, 2200.0)]]
+        bundle = parse(build_xlsx([('Fusion', rows)], numfmts={164: '#,##0.00" €"'},
+                                  cell_xfs=[0, 164]))
+        self.assertEqual([(r['label'], r['direction'], r['amount']) for r in bundle['records']],
+                         [('Loyer', 'Recette', 1200.0)])
+
+    def test_single_amount_column_with_direction_column(self):
+        header = [t(0, 'Date'), t(1, 'Libellé'), t(2, 'Montant'), t(3, 'Sens')]
+        rows = [[t(0, 'SCI SENS')], None, header,
+                [t(0, '05/01/26'), t(1, 'Loyer'), n(2, 1200.0), t(3, 'Crédit')],
+                [t(0, '06/01/26'), t(1, 'Travaux'), n(2, 250.0), t(3, 'Débit')],
+                [t(0, '07/01/26'), t(1, 'Avoir'), n(2, 50.0), t(3, 'Débit')],
+                [t(0, '08/01/26'), t(1, 'Remboursement'), n(2, -30.0)]]   # signe = dépense
+        bundle = parse(build_xlsx([('Sens', rows)], numfmts={164: '#,##0.00" €"'},
+                                  cell_xfs=[0, 164]))
+        self.assertEqual(bundle['warnings'], [])
+        self.assertEqual([(r['label'], r['direction'], r['amount']) for r in bundle['records']],
+                         [('Loyer', 'Recette', 1200.0), ('Travaux', 'Dépense', 250.0),
+                          ('Avoir', 'Dépense', 50.0), ('Remboursement', 'Dépense', 30.0)])
+
+    def test_unknown_direction_is_refused(self):
+        header = [t(0, 'Date'), t(1, 'Libellé'), t(2, 'Montant'), t(3, 'Sens')]
+        rows = [[t(0, 'SCI SENS')], None, header,
+                [t(0, '05/01/26'), t(1, 'Loyer'), n(2, 1200.0), t(3, 'Peut-être')]]
+        with self.assertRaises(ValueError) as ctx:
+            parse(build_xlsx([('Sens', rows)], numfmts={164: '#,##0.00" €"'}, cell_xfs=[0, 164]))
+        self.assertIn('sens illisible', str(ctx.exception))
+
+    def test_summary_row_below_the_table_is_never_an_operation(self):
+        rows = self.HEAD + [
+            [t(0, '05/01/26'), t(1, 'Loyer'), n(3, 1200.0), n(4, 1200.0)],
+            [t(0, '06/01/26'), t(1, 'Travaux'), n(2, 200.0), n(4, 1000.0)],
+            [t(0, '31/01/26'), t(1, 'Total des dépenses'), n(2, 250.0)],
+            [t(0, '31/01/26'), t(1, 'Total des recettes'), n(3, 1200.0)],
+        ]
+        bundle = parse(build_xlsx([('Recap', rows)], numfmts={164: '#,##0.00" €"'}, cell_xfs=[0, 164]))
+        self.assertEqual([(r['label'], r['direction'], r['amount']) for r in bundle['records']],
+                         [('Loyer', 'Recette', 1200.0), ('Travaux', 'Dépense', 200.0)])
+        joined = '\n'.join(bundle['warnings'])
+        self.assertIn('total annoncé 250,00 € en débit', joined)
+        self.assertIn('ligne de synthèse non importée', joined)
+
+    def test_bordered_table_ends_before_the_recap_block(self):
+        rows = [[t(0, 'SCI BORDURES')], None, None]
+        for line in (HEADER,
+                     [t(0, '05/01/26'), t(1, 'Loyer'), n(3, 1200.0), n(4, 1000.0)],
+                     [t(0, '06/01/26'), t(1, 'Loyer'), n(3, 1200.0), n(4, 2200.0)]):
+            rows.append(boxed(line))
+        rows += [None,
+                 [(1, 'inline', 'Total des recettes'), (3, 'n', 2400.0)],
+                 [(1, 'inline', 'Frais de dossier'), (2, 'n', 293.05)]]   # hors tableau, sans date
+        bundle = parse(build_xlsx([('Bordures', rows)], numfmts={164: '#,##0.00" €"'},
+                                  cell_xfs=[0, 164, 164, 164, 164],
+                                  borders=[[], ['left', 'right', 'top', 'bottom']],
+                                  border_xfs={4: 1}))
+        self.assertEqual(len(bundle['records']), 2)
+        self.assertEqual(bundle['reconcile'][bundle['scis'][0]['id']]['calculated'], 2200.0)
+        joined = '\n'.join(bundle['warnings'])
+        self.assertIn('hors du tableau', joined)
+        self.assertIn('Frais de dossier', joined)
+
+    def test_footer_marker_ends_the_table_without_borders(self):
+        rows = self.HEAD + [
+            [t(0, '05/01/26'), t(1, 'Loyer'), n(3, 1200.0)],
+            [t(0, 'Récapitulatif')],
+            [t(0, 'Loyer'), n(3, 1200.0)],
+        ]
+        bundle = parse(build_xlsx([('Recap', rows)], numfmts={164: '#,##0.00" €"'}, cell_xfs=[0, 164]))
+        self.assertEqual(len(bundle['records']), 1)
+        self.assertIn('hors du tableau', '\n'.join(bundle['warnings']))
+
+    def test_second_bank_account_of_the_same_sci_is_reported(self):
+        first = [[t(0, 'SCI DEUX COMPTES')], None, None, HEADER,
+                 [(4, 'n', 1000.0)],
+                 [t(0, '05/01/26'), t(1, 'Loyer'), n(3, 1200.0), n(4, 2200.0)]]
+        second = [[t(0, 'SCI DEUX COMPTES')], None, None, HEADER,
+                  [(4, 'n', 5000.0)],
+                  [t(0, '05/02/26'), t(1, 'Intérêts'), n(3, 50.0), n(4, 5050.0)]]
+        bundle = parse(build_xlsx([('Compte courant', first), ('Compte épargne', second)],
+                                  numfmts={164: '#,##0.00" €"'}, cell_xfs=[0, 164]))
+        self.assertEqual(len(bundle['scis']), 1)
+        joined = '\n'.join(bundle['warnings'])
+        self.assertIn('2 200,00 € attendu', joined)
+        self.assertIn('5 000,00 € trouvé', joined)
+        self.assertEqual(bundle['reconcile'][bundle['scis'][0]['id']]['gap'], -2800.0)
+
+    # --- rapprochement ------------------------------------------------------
+    def test_reconcile_summary_exposes_the_gap_to_the_import_screen(self):
+        rows = self.HEAD + [
+            [(4, 'n', 7000.0)],
+            [t(0, '05/01/26'), t(1, 'Loyer'), n(3, 1200.0), n(4, 8484.04)],
+        ]
+        bundle = parse(build_xlsx([('Écart', rows)], numfmts={164: '#,##0.00" €"'}, cell_xfs=[0, 164]))
+        rec = bundle['reconcile'][bundle['scis'][0]['id']]
+        self.assertEqual(rec['opening'], 7000.0)
+        self.assertEqual(rec['last_balance'], 8484.04)
+        self.assertEqual(rec['balance_at_last'], 8200.0)
+        self.assertEqual(rec['gap'], -284.04)
+
+
 class XlsxImportBundleTests(unittest.TestCase):
     """Intégration : destinations, nouvelle SCI, anti-doublon, garde-fous CSV."""
 
@@ -611,6 +817,38 @@ class XlsxImportBundleTests(unittest.TestCase):
         self.assertEqual(created['name'], 'SCI 52 RUE LOUGUET')  # pas de suffixe « (import) »
         self.assertEqual(created['opening'], 32155.66)
         self.assertEqual(created['opening_date'], '2025-12-31')
+
+    def test_corrected_opening_from_the_import_screen_is_applied(self):
+        # Le contrôle affiché dans l'écran d'import indique un écart : l'utilisateur
+        # corrige le solde d'ouverture avant de confirmer.
+        text = b64(sample_xlsx())
+        bundle = app.parse_import({'format': 'xlsx', 'text': text})
+        source = bundle['scis'][0]['id']
+        with app.connect() as c:
+            app.import_bundle(c, {'format': 'xlsx', 'text': text, 'mapping': {source: 'new'},
+                                  'openings': {source: 30000.00}})
+            c.commit()
+        with app.connect() as c:
+            created = json.loads(c.execute('SELECT data FROM scis').fetchone()[0])
+        self.assertEqual(created['opening'], 30000.0)
+        self.assertEqual(created['opening_date'], '2025-12-31')
+
+    def test_corrected_opening_makes_the_import_distinct_from_the_first_one(self):
+        text = b64(sample_xlsx())
+        bundle = app.parse_import({'format': 'xlsx', 'text': text})
+        source = bundle['scis'][0]['id']
+        with app.connect() as c:
+            app.import_bundle(c, {'format': 'xlsx', 'text': text, 'mapping': {source: 'new'}})
+            c.commit()
+        with app.connect() as c:
+            # même fichier, même destination : doublon
+            with self.assertRaises(ValueError):
+                app.import_bundle(c, {'format': 'xlsx', 'text': text, 'mapping': {source: 'new'}})
+            # solde d'ouverture corrigé : ce n'est plus le même import
+            count = app.import_bundle(c, {'format': 'xlsx', 'text': text, 'mapping': {source: 'new'},
+                                          'openings': {source: 32000.0}})
+            c.commit()
+        self.assertEqual(count, 14)
 
     def test_unknown_destination_rejected(self):
         text = b64(sample_xlsx())
