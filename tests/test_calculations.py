@@ -117,6 +117,42 @@ console.log(JSON.stringify(out));
         self.assertEqual(out['total']['overdue'], 350)
 
 
+class MoneyRoundingTests(unittest.TestCase):
+    """Arrondi commercial : un demi-centime s'éloigne de zéro, comme dans Excel."""
+
+    def test_half_cent_rounds_away_from_zero(self):
+        self.assertEqual(app.round_half_up(1.005), 1.01)
+        self.assertEqual(app.round_half_up(2.675), 2.68)
+        self.assertEqual(app.round_half_up(-1.005), -1.01)
+        self.assertEqual(app.round_half_up(-2.675), -2.68)
+        self.assertEqual(app.round_half_up(0.125), 0.13)
+
+    def test_record_amounts_use_commercial_rounding(self):
+        cleaned = app.clean('entries', {'label': 'Loyer', 'date': '2026-01-05',
+                                        'direction': 'Recette', 'amount': 2.675})
+        self.assertEqual(cleaned['amount'], 2.68)
+        self.assertEqual(app.clean('sci', {'name': 'T', 'cca': -1.005})['cca'], -1.01)
+        self.assertEqual(app.clean('calls', {'lease_id': 'bail-1', 'period': '2026-02',
+                                             'due': '2026-02-05', 'rent': 1.005})['rent'], 1.01)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node.js est nécessaire pour les calculs de l’interface')
+    def test_interface_rounding_matches_excel(self):
+        source = """
+%s
+const values=[1.005,2.675,-1.005,-2.675,0.125,1.004];
+console.log(JSON.stringify(values.map(v=>r2(v))));
+""" % calculation_block()
+        with tempfile.NamedTemporaryFile('w', suffix='.js', delete=False, encoding='utf-8') as f:
+            f.write(source)
+            path = f.name
+        try:
+            result = subprocess.run(['node', path], capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout), [1.01, 2.68, -1.01, -2.68, 0.13, 1.0])
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+
 class DateStorageTests(unittest.TestCase):
     def test_dates_are_written_in_iso_format(self):
         clean = app.clean
