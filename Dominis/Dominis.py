@@ -5409,6 +5409,22 @@ def state(c):
     st['doc_folders_by_sci']=doc_folders_by_sci(c)
     return {'scis':[unpack(r) for r in c.execute('SELECT * FROM scis ORDER BY rowid')], 'records':records, 'settings':st,'audit':[dict(r) for r in c.execute('SELECT * FROM audit ORDER BY id DESC LIMIT 80')], 'preview':PREVIEW,'native':WINDOW is not None,'db_size':DB.stat().st_size,'saved_at':now(),'app_version':APP_VERSION,'primary_db_missing':PRIMARY_DB_MISSING,'auto_save_notice':AUTO_SAVE_NOTICE}
 
+def round_half_up(value, digits=2):
+    """Arrondi commercial : 1,005 → 1,01 et −1,005 → −1,01 (comme Excel).
+
+    L'arrondi natif de Python est « au pair » (1,005 → 1,00, 2,675 → 2,67),
+    ce qui fait perdre un centime sur des montants calculés à trois décimales.
+    """
+    from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+    try:
+        number = Decimal(str(value))
+        if not number.is_finite(): raise ValueError
+    except (InvalidOperation, TypeError, ValueError):
+        raise ValueError('Montant invalide.')
+    exponent = Decimal(1).scaleb(-int(digits))
+    return float(number.quantize(exponent, rounding=ROUND_HALF_UP))
+
+
 def clean(kind,data):
     if not isinstance(data,dict): raise ValueError('Données invalides.')
     d={k:v for k,v in data.items() if k not in ('id','sci','kind')}
@@ -5450,11 +5466,11 @@ def clean(kind,data):
     for f in amounts:
         if f in d:
             try:
-                from decimal import Decimal, InvalidOperation
+                from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
                 v=Decimal(str(d[f] or 0))
                 if not v.is_finite() or abs(v)>Decimal('1000000000000000000000000000'): raise ValueError('Montant hors limites.')
                 if f not in ('opening','cca') and v<0: raise ValueError('Le montant doit être positif : '+f)
-                d[f]=float(v.quantize(Decimal('0.01')))
+                d[f]=float(v.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
             except (InvalidOperation,TypeError): raise ValueError('Montant invalide : '+f)
     for f in ['date','due','start','end','acquired','dpe_date','balance_date','opening_date']:
         if d.get(f):
@@ -5472,7 +5488,7 @@ def clean(kind,data):
                     if not isinstance(item,dict): continue
                     try: day=dt.date.fromisoformat(str(item.get('date',''))[:10]).isoformat()
                     except (ValueError,TypeError): continue
-                    try: value=round(float(item.get('value')),2)
+                    try: value=round_half_up(float(item.get('value')),2)
                     except (ValueError,TypeError): continue
                     kept.append({'date':day,'value':value,'kind':str(item.get('kind') or 'releve')[:16]})
             kept.sort(key=lambda b:(b['date'],b['value']))
@@ -5976,6 +5992,60 @@ _XL_SENS_CREDIT = {'credit', 'credits', 'recette', 'recettes', 'entree', 'entree
 
 _XL_FOOTER_STRONG = re.compile(r'^(?:recapitulatif|recap|synthese|bilan\b|total\s+general|totaux\s+generaux)')
 
+# Onglets qui récapitulent l'ensemble sans contenir un relevé bancaire : leurs
+# montants sont des agrégats déjà présents dans les feuilles de détail. Les lire
+# comme des opérations créait une SCI fantôme et doublait les montants.
+# Noms d'onglets écartés d'office : assez explicites pour ne jamais désigner un
+# relevé bancaire. « Recap », « Bilan » ou « Analyse » restent acceptés comme
+# feuilles de données (trop ambigus) ; c'est le titre du tableau qui tranche.
+_XL_SUMMARY_SHEET = re.compile(
+    r'^(?:syntheses?|recapitulatifs?|resumes?|tableau\s+de\s+bord|dashboards?|'
+    r'statistiques?|vue\s+d\s*ensemble|bilan\s+general|totaux?\s+genera(?:l|ux))\b'
+)
+# Titres de tableau qui annoncent un récapitulatif : plus larges que les noms
+# d'onglets, car un titre n'est jamais un nom de société.
+_XL_SUMMARY_TITLE = re.compile(
+    r'^(?:syntheses?|recapitulatifs?|recap|resumes?|tableau\s+de\s+bord|dashboards?|'
+    r'statistiques?|stats|analyse|bilan\s+general|totaux?\s+genera(?:l|ux)|'
+    r'vue\s+d\s*ensemble|ensemble)\b'
+)
+_XL_ENTITY_RE = re.compile(r'\b(?:sci|societe|sarl|sas|scp|scpi|gfa|indivision)\b')
+
+
+def _x_is_summary_sheet(name):
+    """Feuille de synthèse (« Synthèse », « Récapitulatif », « Tableau de bord »)."""
+    text = _x_norm(name or '').strip(' .:-_')
+    return bool(text) and bool(_XL_SUMMARY_SHEET.match(text))
+
+
+def _x_is_summary_title(text):
+    """Titre de tableau qui n'annonce aucune SCI (« Récapitulatif général »)."""
+    norm = _x_norm(text or '')
+    if not norm: return False
+    return bool(_XL_SUMMARY_TITLE.match(norm)) and not _XL_ENTITY_RE.search(norm)
+
+
+def _x_strip_control_prefix(text):
+    """« Bilan 2024 · SCI THEMA » → « SCI THEMA » (le nom de la SCI est conservé).
+
+    Un titre qui commence par un mot de contrôle (bilan, total, cumul, solde,
+    récapitulatif…) était écarté en entier : le tableau perdait alors le nom de
+    sa société et deux feuilles annuelles créaient deux SCI distinctes.
+    """
+    if not isinstance(text, str): return text
+    raw = ' '.join(text.split())
+    if not raw or not _XL_BALANCE_RE.match(_x_norm(raw)): return raw
+    if not _XL_ENTITY_RE.search(_x_norm(raw)): return raw
+    # On coupe au premier séparateur qui précède le nom de la société.
+    parts = re.split(r'\s+[·•\-–—:|/]\s+|\s*[·•]\s*', raw)
+    for idx, part in enumerate(parts):
+        m = re.search(r'\b(?:SCI|SCPI|SARL|SAS|SCP|GFA|Indivision|Soci[eé]t[eé])\b', part, re.I)
+        if not m: continue
+        head = part[m.start():].strip()
+        joined = ' '.join([head] + [q.strip() for q in parts[idx + 1:] if q.strip()])
+        return joined or raw
+    return raw
+
 
 def _x_footer_label(value, strong=False):
     """Ligne qui ouvre un bas de tableau : « Récapitulatif », « Total des dépenses », « Synthèse ».
@@ -6003,8 +6073,14 @@ def _x_sens_kind(value):
     return None
 
 
-def _x_amount(value, zero_dash=False):
-    """Convertit un montant Excel (numérique ou texte français « 32 155,66 € ») en float."""
+def _x_amount(value, zero_dash=False, notes=None):
+    """Convertit un montant Excel (numérique ou texte français « 32 155,66 € ») en float.
+
+    Un texte comme « 1.234 » (un point suivi de trois chiffres) est lu comme un
+    séparateur de milliers, donc 1 234,00 € : un montant bancaire n'a jamais
+    trois décimales, alors que le point des milliers est courant. La lecture est
+    signalée à l'appelant (`notes`) pour ne rien convertir en silence.
+    """
     if value is None or isinstance(value, bool): return None
     if isinstance(value, (dt.datetime, dt.date)): return None
     if isinstance(value, (int, float)):
@@ -6032,6 +6108,9 @@ def _x_amount(value, zero_dash=False):
             else: s = s.replace(',', '')
         elif ',' in s:
             s = s.replace(',', '.')
+        elif re.fullmatch(r'\d{1,3}\.\d{3}', s):
+            if notes is not None: notes.append(raw_str[:40])
+            s = s.replace('.', '')
         if not re.fullmatch(r'\d+(?:\.\d+)?', s):
             raise ValueError('montant illisible : « ' + raw_str[:60] + ' »')
         try: v = sign * float(s)
@@ -6632,13 +6711,13 @@ def _x_sheet_rows(zf, path, shared, date_styles, epoch, border_styles=None, warn
         if stats['failed']:
             row, col, formula, reason = stats['first']
             others = (' (+ %d autre(s))' % (stats['failed'] - 1)) if stats['failed'] > 1 else ''
-            warn('Feuille « ' + label + ' », cellule ' + _x_col_letter(col) + str(row) + others
-                 + ' : formule « ' + str(formula)[:80] + ' » sans valeur calculée dans le fichier'
-                 + ' et non recalculable (' + reason + ') — la valeur correspondante n’a pas été importée.')
+            warn('⛔ Feuille « ' + label + ' », cellule ' + _x_col_letter(col) + str(row) + others
+                 + ' : la formule « ' + str(formula)[:60] + ' » n’a pas de résultat enregistré et ne peut'
+                 + ' pas être recalculée (' + reason + '). Le montant de cette cellule n’a pas été importé.'
+                 + ' → Ouvrez le classeur dans Excel, laissez-le recalculer, enregistrez, puis réimportez.')
         if stats['calc']:
-            warn('Feuille « ' + label + ' » : ' + str(stats['calc'])
-                 + ' cellule(s) calculées par formule ont été recalculées à l’import'
-                 + ' (le classeur ne contenait pas leur valeur en cache).')
+            warn('ℹ Feuille « ' + label + ' » : ' + str(stats['calc'])
+                 + ' cellule(s) recalculées à l’import (le classeur n’avait pas leur valeur enregistrée).')
 
 
 def _x_orphan(cells, epoch, default_year=None):
@@ -6666,7 +6745,12 @@ def _x_pick_sci_title(titles, current_group, sources, state):
     cleaned = []
     for t in titles:
         s = ' '.join(str(t).split())
-        if not s or _x_is_balance_label(s): continue
+        if not s: continue
+        if _x_is_balance_label(s):
+            # « Bilan 2024 · SCI THEMA » : le nom de la société est conservé.
+            s = _x_strip_control_prefix(s)
+            if _x_is_balance_label(s): continue
+        if _x_is_summary_title(s): continue
         cleaned.append(s)
     if not cleaned:
         return None, []
@@ -6690,9 +6774,19 @@ def _x_pick_sci_title(titles, current_group, sources, state):
     return primary, sub_stems
 
 
-def _x_scan_sheet(sheet_name, rows, sources, records, warn, epoch, state):
-    """Détecte les tableaux d'une feuille et en extrait mouvements et contrôles."""
+def _x_scan_sheet(sheet_name, rows, sources, records, warn, epoch, state, synthetic=False):
+    """Détecte les tableaux d'une feuille et en extrait mouvements et contrôles.
+
+    `synthetic` marque une feuille de synthèse (« Synthèse », « Récapitulatif »,
+    « Tableau de bord ») : ses montants sont des agrégats déjà présents dans les
+    feuilles de détail. Ils sont comptés et signalés, jamais importés : lus comme
+    des opérations, ils créaient une SCI fantôme ou doublaient ceux d'une SCI
+    réelle, sans le moindre avertissement.
+    """
     row_list = list(rows)
+    recap_debit = recap_credit = 0.0
+    recap_rows = 0
+    table_recap = bool(synthetic)
     titles = []
     columns = None
     header_names = {}
@@ -6702,6 +6796,8 @@ def _x_scan_sheet(sheet_name, rows, sources, records, warn, epoch, state):
     closed = False           # un tableau s'est terminé : les lignes suivantes sont hors tableau
     previous_row = {}        # dernière ligne de texte : en-tête sur deux lignes
     outside = []             # lignes situées hors du tableau (jamais importées)
+    summary_ignored = 0      # lignes de synthèse (totaux, cumuls) écartées
+    amount_notes = []        # montants écrits « 1.234 » lus comme 1 234
     anchor = None            # dernier solde de contrôle connu
     anchor_date = None       # date explicite de cette ancre (None si déduite)
     seg_debit = seg_credit = 0.0     # sommes depuis le dernier contrôle (tout type)
@@ -6805,6 +6901,9 @@ def _x_scan_sheet(sheet_name, rows, sources, records, warn, epoch, state):
                 closed = False
                 table_no += 1
                 state['tables'] += 1
+                # Un tableau dont les seuls titres sont « Récapitulatif général »,
+                # « Synthèse »… n'est pas un relevé : aucun mouvement n'en sort.
+                table_recap = bool(synthetic) or any(_x_is_summary_title(x) for x in titles)
                 sci_title, sub_stems = _x_pick_sci_title(titles, group, sources, state)
                 for st in sub_stems:
                     state.setdefault('subtitle_stems', set()).add(st)
@@ -6859,6 +6958,23 @@ def _x_scan_sheet(sheet_name, rows, sources, records, warn, epoch, state):
             if not any(_x_present(cells.get(c)) for c in relevant_cols):
                 continue
 
+            if table_recap:
+                # Feuille ou tableau de synthèse : on compte, on signale, on n'importe pas.
+                def _safe(kind):
+                    col = columns.get(kind)
+                    if col is None: return None
+                    try: return _x_amount(cells.get(col), zero_dash=False)
+                    except ValueError: return None
+                _debit, _credit, _amount = _safe('debit'), _safe('credit'), _safe('amount')
+                if _debit is not None: recap_debit += abs(_debit)
+                if _credit is not None: recap_credit += abs(_credit)
+                if _amount is not None:
+                    if _amount < 0: recap_debit += abs(_amount)
+                    else: recap_credit += abs(_amount)
+                if _debit is not None or _credit is not None or _amount is not None:
+                    recap_rows += 1
+                continue
+
             raw_date = cell(cells, 'date')
             label = as_text(cell(cells, 'label'))
             raw_debit = cell(cells, 'debit')
@@ -6890,12 +7006,13 @@ def _x_scan_sheet(sheet_name, rows, sources, records, warn, epoch, state):
             def parse_col_amount(val, kind, required, zero_dash=False):
                 if not _x_present(val): return None
                 try:
-                    return _x_amount(val, zero_dash=zero_dash)
+                    return _x_amount(val, zero_dash=zero_dash, notes=amount_notes)
                 except ValueError as e:
                     if required:
                         raise ValueError(loc(rn, col_desc(kind, kind) + ' : ' + str(e)
                                              + (' (ligne « ' + label[:50] + ' »)' if label else '')))
-                    warn(wloc(rn) + col_desc(kind, kind) + ' : ' + str(e) + ' — valeur de ' + kind + ' ignorée.')
+                    warn('⚠ ' + wloc(rn) + col_desc(kind, kind) + ' : ' + str(e) + '. Montant ignoré.'
+                         + ' → Corrigez cette cellule dans le classeur.')
                     return None
 
             has_any_amount_cell = any(_x_present(v) for v in (raw_debit, raw_credit, raw_solde, raw_amount))
@@ -6977,13 +7094,16 @@ def _x_scan_sheet(sheet_name, rows, sources, records, warn, epoch, state):
                 # ce qui gonflait le solde de la SCI.
                 checked = False
                 if debit is not None and round(debit, 2) != round(seg_debit, 2) and round(debit, 2) != round(table_debit, 2):
-                    warn(wloc(rn) + 'total annoncé ' + _x_eur(debit) + ' en débit, ' + _x_eur(seg_debit)
-                         + ' calculé depuis le contrôle précédent — ligne de synthèse non importée.')
+                    warn('⚠ ' + wloc(rn) + 'total annoncé ' + _x_eur(debit) + ' en débit, ' + _x_eur(seg_debit)
+                         + ' calculé sur les lignes ci-dessus. Ligne de synthèse non importée.'
+                         + ' → Vérifiez ce total dans le classeur.')
                     checked = True
                 if credit is not None and round(credit, 2) != round(seg_credit, 2) and round(credit, 2) != round(table_credit, 2):
-                    warn(wloc(rn) + 'total annoncé ' + _x_eur(credit) + ' en crédit, ' + _x_eur(seg_credit)
-                         + ' calculé depuis le contrôle précédent — ligne de synthèse non importée.')
+                    warn('⚠ ' + wloc(rn) + 'total annoncé ' + _x_eur(credit) + ' en crédit, ' + _x_eur(seg_credit)
+                         + ' calculé sur les lignes ci-dessus. Ligne de synthèse non importée.'
+                         + ' → Vérifiez ce total dans le classeur.')
                     checked = True
+                summary_ignored += 1
                 if not checked:
                     state['ignored_summary'] = state.get('ignored_summary', 0) + 1
                 continue
@@ -7013,15 +7133,15 @@ def _x_scan_sheet(sheet_name, rows, sources, records, warn, epoch, state):
 
                 check_totals = (not label) or is_tot_keyword
                 if check_totals and (debit is not None or credit is not None) and solde is None:
-                    warn(wloc(rn) + 'ligne de contrôle sans solde : totaux vérifiés, solde non actualisé.')
+                    warn('ℹ ' + wloc(rn) + 'ligne de contrôle sans solde : totaux vérifiés, solde non actualisé.')
                 if check_totals and debit is not None:
                     if round(seg_debit, 2) != round(debit, 2) and round(table_debit, 2) != round(debit, 2):
-                        warn(wloc(rn) + 'total débit : ' + _x_eur(debit) + ' annoncé, ' + _x_eur(seg_debit)
-                             + ' calculé depuis le contrôle précédent.')
+                        warn('⚠ ' + wloc(rn) + 'total débit annoncé ' + _x_eur(debit) + ', ' + _x_eur(seg_debit)
+                             + ' calculé sur les lignes ci-dessus. → Vérifiez ce total dans le classeur.')
                 if check_totals and credit is not None:
                     if round(seg_credit, 2) != round(credit, 2) and round(table_credit, 2) != round(credit, 2):
-                        warn(wloc(rn) + 'total crédit : ' + _x_eur(credit) + ' annoncé, ' + _x_eur(seg_credit)
-                             + ' calculé depuis le contrôle précédent.')
+                        warn('⚠ ' + wloc(rn) + 'total crédit annoncé ' + _x_eur(credit) + ', ' + _x_eur(seg_credit)
+                             + ' calculé sur les lignes ci-dessus. → Vérifiez ce total dans le classeur.')
                 if solde is not None:
                     if _x_is_debit_balance_label(label) and solde > 0:
                         if anchor is not None and round(anchor + run_credit - run_debit, 2) == round(-solde, 2):
@@ -7031,8 +7151,10 @@ def _x_scan_sheet(sheet_name, rows, sources, records, warn, epoch, state):
                     if anchor is not None:
                         expected = round(anchor + run_credit - run_debit, 2)
                         if expected != round(solde, 2):
-                            warn(wloc(rn) + 'solde au ' + date_val.strftime('%d/%m/%Y') + ' : ' + _x_eur(expected)
-                                 + ' attendu, ' + _x_eur(solde) + ' trouvé (écart ' + _x_eur(round(solde - expected, 2)) + ').')
+                            warn('⛔ ' + wloc(rn) + 'solde attendu ' + _x_eur(expected) + ' au '
+                                 + date_val.strftime('%d/%m/%Y') + ', trouvé ' + _x_eur(solde) + ' (écart '
+                                 + _x_eur(round(solde - expected, 2)) + '). → Une opération manque sur les lignes'
+                                 + ' précédentes, ou son montant diffère : comparez avec le relevé.')
                         state.setdefault('checked', {}).setdefault(group, set()).add(date_val.isoformat())
                     if group not in sheet_group_has_moves:
                         state.setdefault('openings', {}).setdefault(group, []).append(
@@ -7084,7 +7206,8 @@ def _x_scan_sheet(sheet_name, rows, sources, records, warn, epoch, state):
                 direction = 'Dépense' if debit is not None else 'Recette'
                 if raw < 0:
                     direction = 'Recette' if direction == 'Dépense' else 'Dépense'
-                    warn(wloc(rn) + 'montant négatif (' + _x_eur(raw) + ') : sens inversé en ' + direction + '.')
+                    warn('⚠ ' + wloc(rn) + 'montant négatif (' + _x_eur(raw) + ') enregistré en '
+                         + direction + '. → Vérifiez le sens de cette ligne.')
                 d = {'date': date_val.isoformat(), 'label': label, 'direction': direction, 'amount': abs(raw)}
                 category = as_text(cell(cells, 'category'))
                 if category:
@@ -7125,8 +7248,10 @@ def _x_scan_sheet(sheet_name, rows, sources, records, warn, epoch, state):
                 if anchor is not None:
                     expected = round(anchor + run_credit - run_debit, 2)
                     if expected != round(solde, 2):
-                        warn(wloc(rn) + 'solde au ' + date_val.strftime('%d/%m/%Y') + ' : ' + _x_eur(expected)
-                             + ' attendu, ' + _x_eur(solde) + ' trouvé (écart ' + _x_eur(round(solde - expected, 2)) + ').')
+                        warn('⛔ ' + wloc(rn) + 'solde attendu ' + _x_eur(expected) + ' au '
+                             + date_val.strftime('%d/%m/%Y') + ', trouvé ' + _x_eur(solde) + ' (écart '
+                             + _x_eur(round(solde - expected, 2)) + '). → Une opération manque sur les lignes'
+                             + ' précédentes, ou son montant diffère : comparez avec le relevé.')
                     state.setdefault('checked', {}).setdefault(group, set()).add(date_val.isoformat())
                 anchor = solde
                 anchor_date = date_val
@@ -7135,22 +7260,37 @@ def _x_scan_sheet(sheet_name, rows, sources, records, warn, epoch, state):
                 continue
 
             if label and solde is None:
-                warn(wloc(rn) + 'ligne ignorée : libellé sans montant (« ' + label[:50] + ' »).')
+                warn('⚠ ' + wloc(rn) + 'libellé sans montant (« ' + label[:50] + ' ») : ligne ignorée.'
+                     + ' → Ajoutez le montant ou supprimez la ligne.')
                 continue
             if not label and not has_amount and solde is None:
-                warn(wloc(rn) + 'ligne ignorée : date seule (' + date_val.strftime('%d/%m/%Y') + ').')
+                warn('⚠ ' + wloc(rn) + 'date seule (' + date_val.strftime('%d/%m/%Y') + ') : ligne ignorée.'
+                     + ' → Ajoutez le libellé et le montant, ou supprimez la ligne.')
                 continue
         except ValueError as e:
             raise ValueError(str(e) if str(e).startswith('ligne ') else loc(rn, str(e)))
 
     if group is not None and anchor is not None:
         state.setdefault('anchor', {})[group] = (anchor_date is not None, anchor, run_debit, run_credit)
+    if summary_ignored:
+        warn('ℹ Feuille « ' + str(sheet_name) + ' » : ' + str(summary_ignored)
+             + ' ligne(s) de synthèse (totaux, cumuls) écartée(s) — ce ne sont pas des opérations.')
+    if amount_notes:
+        warn('ℹ Feuille « ' + str(sheet_name) + ' » : ' + str(len(amount_notes))
+             + ' montant(s) écrits avec un point (« ' + amount_notes[0][:24]
+             + ' ») lus comme des milliers (' + _x_eur(_x_amount(amount_notes[0])) + ').')
+    if recap_rows:
+        total = round(recap_debit + recap_credit, 2)
+        warn('⛔ Feuille « ' + str(sheet_name) + ' » : tableau de synthèse — ' + str(recap_rows)
+             + ' ligne(s) non importée(s) (' + _x_eur(total) + '). Ces montants sont des totaux,'
+             + ' déjà portés par les feuilles de détail. → Si cette feuille est en réalité un relevé,'
+             + ' donnez-lui un autre nom que « Synthèse / Récapitulatif / Tableau de bord ».')
     if outside:
         shown = [text[:60] for _rn, text in outside if text][:3]
         detail = (' : « ' + ' », « '.join(shown) + ' »') if shown else ''
-        warn('Feuille « ' + sheet_name + ' » : ' + str(len(outside))
-             + ' ligne(s) située(s) hors du tableau (après la dernière opération) non importée(s)'
-             + detail + '. Elles ne sont donc pas comptées dans le solde.')
+        warn('⚠ Feuille « ' + sheet_name + ' » : ' + str(len(outside))
+             + ' ligne(s) hors du tableau non importée(s)' + detail + '. Elles ne comptent pas dans le solde.'
+             + ' → Si l’une de ces lignes est une vraie opération, placez-la dans le tableau des opérations.')
 
 
 def _x_finalize_openings(sources, state, warn=None):
@@ -7220,11 +7360,11 @@ def _x_finalize_openings(sources, state, warn=None):
                 if before and abs(before[-1] - value) < 0.005: continue      # report normal
                 shown = ' / '.join(dt.date.fromisoformat(d).strftime('%d/%m/%Y') + ' : ' + _x_eur(v)
                                    for d, v in distinct[:4])
-                warn('« ' + str(src.get('name') or gid) + ' » : plusieurs soldes de début distincts ('
+                warn('⛔ « ' + str(src.get('name') or gid) + ' » : plusieurs soldes de début distincts ('
                      + shown + '). Le plus ancien est retenu comme solde d’ouverture'
                      + (' (' + _x_eur(keep[1]) + ' au ' + dt.date.fromisoformat(keep[0]).strftime('%d/%m/%Y') + ')' if keep else '')
-                     + '. S’il s’agit de comptes bancaires différents, additionnez leurs soldes'
-                     + ' d’ouverture dans l’écran d’import.')
+                     + '. → S’il s’agit de comptes bancaires différents, additionnez leurs soldes'
+                     + ' d’ouverture dans l’écran d’import ; sinon, vérifiez la date de reprise.')
                 break
         moves = moves_by_group.get(gid, [])
         last = anchors[-1] if anchors else None
@@ -7252,13 +7392,14 @@ def _x_finalize_openings(sources, state, warn=None):
         }
         checked = state.get('checked', {}).get(gid, set())
         if warn is not None and last and gap is not None and abs(gap) >= 0.005 and last[0] not in checked:
-            # Le classeur donne un dernier solde : si le total recalculé s'en
+            # Le classeur donne un dernier solde : si le total reconstitué s'en
             # écarte, c'est le signe d'un compte manquant, d'un solde d'ouverture
             # incomplet ou d'une ligne non importée. Jamais silencieux.
-            warn('« ' + str(src.get('name') or gid) + ' » : le solde recalculé depuis le classeur ('
-                 + _x_eur(at_last) + ') ne correspond pas au dernier solde du relevé ('
-                 + _x_eur(last[1]) + ' au ' + dt.date.fromisoformat(last[0]).strftime('%d/%m/%Y')
-                 + ') : écart ' + _x_eur(gap) + '. Vérifiez le solde d’ouverture et les lignes non importées.')
+            warn('⛔ « ' + str(src.get('name') or gid) + ' » : solde reconstitué ' + _x_eur(at_last)
+                 + ', dernier solde du relevé ' + _x_eur(last[1]) + ' au '
+                 + dt.date.fromisoformat(last[0]).strftime('%d/%m/%Y') + ' (écart ' + _x_eur(gap) + ').'
+                 + ' → Il manque probablement une opération, un compte bancaire, ou une partie'
+                 + ' du solde d’ouverture.')
 
 
 def parse_xlsx(text):
@@ -7297,12 +7438,15 @@ def parse_xlsx(text):
             if len(warn_msgs) < 30: warn_msgs.append(msg)
 
         state = {'movements': set(), 'opening': set(), 'tables': 0}
+        skipped_sheets = []
         for sheet_name, sheet_path in sheets:
             try:
+                synthetic = _x_is_summary_sheet(sheet_name)
+                if synthetic: skipped_sheets.append(sheet_name)
                 _x_scan_sheet(sheet_name, _x_sheet_rows(zf, sheet_path, shared, date_styles, epoch,
                                                         border_styles=border_styles, warn=warn,
                                                         sheet_name=sheet_name),
-                              sources, records, warn, epoch, state)
+                              sources, records, warn, epoch, state, synthetic=synthetic)
             except ValueError as e:
                 raise ValueError('Feuille « ' + sheet_name + ' » : ' + str(e))
             except (zipfile.BadZipFile, ET.ParseError):
@@ -7310,9 +7454,23 @@ def parse_xlsx(text):
         _x_finalize_openings(sources, state, warn)
         if warn_total[0] > len(warn_msgs):
             warn_msgs.append('… et %d autre(s) avertissement(s).' % (warn_total[0] - len(warn_msgs)))
+        def _with_warnings(message):
+            # Une erreur doit dire quoi faire : les premiers avertissements sont
+            # repris dans le message, sinon ils disparaissent avec le refus.
+            shown = warn_msgs[:3]
+            return message + ((' Pistes : ' + ' | '.join(shown)) if shown else '')
+
         if not state['tables']:
-            raise ValueError('Aucun tableau de trésorerie reconnu : les en-têtes « Date », « Libellé », « Débit » et « Crédit » sont introuvables.')
-        if not records: raise ValueError('Les tableaux reconnus ne contiennent aucune opération.')
+            extra = (' Feuille(s) de synthèse écartée(s) : ' + ', '.join(skipped_sheets) + '.') if skipped_sheets else ''
+            raise ValueError(_with_warnings('Aucun tableau de trésorerie reconnu : les en-têtes « Date », « Libellé »,'
+                                            ' « Débit » et « Crédit » sont introuvables.' + extra))
+        if not records:
+            extra = (' Seule(s) feuille(s) de synthèse lue(s) : ' + ', '.join(skipped_sheets)
+                     + '. Importez la feuille du relevé bancaire (détail des opérations).') if skipped_sheets else ''
+            raise ValueError(_with_warnings('Aucune opération importable : ' + str(state.get('tables', 0))
+                             + ' tableau(x) reconnu(s), mais aucune ligne datée portant un montant en Débit,'
+                             + ' en Crédit ou en Montant. → Vérifiez que l’en-tête comporte Date, Libellé et'
+                             + ' Débit/Crédit (ou Montant + Sens), puis lisez les avertissements ci-dessous.' + extra))
         if len(records) > XLSX_MAX_RECORDS:
             raise ValueError('Import limité à %s opérations.' % f'{XLSX_MAX_RECORDS:,}'.replace(',', ' '))
         return {'application': 'Dominis', 'version': 1, 'scis': list(sources.values()), 'records': records,
@@ -7407,6 +7565,12 @@ def parse_import(p):
     if not rows or len(rows)>XLSX_MAX_RECORDS: raise ValueError('Le CSV doit contenir entre 1 et %s lignes.' % f'{XLSX_MAX_RECORDS:,}'.replace(',', ' '))
     return {'application':'Dominis','version':1,'scis':list(sources.values()),'records':rows}
 
+def _entry_signature(d):
+    """Empreinte d'une opération : date, libellé normalisé, sens, montant."""
+    return (str(d.get('date') or '')[:10], _x_norm(d.get('label')), str(d.get('direction') or ''),
+            round(abs(float(d.get('amount') or 0)), 2))
+
+
 def import_bundle(c,p):
     b=parse_import(p); mapping=p.get('mapping',{})
     selected=[s for s in b['scis'] if s['id'] in mapping]
@@ -7462,6 +7626,80 @@ def import_bundle(c,p):
             if changed:
                 c.execute('UPDATE scis SET data=? WHERE id=?',(json.dumps(clean('sci',current)),dest))
     rows=[r for r in b['records'] if r['sci'] in sci_map]
+    warnings=[]
+    # ------------------------------------------------------------------
+    # Doublons : deux fichiers qui se recouvrent (2024 puis 2024-2025) ne
+    # doivent pas compter deux fois les mêmes opérations. La comparaison se
+    # fait ligne à ligne avec les mouvements déjà enregistrés, en nombre égal :
+    # deux opérations identiques le même jour dans le même fichier restent deux
+    # opérations.
+    # ------------------------------------------------------------------
+    existing_counts={}
+    for sid, dest in sci_map.items():
+        if dest in new_scis: continue
+        sigs=existing_counts.setdefault(dest,{})
+        for row in c.execute("SELECT data FROM records WHERE kind='entries' AND sci=?", (dest,)):
+            sig=_entry_signature(json.loads(row['data']))
+            sigs[sig]=sigs.get(sig,0)+1
+    kept, skipped=[],0
+    for r in rows:
+        if r.get('kind')!='entries': kept.append(r); continue
+        dest=sci_map.get(r['sci']); sigs=existing_counts.get(dest)
+        if not sigs: kept.append(r); continue
+        sig=_entry_signature(r)
+        if sigs.get(sig,0)>0:
+            sigs[sig]-=1; skipped+=1; continue
+        kept.append(r)
+    rows=kept
+    if skipped:
+        warnings.append('⚠ ' + str(skipped) + ' opération(s) déjà présente(s) dans la SCI et ignorée(s)'
+                        ' (même date, même libellé, même montant). → Rien à faire : le fichier'
+                        ' recouvrait un import précédent.')
+    # ------------------------------------------------------------------
+    # Raccordement : le solde d'ouverture du fichier doit correspondre au solde
+    # que Dominis calcule à cette date. Sinon, deux exercices ne se suivent pas
+    # et le total de trésorerie sera faux, sans que rien ne le signale.
+    # ------------------------------------------------------------------
+    for s in selected:
+        dest=sci_map.get(s['id'])
+        if not dest or dest in new_scis: continue
+        src=next((x for x in b['scis'] if x['id']==s['id']), None)
+        if src is None or src.get('opening') is None or not src.get('opening_date'): continue
+        try:
+            start=dt.date.fromisoformat(str(src['opening_date'])[:10])
+        except (TypeError, ValueError):
+            continue
+        state_row=c.execute('SELECT * FROM scis WHERE id=?',(dest,)).fetchone()
+        current=json.loads(state_row['data'])
+        app_opening=round(float(current.get('opening') or 0),2)
+        app_start=str(current.get('opening_date') or '')[:10]
+        balance=app_opening
+        for row in c.execute("SELECT data FROM records WHERE kind='entries' AND sci=?", (dest,)):
+            d=json.loads(row['data'])
+            day=str(d.get('date') or '')[:10]
+            if not day or day>start.isoformat(): continue
+            if app_opening and app_start and day<app_start: continue
+            balance+= (1 if d.get('direction')=='Recette' else -1)*abs(float(d.get('amount') or 0))
+        balance=round(balance,2)
+        file_opening=round(float(src['opening']),2)
+        if abs(balance-file_opening)>=0.005:
+            warnings.append('⛔ « '+str(src.get('name') or '')+' » : le solde d’ouverture du fichier ('
+                            +_x_eur(file_opening)+' au '+start.strftime('%d/%m/%Y')
+                            +') ne correspond pas au solde Dominis à cette date ('+_x_eur(balance)
+                            +', écart '+_x_eur(balance-file_opening)+'). → Vérifiez la date du solde'
+                            +' d’ouverture de la SCI, ou importez d’abord l’exercice précédent.')
+        # Mouvements antérieurs au solde d'ouverture : jamais comptés dans le solde.
+        early=0
+        for r2 in rows:
+            if r2.get('kind')!='entries' or r2.get('sci')!=s['id']: continue
+            day=str(r2.get('date') or '')[:10]
+            if app_opening and app_start and day and day<app_start: early+=1
+        if early and app_start:
+            warnings.append('⚠ « '+str(src.get('name') or '')+' » : '+str(early)
+                            +' opération(s) importée(s) avant le solde d’ouverture ('
+                            +dt.date.fromisoformat(app_start).strftime('%d/%m/%Y')
+                            +') ne comptent pas dans le solde calculé. → Vérifiez la date du solde'
+                            +' d’ouverture dans la fiche de la SCI.')
     idmap={r['id']:uid() for r in rows}
     for r in rows:
         d=clean(r['kind'],r)
@@ -7474,8 +7712,9 @@ def import_bundle(c,p):
         v=c.execute('SELECT * FROM records WHERE id=?',(idmap[r['id']],)).fetchone()
         validate_refs(c,v['sci'],json.loads(v['data']),v['id'])
     register_sci_doc_folders(c,new_scis)
-    c.execute('INSERT INTO imports VALUES(?,?)',(fp,now())); audit(c,'Import',str(len(rows))+' éléments / '+str(len(selected))+' SCI')
-    return len(rows)
+    c.execute('INSERT INTO imports VALUES(?,?)',(fp,now())); audit(c,'Import',str(len(rows))+' éléments / '+str(len(selected))+' SCI'
+              +(' ; '+str(skipped)+' doublon(s) ignoré(s)' if skipped else ''))
+    return {'count': len(rows), 'skipped': skipped, 'warnings': warnings}
 
 def restore(raw):
     global PRIMARY_DB_MISSING, AUTO_SAVE_NOTICE
@@ -9467,7 +9706,7 @@ class Handler(BaseHTTPRequestHandler):
                         years=sorted({int(r['date'][:4]) for r in b['records'] if r.get('kind')=='entries' and isinstance(r.get('date'),str) and len(r['date'])>=4 and r['date'][:4].isdigit()})
                         return self.reply({'scis':b['scis'],'counts':{s['id']:{k:sum(r['sci']==s['id'] and r['kind']==k for r in b['records']) for k in KINDS} for s in b['scis']},'rows':b['records'][:5] if p.get('format') in ('csv','xlsx') else [],'warnings':b.get('warnings',[]),'years':years,'reconcile':b.get('reconcile',{})})
                     if path=='/api/import':
-                        count=import_bundle(c,p); c.commit(); return self.reply({'ok':True,'count':count})
+                        result=import_bundle(c,p); c.commit(); return self.reply({'ok':True,**result})
                     if path=='/api/generate-calls':
                         period=p['period']; first=dt.date.fromisoformat(period+'-01'); count=0
                         for r in c.execute("SELECT * FROM records WHERE kind='leases' AND sci=?",(p['sci'],)).fetchall():
@@ -9498,6 +9737,18 @@ HTML = r'''<!doctype html>
 @media(max-width:950px){.kpis{grid-template-columns:repeat(2,1fr)}.charts-grid,.lower-grid,.settings-grid{grid-template-columns:1fr}.sci-grid{grid-template-columns:1fr}.donut-wrap{min-height:225px}.sci-stats{grid-template-columns:1fr 1fr}.chart{height:250px}.page-head{align-items:flex-start}.toolbar{flex-wrap:wrap;justify-content:flex-end}.search-btn{width:150px}.search-btn kbd{display:none}.sci-card-bottom{margin-top:14px}}
 @media(max-width:640px){#sidebar{width:76px}#shell{margin-left:76px}.brand{padding:25px 17px}.brand-text,.nav-text,.workspace,.nav-label,.user-details,.user-lock,.user-block svg,.local-status{display:none}.nav-scroll{padding:0 10px}.nav-bottom{padding:12px 10px}.nav-item{padding:12px 17px}.user-block{padding:18px 0;justify-content:center}.nav-divider{margin:18px 8px}header{padding:0 15px;height:60px}.breadcrumb{display:none}.search-btn{width:145px}main{padding:22px 14px}.page-head{flex-direction:column;gap:16px}h1{font-size:29px}.toolbar{justify-content:flex-start}.kpis{gap:10px}.kpi{padding:13px}.kpi-value{font-size:24px}.kpi-top{font-size:10px}.kpi-bottom{font-size:9px}.property-grid{grid-template-columns:1fr}.form-grid,.info-grid{grid-template-columns:1fr}.checks{grid-template-columns:1fr}.modal-backdrop{padding:10px}.modal-content{padding:18px}.modal-head{padding:17px}.footer{flex-direction:column}.legend{gap:7px;font-size:9px}.filters{flex-wrap:wrap}.panel-head{padding:18px 16px 0}.panel-body{padding:17px}.chart{padding:15px 10px}.demo-notice{align-items:flex-start} .setting-row{flex-wrap:wrap}.tabs{gap:17px}}
 .update-steps{padding-left:22px;margin:20px 0;line-height:2.2}.tabs button{white-space:nowrap}.tabs{overflow-x:auto}
+/* Tri des tableaux : seul l'en-tête est cliquable, jamais une cellule. */
+th.sortable{cursor:pointer;user-select:none;-webkit-user-select:none;position:relative;white-space:nowrap;transition:color .15s}
+th.sortable:hover,th.sortable:focus-visible{color:var(--gold)}
+th.sortable:focus-visible{outline:1px solid var(--gold);outline-offset:2px;border-radius:4px}
+th.sortable .sort-mark{display:inline-flex;align-items:center;margin-left:6px;vertical-align:-2px;opacity:.35;transition:opacity .15s}
+th.sortable:hover .sort-mark{opacity:.7}
+th.sortable[data-sort-dir=asc] .sort-mark,th.sortable[data-sort-dir=desc] .sort-mark{opacity:1;color:var(--gold)}
+th.sortable[data-sort-dir=asc],th.sortable[data-sort-dir=desc]{color:var(--gold)}
+.sort-icon{width:11px;height:11px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;display:block}
+table.table-sorted tr.month-total-row{display:none}
+@media print{th.sortable .sort-mark{display:none}}
+@media(prefers-reduced-motion:reduce){th.sortable,th.sortable .sort-mark{transition:none}}
 .prop-crop-box{grid-column:1/-1;border:1px solid var(--line);background:var(--panel2);border-radius:10px;padding:15px 16px;display:flex;flex-direction:column;gap:12px}.prop-crop-stage-wrap{position:relative;width:100%;aspect-ratio:16/5;background:linear-gradient(130deg,var(--goldbg),var(--panel));border:1px dashed var(--gold);border-radius:8px;overflow:hidden;cursor:grab;user-select:none;touch-action:none;display:flex;align-items:center;justify-content:center;color:var(--gold)}.prop-crop-stage-wrap:active{cursor:grabbing}.prop-crop-stage-wrap canvas{width:100%;height:100%;display:block}.prop-crop-placeholder{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:12px;text-align:center;pointer-events:none}.prop-crop-placeholder svg{width:46px;height:46px;opacity:.65}.prop-crop-grid{position:absolute;inset:0;pointer-events:none;background-image:linear-gradient(to right,rgba(199,173,119,.28) 1px,transparent 1px),linear-gradient(to bottom,rgba(199,173,119,.28) 1px,transparent 1px);background-size:33.333% 33.333%;border:1px solid rgba(199,173,119,.5);border-radius:8px}.prop-crop-badge{position:absolute;bottom:8px;left:10px;pointer-events:none;background:var(--panel);color:var(--text);opacity:.94;font-size:10px;padding:3px 8px;border-radius:5px;border:1px solid #c7ad7759}.prop-crop-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.prop-crop-controls input[type=range]{flex:1;min-width:130px;padding:0;accent-color:var(--gold)}.doc-folders-bar{display:flex;gap:10px;overflow-x:auto;padding-bottom:6px;margin-bottom:18px;align-items:stretch}.doc-folder-card{border:1px solid var(--line);background:var(--panel);border-radius:10px;padding:11px 14px;min-width:175px;display:flex;flex-direction:column;gap:7px;cursor:pointer;transition:border-color .18s,background .18s,transform .18s;flex:none;text-align:left}.doc-folder-card:hover{border-color:var(--gold);transform:translateY(-1px)}.doc-folder-card.active{border-color:var(--gold);background:var(--goldbg)}.doc-folder-top{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%}.doc-folder-name{font-weight:600;font-size:12px;color:var(--text);display:flex;align-items:center;gap:7px;overflow:hidden;text-overflow:ellipsis}.doc-folder-meta{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:10px;color:var(--muted);width:100%}.doc-folder-actions{display:flex;gap:2px;margin-left:auto}.doc-folder-actions button[disabled]{opacity:.3;cursor:default}.doc-folder-card.doc-folder-all{margin-left:auto;border-style:solid}.folder-order-box{grid-column:1/-1;border:1px solid var(--line);background:var(--panel2);border-radius:10px;padding:14px 15px;margin-top:4px}.folder-order-box h4{margin:0 0 10px;font-size:12px;color:var(--muted);font-weight:600}.folder-order-list{display:flex;flex-wrap:wrap;gap:6px}.doc-folder-actions button{padding:2px 4px;min-width:21px;height:21px;background:transparent;border:0;color:var(--muted);border-radius:4px}.doc-folder-actions button:hover{color:var(--gold);background:var(--panel2)}.doc-folder-actions button svg{width:12px;height:12px}.doc-folder-card{-webkit-touch-callout:none;user-select:none;-webkit-user-drag:none}.doc-folder-card *{-webkit-user-drag:none}.doc-folder-card::selection,.doc-folder-card *::selection{background:transparent}.doc-breadcrumb{display:flex;align-items:center;gap:4px;font-size:11px;color:var(--muted);margin-bottom:10px;flex-wrap:wrap}
 .doc-breadcrumb button{padding:2px 6px;border:0;background:transparent;color:var(--gold);border-radius:5px;font-size:11px}
 .doc-breadcrumb button:hover{background:var(--panel2)}
@@ -9997,7 +10248,7 @@ function due(c){return Math.max(0,r2(toNum(c.rent)+toNum(c.charges)-paid(c)));}
 // Les montants et les dates sont normalisés ici, une fois pour toutes : un
 // champ illisible ne doit jamais contaminer une somme (NaN s'affichait « 0 € »).
 const toNum=v=>{let n=Number(v);return Number.isFinite(n)?n:0;};
-const r2=n=>Math.round((toNum(n))*100)/100;
+const r2=n=>{let v=toNum(n),s=v<0?-1:1;return s*Math.round((Math.abs(v)+Number.EPSILON*Math.abs(v))*100)/100;};
 const entryDate=r=>String((r&&r.date)||'').slice(0,10);
 const entrySigned=r=>(r&&r.direction==='Recette'?1:-1)*toNum(r&&r.amount);
 const selectedYear=()=>{
@@ -10089,7 +10340,7 @@ function statementBalance(s,day){
     let hit=s.balances.find(b=>String(b.date||'').slice(0,10)===String(day).slice(0,10));
     return hit?round2(hit.value):null;
 }
-function round2(n){return Math.round(toNum(n)*100)/100;}
+function round2(n){let v=toNum(n),s=v<0?-1:1;return s*Math.round((Math.abs(v)+Number.EPSILON*Math.abs(v))*100)/100;}
 async function api(path,data){let res=await fetch('/api/'+path,{method:data===undefined?'GET':'POST',headers:{'Content-Type':'application/json','X-Dominis-Token':TOKEN},body:data===undefined?undefined:JSON.stringify(data)});if(!res.ok){let e=await res.json().catch(()=>({error:'Le serveur ne répond pas.'}));throw new Error(e.error)}return res;}
 async function load(){S=await (await api('state')).json();}
 function notify(msg,error=false){let d=document.createElement('div');d.className='toast'+(error?' error-toast':'');d.textContent=msg;$('#toasts').appendChild(d);setTimeout(()=>d.remove(),6000);}
@@ -10665,7 +10916,7 @@ return `<div class="panel"><div class="panel-head"><div><h2>Les flux de votre pa
 function donut(id){let list=id?rows('properties',id).map((r,i)=>({name:r.name,value:Number(r.value||0),color:palette[i%6]})):S.scis.map((s,i)=>({name:s.name,value:metrics(s.id).value,color:color(s.color||palette[i%6])}));let total=list.reduce((a,r)=>a+r.value,0),offset=0;let bg=total?list.map(r=>{let start=offset;offset+=r.value/total*100;return `${r.color} ${start}% ${offset}%`}).join(','):'var(--line) 0% 100%';return `<div class="panel"><div class="panel-head"><div><h2>Répartition du patrimoine</h2><p>${id?'Par bien immobilier':'Par société civile immobilière'}</p></div>${icon('building')}</div><div class="donut-wrap"><div class="donut" style="background:conic-gradient(${bg})"><div class="donut-label"><b>${total>=1000000?num(total/1000000)+' M€':total>=1000?num(total/1000)+' k€':money(total)}</b><small>Valeur totale estimée</small></div></div><div class="donut-legend">${list.slice(0,4).map(r=>`<div><span class="color-dot" style="background:${r.color}"></span>${esc(r.name)}<div class="amount">${total?num(r.value/total*100):0} %</div></div>`).join('')||'<span>Aucun bien renseigné</span>'}${list.length>4?`<div class="muted">+ ${list.length-4} autres biens / SCI</div>`:''}</div></div></div>`;}
 function sciCards(){return `<div class="section-title"><h2>Vos sociétés <small>${S.scis.length} SCI dans votre portefeuille</small></h2><button class="text-link row" data-action="new-sci">${icon('plus')} Ajouter une SCI</button></div><div class="sci-grid">${S.scis.map((s,i)=>{let m=metrics(s.id);return `<article class="sci-card" data-nav="${s.id}" tabindex="0" role="button" aria-label="Ouvrir ${esc(s.name)}"><div class="row between"><div class="row"><div class="building-icon" style="color:${sciColor(s.id)}">${icon('building')}</div><div><h3>${esc(s.name)}</h3><div class="location">${esc(s.city||s.address||'Adresse à renseigner')}</div></div></div><span class="pill">${esc(s.regime||'IR')}</span></div><div class="sci-stats"><div><label>Patrimoine estimé</label><strong>${money(m.value)}</strong></div><div><label>Trésorerie actuelle</label><strong class="${m.cash<0?'red':''}">${money(m.cash)}</strong></div></div><div class="mini-bar">${Array.from({length:m.properties||1},(_,j)=>`<i style="background:${j<m.occupied?sciColor(s.id):'var(--line)'}"></i>`).join('')}</div><div class="sci-card-bottom"><span>${m.properties} biens <span style="margin:0 5px">·</span> ${rows('leases',s.id).filter(r=>r.status==='Actif').length} baux actifs</span><span class="row gap8 ${m.overdue?'gold':'green'}">${m.overdue?'Loyers à suivre':'Voir la société'} ${icon('arrow')}</span></div></article>`}).join('')}</div>`;}
 function tasksPreview(id){let list=rows('tasks',id).filter(r=>r.status!=='Terminé').sort((a,b)=>a.due.localeCompare(b.due)).slice(0,4);return `<div class="panel"><div class="panel-head" style="padding-bottom:15px"><h2>Prochaines échéances</h2><button class="text-link" data-nav="${id||'agenda'}" ${id?'data-tab="tasks"':''}>Tout voir ↗</button></div>${list.map(r=>{let d=new Date(r.due+'T12:00:00');return `<div class="task-line"><div class="task-date">${d.getDate()}<small>${d.toLocaleDateString('fr-FR',{month:'short'})}</small></div><div><h3>${esc(r.name)}${r.important?' <span class="pill red" style="margin-left:5px">Important</span>':''}</h3><p>${esc(sciname(r.sci))} · ${esc(r.category||'Général')}</p></div><button class="ghost icon-only task-right" data-edit="${r.id}" title="Consulter l’échéance">${icon('chevron')}</button></div>`}).join('')||empty('Tout est à jour','Aucune échéance à venir.')}</div>`;}
-function entriesPreview(id){let list=rows('entries',id).filter(yr).sort((a,b)=>b.date.localeCompare(a.date)).slice(0,4);let tkey=tableKey('entries_preview'),v=tableView(tkey);let cols=getTableColumns(tkey).filter(c=>c.visible);let gear=`<th class="align-right col-settings-th"><button type="button" class="ghost icon-only table-gear-btn" data-table-config="${tkey}" title="Réglages du tableau" aria-label="Réglages du tableau">${icon('settings')}</button></th>`;return `<div class="panel"><div class="panel-head" style="padding-bottom:17px"><h2>Dernières opérations</h2><button class="text-link" data-nav="${id||'treasury'}" ${id?'data-tab="entries"':''}>Tout voir ↗</button></div><div class="table-wrap ${tableWrapClass(v)}"><table><thead><tr>${cols.map(c=>`<th ${c.id==='amount'?'class="align-right"':''}>${esc(c.label)}</th>`).join('')}${gear}</tr></thead><tbody>${list.map(r=>{let cells={label:`<strong>${esc(r.label)}</strong><span class="cell-sub">${esc(sciname(r.sci))}</span>`,date:`<span class="muted">${date(r.date)}</span>`,amount:`<span class="${r.direction==='Recette'?'green':'red'}">${r.direction==='Recette'?'+':'−'} ${money(r.amount,2)}</span>`};return `<tr>${cols.map(c=>`<td ${c.id==='amount'?'class="align-right"':''}>${cells[c.id]}</td>`).join('')}<td class="align-right"><div class="actions"><button data-edit="${r.id}" title="Modifier" aria-label="Modifier ${esc(label(r))}">${icon('edit')}</button></div></td></tr>`;}).join('')}</tbody></table>${!list.length?empty('Aucune opération','Enregistrez votre premier mouvement.') :''}</div></div>`;}
+function entriesPreview(id){let list=rows('entries',id).filter(yr).sort((a,b)=>b.date.localeCompare(a.date)).slice(0,4);let tkey=tableKey('entries_preview'),v=tableView(tkey);let cols=getTableColumns(tkey).filter(c=>c.visible);let gear=`<th class="align-right col-settings-th"><button type="button" class="ghost icon-only table-gear-btn" data-table-config="${tkey}" title="Réglages du tableau" aria-label="Réglages du tableau">${icon('settings')}</button></th>`;return `<div class="panel"><div class="panel-head" style="padding-bottom:17px"><h2>Dernières opérations</h2><button class="text-link" data-nav="${id||'treasury'}" ${id?'data-tab="entries"':''}>Tout voir ↗</button></div><div class="table-wrap ${tableWrapClass(v)}"><table data-sort-key="dashboard:entries_preview"><thead><tr>${cols.map(c=>`<th ${c.id==='amount'?'class="align-right"':''}>${esc(c.label)}</th>`).join('')}${gear}</tr></thead><tbody>${list.map(r=>{let cells={label:`<strong>${esc(r.label)}</strong><span class="cell-sub">${esc(sciname(r.sci))}</span>`,date:`<span class="muted">${date(r.date)}</span>`,amount:`<span class="${r.direction==='Recette'?'green':'red'}">${r.direction==='Recette'?'+':'−'} ${money(r.amount,2)}</span>`};return `<tr>${cols.map(c=>`<td ${c.id==='amount'?'class="align-right"':''}>${cells[c.id]}</td>`).join('')}<td class="align-right"><div class="actions"><button data-edit="${r.id}" title="Modifier" aria-label="Modifier ${esc(label(r))}">${icon('edit')}</button></div></td></tr>`;}).join('')}</tbody></table>${!list.length?empty('Aucune opération','Enregistrez votre premier mouvement.') :''}</div></div>`;}
 function dashboard(id){let m=metrics(id);return `${S.settings.demo&&!id?`<div class="demo-notice"><span>ESPACE DE DÉMONSTRATION <span style="opacity:.6;margin:0 9px">/</span> Données fictives pour explorer Dominis en toute liberté.</span><button data-nav="settings">Gérer les données</button></div>`:''}${kpis(id)}<div class="charts-grid">${chart(id)}${donut(id)}</div>${!id?sciCards():`<div class="notice row between"><div>${m.overdue?`<span class="gold">${money(m.overdue,2)} de loyers échus restent à encaisser.</span>`:'Aucun solde de loyer échu à ce jour.'} <span style="margin-left:10px">Dette renseignée : ${money(m.debt)}.</span></div><button class="text-link" data-tab="calls">Consulter les loyers →</button></div>`}<div class="lower-grid">${entriesPreview(id)}${tasksPreview(id)}</div>${attention(id)}`;}
 
 function attention(id){let alerts=[],limit=new Date();limit.setDate(limit.getDate()+60);let until=limit.toISOString().slice(0,10);S.scis.filter(s=>!id||s.id===id).forEach(s=>{let m=metrics(s.id);if(m.overdue)alerts.push({sci:s.id,tab:'calls',title:money(m.overdue,2)+' de loyers échus à encaisser',detail:s.name+' · Consulter les appels et les paiements',icon:'wallet'});if(s.regime==='IR'&&rows('leases',s.id).some(l=>l.type==='Habitation meublée'&&l.status==='Actif'))alerts.push({sci:s.id,tab:'identity',title:'Location meublée : régime fiscal à examiner',detail:s.name+' · Vérifier les conséquences avec votre conseil fiscal',icon:'info'});});rows('properties',id).forEach(r=>{if(['F','G'].includes(r.dpe)||r.dpe_date&&r.dpe_date<today())alerts.push({sci:r.sci,tab:'properties',title:'Diagnostic à vérifier · '+r.name,detail:'DPE '+(r.dpe||'non renseigné')+' · Vérifier validité, décence et éventuels travaux',icon:'home'});});rows('leases',id).filter(r=>r.status==='Actif'&&r.end&&r.end<=until).forEach(r=>alerts.push({sci:r.sci,tab:'leases',title:'Fin de bail à examiner · '+r.tenant,detail:date(r.end)+' · Anticiper la suite selon les règles du bail',icon:'calendar'}));rows('tasks',id).filter(r=>r.status!=='Terminé'&&r.due<today()).forEach(r=>alerts.push({sci:r.sci,tab:'tasks',title:'Échéance dépassée · '+r.name,detail:sciname(r.sci)+' · Prévue le '+date(r.due),icon:'clock'}));if(!alerts.length)return '';return `<div class="panel" style="margin-top:23px"><div class="panel-head" style="padding-bottom:14px"><h2>Points d’attention <small class="gold" style="margin-left:8px">${alerts.length}</small></h2><span class="sub">À partir des données renseignées</span></div>${alerts.slice(0,6).map(a=>`<div class="task-line"><span class="gold">${icon(a.icon)}</span><div><h3>${esc(a.title)}</h3><p>${esc(a.detail)}</p></div><button class="ghost icon-only task-right" data-nav="${a.sci}" data-tab="${a.tab}" title="Examiner">${icon('arrow')}</button></div>`).join('')}${alerts.length>6?'<div class="panel-body sub">Les six premiers points sont affichés. Consultez aussi les échéances de chaque SCI.</div>':''}</div>`;}
@@ -11238,7 +11489,7 @@ let thClass=c=>[c.id==='society'?'col-society':'',numberCol(c)?'align-right':'']
 let colTh=c=>`<th${thClass(c)?` class="${thClass(c)}"`:''}>${esc(c.label)}</th>`;
 let colTd=(c,val)=>`<td${thClass(c)?` class="${thClass(c)}"`:''}>${val}</td>`;
 let wrapCls=`panel table-wrap ${tableWrapClass(v)}`;
-if(!list.length)return `${kind==='documents'?docFolderBar():''}<div class="${wrapCls}"><table><thead><tr>${cols.map(colTh).join('')}${gearTh}</tr></thead></table>${empty('Aucun élément à afficher',query||filter||scope||(kind==='documents'&&docYear)?'Essayez un autre filtre.':'Ajoutez vos premières données pour compléter cet espace.',!query&&!filter?addBtn(kind,'Ajouter un élément'):'')}</div>`;
+if(!list.length)return `${kind==='documents'?docFolderBar():''}<div class="${wrapCls}"><table data-sort-key="${esc(tkey)}"><thead><tr>${cols.map(colTh).join('')}${gearTh}</tr></thead></table>${empty('Aucun élément à afficher',query||filter||scope||(kind==='documents'&&docYear)?'Essayez un autre filtre.':'Ajoutez vos premières données pour compléter cet espace.',!query&&!filter?addBtn(kind,'Ajouter un élément'):'')}</div>`;
 let totalShares=kind==='partners'?rows('partners',id).reduce((s,r)=>s+Number(r.shares||0),0):0;
 let ledger=kind==='entries'?ledgerBalances(id):null;
 let rowParts=list.map(r=>{
@@ -11303,7 +11554,7 @@ if(v.totals&&list.length&&['entries','calls'].includes(kind)){
     }
     foot=`<tfoot><tr>${cols.map(c=>colTd(c,totals[c.id]||'')).join('')}<td></td></tr></tfoot>`;
 }
-let tableHtml=`<div class="${wrapCls}"><table><thead><tr>${cols.map(colTh).join('')}${gearTh}</tr></thead><tbody>${rowsHtml}</tbody>${foot}</table></div>`;
+let tableHtml=`<div class="${wrapCls}"><table data-sort-key="${esc(tkey)}"><thead><tr>${cols.map(colTh).join('')}${gearTh}</tr></thead><tbody>${rowsHtml}</tbody>${foot}</table></div>`;
 if(kind==='documents')return `${docFolderBar()}${tableHtml}<p class="compact-note">Cliquez sur une ligne pour ouvrir l’aperçu du document, avec un zoom réglable (par défaut ×1 pour voir le document entier).</p>`;
 let rail=(v.charts&&kind==='entries')?chartRail(list,id):'';
 return rail?`<div class="table-split has-rail">${tableHtml}${rail}</div>`:tableHtml;}
@@ -12450,14 +12701,260 @@ function declExportModal(){
 
 function identity(s){let openTxt=s.opening&&Number(s.opening)!==0?money(s.opening,2)+(s.opening_date?' au '+date(s.opening_date):''):'—';return `<div class="settings-grid"><div class="panel"><div class="panel-head"><h2>Identité de la société</h2><button data-action="edit-sci">${icon('edit')} Modifier</button></div><div class="panel-body info-grid">${[['Dénomination',s.name],['SIREN',s.siren||'Non renseigné'],['Gérant',s.manager||'Non renseigné'],['Siège social',s.address||'Non renseigné'],['Capital social',money(s.capital,2)],['Régime fiscal',s.regime||'IR'],['Clôture de l’exercice',s.closing||'31/12'],['Solde d’ouverture',openTxt]].map(([k,v])=>`<div class="info-item"><label>${k}</label><span>${esc(v)}</span></div>`).join('')}<div class="info-item" style="grid-column:1/-1"><label>Notes de gestion</label><span style="white-space:pre-wrap">${esc(s.notes||'Aucune note.')}</span></div></div></div><div class="stack"><div class="panel"><div class="panel-head"><h2>Repères de gestion · ${esc(s.regime||'IR')}</h2></div><div class="panel-body stack"><p class="sub">${s.regime==='IS'?'Préparer la déclaration 2065 et ses annexes avec une comptabilité d’engagement, les immobilisations et les amortissements. Dominis ne produit pas de liasse fiscale ni de FEC.':'Préparer les informations de la déclaration 2072 selon votre situation. Les recettes et dépenses enregistrées ne déterminent pas automatiquement le résultat foncier imposable.'}</p><p class="sub">Le gérant doit rendre compte annuellement de sa gestion aux associés (article 1856 du Code civil). Les modalités de décision dépendent notamment des statuts.</p><button data-add="tasks">${icon('calendar')} Ajouter une échéance de suivi</button><button data-action="annual-report">${icon('file')} Préparer une synthèse annuelle</button><p class="sub">Les dates fiscales sont à vérifier chaque année. Aucun calendrier légal automatique n’est imposé par l’application.</p></div></div><div class="panel"><div class="panel-body"><h3 class="red">Suppression de la SCI</h3><p class="sub" style="margin:8px 0 15px">Cette action supprime la société et toutes ses données liées. Exportez une sauvegarde complète auparavant.</p><button class="danger" data-action="delete-sci">${icon('trash')} Supprimer cette SCI</button><button class="danger" data-action="manage-deletions" style="margin-top:8px">${icon('trash')} Gérer la suppression</button><p class="compact-note" style="margin-top:10px">Vider une seule page de cette SCI, sans toucher aux autres sociétés.</p></div></div></div></div>`;}
 function settingsGeneral(){return `<div class="settings-grid"><div class="stack"><section class="panel"><div class="panel-head"><h2>Apparence & préférences</h2>${icon('sun')}</div><div class="panel-body"><div class="setting-row"><div><h3>Thème de l’interface</h3><p>Le même soin, de jour comme de nuit.</p></div><div class="theme-choice"><button data-theme="dark" class="${S.settings.theme==='dark'?'active':''}">${icon('moon')} Sombre</button><button data-theme="light" class="${S.settings.theme==='light'?'active':''}">${icon('sun')} Clair</button></div></div><div class="setting-row"><div><h3>Navigation compacte</h3><p>Une barre latérale discrète, plus d’espace.</p></div><button class="toggle ${S.settings.collapsed?'on':''}" data-action="collapse" aria-label="Navigation compacte" aria-pressed="${!!S.settings.collapsed}"></button></div><div class="setting-row"><div><h3>Nom de votre espace</h3><p>Affiché dans la barre latérale.</p></div><button data-action="rename-space">${icon('edit')} Modifier</button></div><div class="setting-row"><div><h3>Sauvegarde à la fermeture</h3><p>Copie complète dans le dossier sauvegardes/.</p></div><button class="toggle ${S.settings.auto_backup?'on':''}" data-action="auto-backup" aria-label="Sauvegarde à la fermeture" aria-pressed="${!!S.settings.auto_backup}"></button></div><div class="setting-row"><div><h3>Sauvegarde hebdomadaire</h3><p>Copie de data.db au premier lancement de la semaine ; deux fichiers maximum dans auto-save/.</p></div><button class="toggle ${S.settings.weekly_auto_save?'on':''}" data-action="weekly-auto-save" aria-label="Sauvegarde hebdomadaire" aria-pressed="${!!S.settings.weekly_auto_save}"></button></div></div></section><section class="panel"><div class="panel-head"><h2>Ordre de navigation</h2>${icon('panel')}</div><div class="panel-body"><p class="sub">Déplacez les pages avec les flèches. Vos nouvelles SCI apparaissent automatiquement.</p><div class="order-item locked">${icon('grid')} Tableau de bord <span style="margin-left:auto">${icon('lock')}</span></div>${navOrder().map((id,i,a)=>`<div class="order-item">${navIcon(id)}${esc(navName(id))}<div class="actions"><button data-move="${id}" data-dir="-1" ${!i?'disabled':''} title="Monter">${icon('up')}</button><button data-move="${id}" data-dir="1" ${i===a.length-1?'disabled':''} title="Descendre">${icon('down')}</button></div></div>`).join('')}<div class="order-item locked">${icon('settings')} Paramètres <span style="margin-left:auto">${icon('lock')}</span></div><p class="compact-note">Tableau de bord reste en premier, Paramètres en dernier. Quitter est une action distincte.</p></div></section></div><div class="stack"><section class="panel"><div class="panel-head"><h2>Vos données vous appartiennent</h2>${icon('database')}</div><div class="panel-body"><div class="setting-row"><div><h3>Importer des données</h3><p>JSON Dominis, CSV ou Excel (.xlsx) de mouvements multi-SCI.<br>Aperçu et destinations avant validation.</p></div><button data-action="import">${icon('upload')} Importer</button></div><div class="setting-row"><div><h3>Exporter une sélection</h3><p>Choisissez les SCI, les données et le format.</p></div><button data-action="export">${icon('download')} Exporter</button></div><div class="setting-row"><div><h3>Sauvegarde complète</h3><p>Toutes les SCI, pièces jointes et préférences.<br>${S.settings.last_backup?'Dernière : '+new Date(S.settings.last_backup).toLocaleString('fr-FR'):'Aucune sauvegarde manuelle enregistrée.'}</p></div><button class="primary" data-action="backup">${icon('database')} Sauvegarder</button></div><div class="setting-row"><div><h3>Restaurer une sauvegarde</h3><p>Remplace l’ensemble de l’espace. Une copie<br>de sécurité est créée avant restauration.</p></div><button data-action="restore">${icon('clock')} Restaurer</button></div></div></section><section class="panel"><div class="panel-head"><h2>Stockage & confidentialité</h2>${icon('lock')}</div><div class="panel-body stack"><div class="row between"><span class="sub">Base locale</span><span class="pill green"><span class="status-dot"></span>data.db · ${num(S.db_size/1024/1024)} Mo</span></div><p class="sub">Aucune télémétrie. La gestion de vos données fonctionne hors ligne. Seule la vérification des versions contacte GitHub, sans transmettre vos données patrimoniales. Documents, réglages et historique sont stockés dans SQLite. La base n’est pas chiffrée : protégez votre session et vos sauvegardes.</p><p class="sub">Usage local, mono-utilisateur. Ne placez pas une base ouverte sur un partage réseau ou dans une synchronisation cloud.</p>${S.preview?'<div class="notice" style="margin:0">Aperçu hébergé : utilisez des données fictives uniquement. Le téléchargement et les lanceurs sont destinés à l’usage local.</div>':''}</div></section>${S.settings.demo?`<section class="panel"><div class="panel-body"><h3>Données de démonstration</h3><p class="sub" style="margin:8px 0 14px">Efface toutes les données de cet espace démo, y compris vos ajouts. Sauvegardez-les avant de repartir d’un espace vierge.</p><button class="danger" data-action="reset-demo">${icon('trash')} Vider l’espace de démonstration</button></div></section>`:''}</div><section class="panel" style="grid-column:1/-1"><div class="panel-head"><h2>Journal d’activité</h2><span class="sub">80 dernières actions</span></div><div class="panel-body audit-list">${S.audit.map(r=>`<div class="audit-line"><time>${esc(new Date(r.at).toLocaleString('fr-FR'))}</time><strong style="min-width:90px">${esc(r.action)}</strong><span class="muted">${esc(r.detail)}</span></div>`).join('')||'<p class="sub">Aucune action enregistrée.</p>'}</div></section></div>`;}
+/* ---------------------------------------------------------------------------
+   Tri des tableaux : un clic sur l'en-tête d'une colonne trie dans cet ordre
+   croissant → décroissant → ordre d'origine. Le tri ne déplace que les lignes
+   du <tbody> : chaque ligne garde ses boutons, ses données et son solde, le
+   pied du tableau et les lignes de cumul ne bougent pas. Aucun autre élément
+   de l'interface ne déclenche de tri. Souris, pavé tactile et clavier (Entrée
+   ou Espace sur l'en-tête) fonctionnent de la même façon sur Windows et macOS ;
+   la sélection de texte au double-clic est désactivée sur les en-têtes.
+--------------------------------------------------------------------------- */
+const TABLE_SORTS=new Map();
+const SORT_COLLATOR=new Intl.Collator('fr',{numeric:true,sensitivity:'base'});
+let sortBusy=false,sortTimer=null,sortObserver=null,sortNotified=false;
+
+function sortIconMark(dir){
+    if(dir==='asc')return '<svg class="sort-icon" viewBox="0 0 12 12" aria-hidden="true"><path d="M6 9.6V2.6M3.1 5.5 6 2.6l2.9 2.9"/></svg>';
+    if(dir==='desc')return '<svg class="sort-icon" viewBox="0 0 12 12" aria-hidden="true"><path d="M6 2.4v7M3.1 6.5 6 9.4l2.9-2.9"/></svg>';
+    return '<svg class="sort-icon sort-icon-idle" viewBox="0 0 12 12" aria-hidden="true"><path d="M4 4.6 6 2.6l2 2M4 7.4l2 2 2-2"/></svg>';
+}
+function sortKeyOfTable(table){
+    if(table.dataset.sortKey)return table.dataset.sortKey;
+    let path=[],el=table;
+    while(el&&el.parentElement&&el.id!=='main'&&el.id!=='modal'){
+        path.unshift(Array.prototype.indexOf.call(el.parentElement.children,el));
+        el=el.parentElement;
+    }
+    return (page||'')+'/'+(table.closest('#modal')?'modal':'page')+'/'+path.join('.');
+}
+function sortCellText(cell){
+    let clone=cell.cloneNode(true);
+    clone.querySelectorAll('.cell-sub,button,input,select,textarea,svg,[data-sort-ignore]').forEach(n=>n.remove());
+    return (clone.textContent||'').replace(/[\u00a0\u202f\u2009]/g,' ').replace(/\s+/g,' ').trim();
+}
+function sortCellValue(cell){
+    let text=sortCellText(cell);
+    if(!text||text==='—'||text==='–'||text==='-')return {empty:true};
+    let num=text.replace(/[\s\u00a0\u202f\u2009]/g,'').replace(/€/g,'').replace(/\+/g,'').replace(/−/g,'-');
+    if(/^\(.*\)$/.test(num))num='-'+num.slice(1,-1);
+    if(/^-?\d+(?:[.,]\d+)?%?$/.test(num)){
+        let v=parseFloat(num.replace('%','').replace(',','.'));
+        if(isFinite(v))return {num:v};
+    }
+    let fr=text.match(/^(\d{1,2})[\/.](\d{1,2})[\/.](\d{4})\b/);   // « 05/03/2025 → 31/12/2027 »
+    if(fr)return {num:Number(fr[3])*10000+Number(fr[2])*100+Number(fr[1])};
+    let iso=text.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if(iso)return {num:Number(iso[1])*10000+Number(iso[2])*100+Number(iso[3])};
+    return {text:text};
+}
+function sortCompare(a,b){
+    if(a.empty||b.empty){
+        if(a.empty&&b.empty)return 0;
+        return a.empty?1:-1;                     // les cellules vides restent en bas
+    }
+    if('num' in a&&'num' in b)return a.num-b.num;
+    if('num' in a)return -1;
+    if('num' in b)return 1;
+    if('text' in a&&'text' in b)return SORT_COLLATOR.compare(a.text,b.text);
+    return 0;
+}
+function sortBodyRows(table){
+    let body=table.tBodies[0];
+    return body?Array.prototype.slice.call(body.rows):[];
+}
+function prepareSortTable(table){
+    if(!table||table.dataset.sortReady==='1')return false;
+    if(table.closest('.doc-preview-sheet,.doc-preview-stage,.doc-preview-viewport'))return false;
+
+    let head=table.tHead,body=table.tBodies[0];
+    if(!head||!body||!head.rows.length)return false;
+    let headRow=head.rows[head.rows.length-1];
+    let ths=Array.prototype.slice.call(headRow.cells);
+    if(!ths.length||ths.some(th=>th.colSpan>1||th.rowSpan>1))return false;
+    let rows=sortBodyRows(table);
+    let movable=rows.filter(r=>!r.classList.contains('sort-fixed')&&!r.querySelector('td[colspan]'));
+    if(movable.length<2)return false;
+    if(rows.some(r=>r.cells.length<ths.length))return false;
+    // Une colonne dont toutes les cellules sont vides n'a rien à trier :
+    // afficher une flèche sans effet serait trompeur.
+    let emptyCols=ths.map((th,index)=>movable.every(r=>!r.cells[index]||sortCellValue(r.cells[index]).empty));
+    table.dataset.sortReady='1';
+    ths.forEach((th,index)=>{
+        if(th.querySelector('button,a,input,select'))return;
+        if(!sortCellText(th))return;
+        if(emptyCols[index])return;
+        th.classList.add('sortable');
+        th.dataset.sortIndex=String(index);
+        th.tabIndex=0;
+        let mark=document.createElement('span');
+        mark.className='sort-mark';
+        mark.innerHTML=sortIconMark('none');
+        th.appendChild(mark);
+        paintSortHeader(th,'none');
+    });
+    return true;
+}
+function paintSortHeader(th,dir){
+    dir=dir||'none';
+    // Rien à changer : ne pas toucher au DOM, sinon l'observateur de mutations
+    // relancerait un tri à chaque passage (boucle infinie).
+    if(th.dataset.sortDir===dir)return;
+    th.dataset.sortDir=dir;
+    th.setAttribute('aria-sort',dir==='asc'?'ascending':dir==='desc'?'descending':'none');
+    let mark=th.querySelector('.sort-mark');
+    if(mark)mark.innerHTML=sortIconMark(dir);
+    let name=sortCellText(th)||'cette colonne';
+    th.title=dir==='asc'?('Trié croissant sur « '+name+' » — cliquer pour trier décroissant')
+        :dir==='desc'?('Trié décroissant sur « '+name+' » — cliquer pour revenir à l’ordre d’origine')
+        :('Trier par « '+name+' »');
+}
+function sortPaintTable(table,state){
+    let head=table.tHead;
+    if(!head||!head.rows.length)return;
+    Array.prototype.slice.call(head.rows[head.rows.length-1].cells).forEach((th,index)=>{
+        if(!th.classList.contains('sortable'))return;
+        let dir=(state&&Number(state.index)===index)?state.dir:'none';
+        paintSortHeader(th,dir);
+    });
+}
+function sortSameOrder(body,ordered){
+    let current=Array.prototype.slice.call(body.rows);
+    if(current.length!==ordered.length)return false;
+    for(let i=0;i<current.length;i++)if(current[i]!==ordered[i])return false;
+    return true;
+}
+function sortPlace(body,ordered){
+    if(sortSameOrder(body,ordered))return false;   // aucun déplacement inutile
+    ordered.forEach(r=>body.appendChild(r));
+    return true;
+}
+function sortRestoreOrder(table){
+    let body=table.tBodies[0];
+    if(!body)return;
+    let rows=Array.prototype.slice.call(body.rows);
+    let ordered=rows.slice().sort((a,b)=>(Number(a.dataset.sortPos||0))-(Number(b.dataset.sortPos||0)));
+    sortPlace(body,ordered);
+    table.classList.remove('table-sorted');
+}
+function sortApply(table,index,dir){
+    let body=table.tBodies[0];
+    if(!body)return;
+    let rows=Array.prototype.slice.call(body.rows);
+    rows.forEach((r,i)=>{if(r.dataset.sortPos===undefined)r.dataset.sortPos=String(i);});
+    let isSticky=r=>r.classList.contains('month-total-row');
+    let isFixed=r=>r.classList.contains('sort-fixed')||!!r.querySelector('td[colspan]');
+    let movable=rows.filter(r=>!isSticky(r)&&!isFixed(r));
+    let sticky=rows.filter(isSticky);
+    let fixed=rows.filter(r=>!isSticky(r)&&isFixed(r));
+    movable.sort((a,b)=>{
+        let va=sortCellValue(a.cells[index]),vb=sortCellValue(b.cells[index]);
+        // Une cellule vide reste en bas dans les deux sens de tri.
+        if(va.empty||vb.empty){
+            if(va.empty&&vb.empty)return Number(a.dataset.sortPos||0)-Number(b.dataset.sortPos||0);
+            return va.empty?1:-1;
+        }
+        let c=sortCompare(va,vb);
+        if(c)return dir==='desc'?-c:c;
+        return Number(a.dataset.sortPos||0)-Number(b.dataset.sortPos||0);   // tri stable
+    });
+    // Cumuls mensuels : masqués pendant le tri (voir la feuille de style), jamais perdus.
+    sortPlace(body,movable.concat(fixed,sticky));
+    table.classList.add('table-sorted');
+}
+function sortResolveIndex(table,state){
+    let head=table.tHead;
+    if(!head||!head.rows.length)return null;
+    let ths=Array.prototype.slice.call(head.rows[head.rows.length-1].cells);
+    let label=(state.label||'').trim();
+    if(label){
+        let found=-1;
+        ths.forEach((th,index)=>{if(found<0&&th.classList.contains('sortable')&&sortCellText(th)===label)found=index;});
+        if(found>=0)return found;
+        return null;                    // colonne masquée ou renommée : plus de tri
+    }
+    let th=ths[Number(state.index)];
+    return th&&th.classList.contains('sortable')?Number(state.index):null;
+}
+function sortApplyState(table,state){
+    if(!state||state.dir==='none'||state.index==null){sortRestoreOrder(table);sortPaintTable(table,null);return;}
+    let index=sortResolveIndex(table,state);
+    if(index===null){sortRestoreOrder(table);sortPaintTable(table,null);return;}
+    sortApply(table,index,state.dir);
+    sortPaintTable(table,{index:index,dir:state.dir,label:state.label});
+}
+function tableSortInit(root){
+    if(sortBusy)return;
+    sortBusy=true;
+    try{
+        let tables=Array.prototype.slice.call((root||document).querySelectorAll('#main table, #modal table, #listing table'));
+        tables.forEach(prepareSortTable);
+        tables.forEach(table=>{
+            if(table.dataset.sortReady!=='1')return;
+            let state=TABLE_SORTS.get(sortKeyOfTable(table));
+            if(state)sortApplyState(table,state);
+        });
+    }finally{sortBusy=false;}
+}
+function tableSortCycle(th){
+    let table=th&&th.closest?th.closest('table'):null;
+    if(!table||table.dataset.sortReady!=='1')return;
+    let key=sortKeyOfTable(table),index=Number(th.dataset.sortIndex);
+    let current=TABLE_SORTS.get(key)||{index:null,dir:'none'};
+    let next;
+    let label=sortCellText(th)||'';
+    // Le titre suit l'état : si une colonne est masquée par les réglages du
+    // tableau, le tri ne se décale pas sur sa voisine.
+    if(!current||current.index!==index||current.dir==='none')next={index:index,dir:'asc',label:label};
+    else if(current.dir==='asc')next={index:index,dir:'desc',label:label};
+    else next={index:null,dir:'none'};
+    if(next.dir==='none')TABLE_SORTS.delete(key);else TABLE_SORTS.set(key,next);
+    sortBusy=true;
+    try{sortApplyState(table,next);}finally{sortBusy=false;}
+    let name=(sortCellText(th)||'colonne').toLowerCase();
+    let hidden=table.querySelectorAll('tr.month-total-row').length;
+    notify(next.dir==='none'?'Tri désactivé : ordre d’origine rétabli.'
+        :'Tri '+(next.dir==='asc'?'croissant':'décroissant')+' sur « '+name+' ».'
+         +(hidden?' Les cumuls mensuels sont masqués pendant le tri.':''));
+}
+function tableSortSchedule(){
+    if(sortTimer)return;
+    sortTimer=setTimeout(()=>{sortTimer=null;if(!sortBusy)tableSortInit();},40);
+}
+function tableSortWatch(){
+    if(sortObserver||typeof MutationObserver==='undefined')return;
+    sortObserver=new MutationObserver(()=>{if(!sortBusy)tableSortSchedule();});
+    ['#main','#modal'].forEach(sel=>{let node=document.querySelector(sel);if(node)sortObserver.observe(node,{childList:true,subtree:true});});
+}
+document.addEventListener('click',ev=>{
+    let th=ev.target&&ev.target.closest?ev.target.closest('th.sortable'):null;
+    if(!th)return;
+    if(Date.now()<folderDragSuppressUntil)return;
+    ev.preventDefault();
+    tableSortCycle(th);
+},true);
+document.addEventListener('keydown',ev=>{
+    if(ev.key!=='Enter'&&ev.key!==' '&&ev.key!=='Spacebar')return;
+    let th=ev.target&&ev.target.closest?ev.target.closest('th.sortable'):null;
+    if(!th)return;
+    ev.preventDefault();
+    tableSortCycle(th);
+},true);
+document.addEventListener('pointerdown',ev=>{
+    let th=ev.target&&ev.target.closest?ev.target.closest('th.sortable'):null;
+    if(!th||ev.button>0)return;
+    ev.preventDefault();                                  // pas de sélection de texte au double-clic (macOS)
+},true);
 function render(){if(!['dashboard','settings',...Object.keys(navs),...S.scis.map(s=>s.id)].includes(page))page='dashboard';yearSelectSeq=0;renderShell();let content='';if(page==='dashboard'){content=head('Votre patrimoine, en perspective.','L’essentiel de vos sociétés, réuni au même endroit.',yearSelect()+exportBtn()+`<button class="primary" data-action="new-sci">${icon('plus')} Nouvelle SCI</button>`,'Tableau de bord général')+(S.scis.length?dashboard():empty('Bienvenue dans votre espace patrimonial','Créez votre première SCI. Son espace de gestion apparaîtra automatiquement dans la navigation.',`<button class="primary" data-action="new-sci">${icon('plus')} Créer ma première SCI</button>`));}
 else if(page==='settings')content=settingsPage();else if(navs[page])content=listPage({treasury:'entries',agenda:'tasks',documents:'documents'}[page]);else{let s=currentSCI();content=head(s.name,(s.city||s.address||'Société civile immobilière')+' · Régime '+(s.regime||'IR'),(tab==='balance'?`<button data-action="decl-pdf" title="Télécharger le dossier de déclaration au format PDF">${icon('download')} Télécharger le PDF</button><button data-action="decl-csv" title="Exporter le dossier au format CSV (récapitulatif ou cases du formulaire)">${icon('download')} CSV</button>`:'')+yearSelect(s.id)+`<button data-action="edit-sci">${icon('edit')} Société</button>`+`<button class="primary" data-action="quick">${icon('plus')} Ajouter</button>`,'Espace société')+`<nav class="tabs" aria-label="Gestion de la SCI">${tabs.map(([t,n])=>`<button class="tab ${tab===t?'active':''}" data-tab="${t}">${n}</button>`).join('')}</nav>`+(tab==='overview'?dashboard(s.id):tab==='balance'?declPage(s):tab==='identity'?identity(s):listPage(tab,s.id));}
-const recoveryNotice=S.primary_db_missing?`<div class="notice" role="alert" style="border-left-color:var(--red)"><strong>La base principale data.db était absente.</strong> Dominis a créé une base vide ; les fichiers de auto-save/ ne sont pas utilisés comme base. Avant toute nouvelle saisie, restaurez une copie dans data.db.<div style="margin-top:10px"><button class="danger" data-action="restore">${icon('clock')} Restaurer une sauvegarde</button></div></div>`:'';$('#main').innerHTML=recoveryNotice+content+`<div class="footer"><span>DOMINIS <span style="opacity:.5;margin:0 7px">/</span> Votre patrimoine, en toute clarté.</span><span class="row gap8">${icon('lock')} Enregistrement local · Outil de gestion, hors comptabilité certifiée</span></div>`;updateCount();checkTaskNotifications();}
+const recoveryNotice=S.primary_db_missing?`<div class="notice" role="alert" style="border-left-color:var(--red)"><strong>La base principale data.db était absente.</strong> Dominis a créé une base vide ; les fichiers de auto-save/ ne sont pas utilisés comme base. Avant toute nouvelle saisie, restaurez une copie dans data.db.<div style="margin-top:10px"><button class="danger" data-action="restore">${icon('clock')} Restaurer une sauvegarde</button></div></div>`:'';$('#main').innerHTML=recoveryNotice+content+`<div class="footer"><span>DOMINIS <span style="opacity:.5;margin:0 7px">/</span> Votre patrimoine, en toute clarté.</span><span class="row gap8">${icon('lock')} Enregistrement local · Outil de gestion, hors comptabilité certifiée</span></div>`;updateCount();checkTaskNotifications();afterRenderTables();}
 function currentListKind(){return navs[page]?{treasury:'entries',agenda:'tasks',documents:'documents'}[page]:tab;}
+// Chaque rendu reconstruit les tableaux : le tri choisi est réappliqué ici.
+function afterRenderTables(){tableSortWatch();tableSortInit();}
 function visibleCount(kind,id){let list=filtered(kind,id);if(kind==='documents')list=list.filter(inDocFolder);return list.length}
 function updateCount(){let el=$('#list-count');if(el){let k=currentListKind();el.textContent=visibleCount(k,currentSCI()?.id)+' éléments';}}
-function renderListing(){let k=navs[page]?{treasury:'entries',agenda:'tasks',documents:'documents'}[page]:tab;if($('#listing')){$('#listing').innerHTML=listing(k,currentSCI()?.id);updateCount();}}
-function openModal(title,body,footer='',wide=false){previousFocus=document.activeElement;modalDirty=false;$('#modal').innerHTML=`<div class="modal-backdrop"><div class="modal ${wide?'wide':''}" role="dialog" aria-modal="true" aria-label="${esc(title)}"><div class="modal-head"><h2>${esc(title)}</h2><button class="ghost icon-only" data-action="close-modal" aria-label="Fermer">${icon('close')}</button></div><div class="modal-content">${body}<div id="modal-error"></div></div>${footer?`<div class="modal-footer">${footer}</div>`:''}</div></div>`;setTimeout(()=>$('#modal input:not([type=hidden]),#modal select,#modal button')?.focus(),30);}
+function renderListing(){let k=navs[page]?{treasury:'entries',agenda:'tasks',documents:'documents'}[page]:tab;if($('#listing')){$('#listing').innerHTML=listing(k,currentSCI()?.id);updateCount();tableSortInit();}}
+function openModal(title,body,footer='',wide=false){previousFocus=document.activeElement;modalDirty=false;$('#modal').innerHTML=`<div class="modal-backdrop"><div class="modal ${wide?'wide':''}" role="dialog" aria-modal="true" aria-label="${esc(title)}"><div class="modal-head"><h2>${esc(title)}</h2><button class="ghost icon-only" data-action="close-modal" aria-label="Fermer">${icon('close')}</button></div><div class="modal-content">${body}<div id="modal-error"></div></div>${footer?`<div class="modal-footer">${footer}</div>`:''}</div></div>`;setTimeout(()=>$('#modal input:not([type=hidden]),#modal select,#modal button')?.focus(),30);tableSortInit();}
 function closeModal(force=false){if(updateInstalling&&!force)return;if(!force&&$('#update-offer')){updateInfo.dismissed=true;api('update/later',{}).catch(()=>{});}if(!force&&modalDirty&&!confirm('Abandonner les modifications non enregistrées ?'))return;$('#modal').innerHTML='';modalDirty=false;previousFocus?.focus?.();}
 function modalError(e){let el=$('#modal-error');if(el){el.className='error';el.textContent=e.message||e;}else notify(e.message||e,true);}
 function field(name,label,type='text',value='',opts=null,required=false,full=false){return `<div class="field ${full?'full':''}"><label for="f-${name}">${esc(label)}${required?' <span class="gold">*</span>':''}</label>${type==='select'?`<select id="f-${name}" name="${name}" ${required?'required':''}>${(opts||[]).map(o=>{let v=Array.isArray(o)?o[0]:o,t=Array.isArray(o)?o[1]:o;return `<option value="${esc(v)}" ${String(v)===String(value)?'selected':''}>${esc(t)}</option>`}).join('')}</select>`:type==='textarea'?`<textarea id="f-${name}" name="${name}">${esc(value)}</textarea>`:`<input id="f-${name}" name="${name}" type="${type}" value="${type==='file'?'':esc(value)}" ${required?'required':''} ${type==='number'?'step="0.01" '+(['opening','cca'].includes(name)?'':'min="0"'):''} ${type==='file'?'accept=".pdf,.jpg,.jpeg,.png,.webp,.docx,.xlsx,.txt,.csv"':''} ${name==='siren'?'pattern="[0-9]{9}" maxlength="9"':''} ${name==='name'?'maxlength="160"':''}>`}</div>`;}
@@ -12617,7 +13114,7 @@ if((ev.key==='Enter'||ev.key===' ')&&ev.target.matches('.doc-folder-card[data-do
 if(ev.key==='Enter'&&ev.target.matches('.doc-folder-card[data-folder-new]')){ev.preventDefault();newDocFolderModal(ev.target.dataset.folderParent||'');}if(ev.key==='Tab'&&$('#modal').innerHTML){let items=$$('#modal button:not(:disabled),#modal input:not(:disabled),#modal select:not(:disabled),#modal textarea');let first=items[0],last=items[items.length-1];if(ev.shiftKey&&document.activeElement===first){ev.preventDefault();last?.focus();}else if(!ev.shiftKey&&document.activeElement===last){ev.preventDefault();first?.focus();}}});
 window.addEventListener('beforeunload',e=>{if(modalDirty||updateInstalling){e.preventDefault();e.returnValue='';}});
 window.dominisCanClose=async()=>{if(updateInstalling)return false;if(modalDirty&&!confirm('Abandonner les modifications de formulaire non enregistrées et fermer Dominis ?'))return false;try{await settingsQueue;return true;}catch(e){notify('Fermeture annulée : un réglage n’a pas pu être enregistré.',true);return false;}};
-(async()=>{try{await load();page='dashboard';tab='overview';scope='';render();setInterval(checkTaskNotifications,15000);if(S.auto_save_notice?.message&&!S.primary_db_missing)notify(S.auto_save_notice.message,!!S.auto_save_notice.error);pollUpdates();}catch(e){$('#main').innerHTML=empty('Impossible d’ouvrir votre espace',esc(e.message),'<button onclick="location.reload()">Réessayer</button>');}})();
+(async()=>{try{await load();page='dashboard';tab='overview';scope='';render();afterRenderTables();setInterval(checkTaskNotifications,15000);if(S.auto_save_notice?.message&&!S.primary_db_missing)notify(S.auto_save_notice.message,!!S.auto_save_notice.error);pollUpdates();}catch(e){$('#main').innerHTML=empty('Impossible d’ouvrir votre espace',esc(e.message),'<button onclick="location.reload()">Réessayer</button>');}})();
 </script></body></html>'''
 
 def on_native_closing():

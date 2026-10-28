@@ -370,9 +370,10 @@ class XlsxParseTests(unittest.TestCase):
         self.assertEqual(len(warnings), 5)
         joined = '\n'.join(warnings)
         self.assertIn('total débit', joined)
-        self.assertIn('solde au 31/01/2026', joined)
+        self.assertIn('solde attendu', joined)
+        self.assertIn('31/01/2026', joined)
         self.assertIn('1 100,00 €', joined)
-        self.assertIn('sens inversé en Recette', joined)
+        self.assertIn('enregistré en Recette', joined)
         self.assertIn('libellé sans montant', joined)
         self.assertIn('date seule', joined)
         records = bundle['records']
@@ -427,7 +428,7 @@ class XlsxParseTests(unittest.TestCase):
         self.assertIn('Aucun tableau', str(ctx.exception))
         with self.assertRaises(ValueError) as ctx:
             parse(build_xlsx([('Vide', [HEADER, [t(0, '31/12/25'), n(4, 10.0)]])]))
-        self.assertIn('aucune opération', str(ctx.exception))
+        self.assertIn('Aucune opération importable', str(ctx.exception))
 
     def test_invalid_files_rejected(self):
         for payload, expected in [
@@ -644,7 +645,8 @@ class XlsxReaderRegressionTests(unittest.TestCase):
         bundle = parse(build_xlsx([('Illisible', rows)], numfmts={164: '#,##0.00" €"'},
                                   cell_xfs=[0, 164]))
         joined = '\n'.join(bundle['warnings'])
-        self.assertIn('sans valeur calculée', joined)
+        self.assertIn('n’a pas de résultat enregistré', joined)
+        self.assertIn('→ Ouvrez le classeur dans Excel', joined)
         self.assertIn('VLOOKUP', joined)
         self.assertIn('E5', joined)
         self.assertEqual(len(bundle['records']), 2)
@@ -709,7 +711,7 @@ class XlsxReaderRegressionTests(unittest.TestCase):
                          [('Loyer', 'Recette', 1200.0), ('Travaux', 'Dépense', 200.0)])
         joined = '\n'.join(bundle['warnings'])
         self.assertIn('total annoncé 250,00 € en débit', joined)
-        self.assertIn('ligne de synthèse non importée', joined)
+        self.assertIn('Ligne de synthèse non importée', joined)
 
     def test_bordered_table_ends_before_the_recap_block(self):
         rows = [[t(0, 'SCI BORDURES')], None, None]
@@ -751,8 +753,8 @@ class XlsxReaderRegressionTests(unittest.TestCase):
                                   numfmts={164: '#,##0.00" €"'}, cell_xfs=[0, 164]))
         self.assertEqual(len(bundle['scis']), 1)
         joined = '\n'.join(bundle['warnings'])
-        self.assertIn('2 200,00 € attendu', joined)
-        self.assertIn('5 000,00 € trouvé', joined)
+        self.assertIn('solde attendu 2 200,00 €', joined)
+        self.assertIn('trouvé 5 000,00 €', joined)
         self.assertEqual(bundle['reconcile'][bundle['scis'][0]['id']]['gap'], -2800.0)
 
     # --- rapprochement ------------------------------------------------------
@@ -788,7 +790,7 @@ class XlsxImportBundleTests(unittest.TestCase):
         bundle = app.parse_import({'format': 'xlsx', 'text': text})
         source = bundle['scis'][0]['id']
         with app.connect() as c:
-            count = app.import_bundle(c, {'format': 'xlsx', 'text': text, 'mapping': {source: sid}})
+            count = app.import_bundle(c, {'format': 'xlsx', 'text': text, 'mapping': {source: sid}})['count']
             c.commit()
         self.assertEqual(count, 14)
         with app.connect() as c:
@@ -807,7 +809,7 @@ class XlsxImportBundleTests(unittest.TestCase):
         bundle = app.parse_import({'format': 'xlsx', 'text': text})
         source = bundle['scis'][0]['id']
         with app.connect() as c:
-            count = app.import_bundle(c, {'format': 'xlsx', 'text': text, 'mapping': {source: 'new'}})
+            count = app.import_bundle(c, {'format': 'xlsx', 'text': text, 'mapping': {source: 'new'}})['count']
             c.commit()
         self.assertEqual(count, 14)
         with app.connect() as c:
@@ -846,7 +848,7 @@ class XlsxImportBundleTests(unittest.TestCase):
                 app.import_bundle(c, {'format': 'xlsx', 'text': text, 'mapping': {source: 'new'}})
             # solde d'ouverture corrigé : ce n'est plus le même import
             count = app.import_bundle(c, {'format': 'xlsx', 'text': text, 'mapping': {source: 'new'},
-                                          'openings': {source: 32000.0}})
+                                          'openings': {source: 32000.0}})['count']
             c.commit()
         self.assertEqual(count, 14)
 
@@ -867,6 +869,109 @@ class XlsxImportBundleTests(unittest.TestCase):
             with self.assertRaises(ValueError) as ctx:
                 app.import_bundle(c, {'format': 'csv', 'text': csv_text, 'mapping': {source: 'new'}})
         self.assertIn('SCI existante', str(ctx.exception))
+
+
+class XlsxSourceGuardTests(unittest.TestCase):
+    """Origine des montants : feuilles de synthèse, titres, doublons, raccordement."""
+
+    HEAD = [[t(0, 'Date'), t(1, 'Libellé'), t(2, 'Débit'), t(3, 'Crédit'), t(4, 'Solde')]]
+
+    def setUp(self):
+        # Base temporaire : la suite ne doit jamais écrire dans Dominis/data.db.
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.db_patch = patch.object(app, 'DB', Path(self.temp.name) / 'data.db')
+        self.db_patch.start()
+        self.addCleanup(self.db_patch.stop)
+        app.EXIT_READY.clear()
+        app.init_db()
+
+    def bundle(self, sheets, **kw):
+        kw.setdefault('numfmts', {164: '#,##0.00 €'})
+        kw.setdefault('cell_xfs', [0, 164])
+        return parse(build_xlsx(sheets, **kw))
+
+    def test_summary_sheet_never_feeds_a_real_sci(self):
+        """Une feuille « Synthèse » reprenant le nom de la SCI doublait ses montants."""
+        bundle = self.bundle([
+            ('SCI THEMA', self.HEAD + [[t(0, '05/03/25'), t(1, 'Loyer'), n(3, 1000.0)]]),
+            ('Synthèse', [[t(0, 'SCI THEMA')]] + self.HEAD
+             + [[t(0, '31/12/24'), t(1, 'Loyers encaissés'), n(3, 12000.0)]]),
+        ])
+        self.assertEqual(len(bundle['scis']), 1)
+        self.assertEqual(len(bundle['records']), 1)
+        joined = '\n'.join(bundle['warnings'])
+        self.assertIn('tableau de synthèse', joined)
+        self.assertIn('autre nom que', joined)
+
+    def test_workbook_with_only_summary_sheets_is_refused_with_a_hint(self):
+        with self.assertRaises(ValueError) as ctx:
+            self.bundle([('Synthèse', self.HEAD + [[t(0, '31/12/24'), t(1, 'Loyers encaissés'), n(3, 12000.0)]])])
+        message = str(ctx.exception)
+        self.assertIn('Aucune opération importable', message)
+        self.assertIn('Pistes', message)
+        self.assertIn('tableau de synthèse', message)
+
+    def test_control_prefix_in_title_keeps_the_sci_name(self):
+        """« Bilan 2024 · SCI THEMA » devenait « Tableau 1 · Feuil1 »."""
+        bundle = self.bundle([
+            ('2024', [[t(0, 'Bilan 2024 · SCI THEMA')]] + self.HEAD
+             + [[t(0, '05/03/24'), t(1, 'Loyer'), n(3, 1000.0)]]),
+            ('2025', [[t(0, 'Bilan 2025 · SCI THEMA')]] + self.HEAD
+             + [[t(0, '05/03/25'), t(1, 'Loyer'), n(3, 1100.0)]]),
+        ])
+        self.assertEqual([s['name'] for s in bundle['scis']], ['SCI THEMA'])
+        self.assertEqual(len(bundle['records']), 2)
+
+    def test_summary_title_is_not_imported(self):
+        with self.assertRaises(ValueError) as ctx:
+            self.bundle([('Feuil1', [[t(0, 'Récapitulatif général')]] + self.HEAD
+                         + [[t(0, '31/12/24'), t(1, 'Loyers encaissés'), n(3, 12000.0)]])])
+        self.assertIn('tableau de synthèse', str(ctx.exception).lower())
+
+    def test_overlapping_files_are_not_counted_twice(self):
+        text = b64(sample_xlsx())
+        bundle = app.parse_import({'format': 'xlsx', 'text': text})
+        source = bundle['scis'][0]['id']
+        with app.connect() as c:
+            sid = app.save_record(c, {'kind': 'sci', 'data': {'name': 'SCI existante'}})
+            first = app.import_bundle(c, {'format': 'xlsx', 'text': text, 'mapping': {source: sid}})
+            c.commit()
+        self.assertEqual(first['count'], 14)
+        # Même contenu, empreinte différente (ouverture différente) : les lignes
+        # déjà présentes ne doivent pas être comptées deux fois.
+        with app.connect() as c:
+            second = app.import_bundle(c, {'format': 'xlsx', 'text': text, 'mapping': {source: sid},
+                                           'openings': {source: 32155.66}})
+            c.commit()
+        self.assertEqual(second['count'], 0)
+        self.assertEqual(second['skipped'], 14)
+        self.assertTrue(any('déjà présente' in w for w in second['warnings']))
+        with app.connect() as c:
+            total = c.execute("SELECT count(*) FROM records WHERE kind='entries' AND sci=?", (sid,)).fetchone()[0]
+        self.assertEqual(total, 14)
+
+    def test_opening_mismatch_on_existing_sci_is_reported(self):
+        sheet = [[t(0, 'SCI TEST')]] + self.HEAD + [[n(4, 1000.0)],
+                 [t(0, '05/03/24'), t(1, 'Loyer'), n(3, 1200.0), n(4, 2200.0)]]
+        text = b64(build_xlsx([('Relevé', sheet)], numfmts={164: '#,##0.00 €'}, cell_xfs=[0, 164]))
+        source = app.parse_import({'format': 'xlsx', 'text': text})['scis'][0]['id']
+        with app.connect() as c:
+            sid = app.save_record(c, {'kind': 'sci', 'data': {'name': 'SCI TEST', 'opening': 1000.0,
+                                                             'opening_date': '2024-01-01'}})
+            app.import_bundle(c, {'format': 'xlsx', 'text': text, 'mapping': {source: sid}})
+            c.commit()
+        sheet2 = [[t(0, 'SCI TEST')]] + self.HEAD + [[n(4, 3000.0)],
+                  [t(0, '05/03/25'), t(1, 'Loyer'), n(3, 1200.0), n(4, 4200.0)]]
+        text2 = b64(build_xlsx([('Relevé', sheet2)], numfmts={164: '#,##0.00 €'}, cell_xfs=[0, 164]))
+        source2 = app.parse_import({'format': 'xlsx', 'text': text2})['scis'][0]['id']
+        with app.connect() as c:
+            result = app.import_bundle(c, {'format': 'xlsx', 'text': text2,
+                                           'mapping': {source2: sid}})
+            c.commit()
+        joined = '\n'.join(result['warnings'])
+        self.assertIn('ne correspond pas au solde', joined)
+        self.assertIn('→', joined)
 
 
 if __name__ == '__main__':
