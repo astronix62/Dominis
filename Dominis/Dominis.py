@@ -4907,7 +4907,7 @@ def normalize_year_setting(value):
 
 
 # Les mises à jour ne remplacent que le script. Aucun téléchargement de data.db.
-APP_VERSION = 'v0.0.5'
+APP_VERSION = 'v0.1.1'
 UPDATE_PROTOCOL = 1
 DB_SCHEMA_VERSION = 1
 MIN_PYTHON = (3, 10)
@@ -9746,7 +9746,7 @@ th.sortable:hover .sort-mark{opacity:.7}
 th.sortable[data-sort-dir=asc] .sort-mark,th.sortable[data-sort-dir=desc] .sort-mark{opacity:1;color:var(--gold)}
 th.sortable[data-sort-dir=asc],th.sortable[data-sort-dir=desc]{color:var(--gold)}
 .sort-icon{width:11px;height:11px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;display:block}
-table.table-sorted tr.month-total-row{display:none}
+table.table-sorted:not(.table-date-sorted) tr.month-total-row{display:none}
 @media print{th.sortable .sort-mark{display:none}}
 @media(prefers-reduced-motion:reduce){th.sortable,th.sortable .sort-mark{transition:none}}
 .prop-crop-box{grid-column:1/-1;border:1px solid var(--line);background:var(--panel2);border-radius:10px;padding:15px 16px;display:flex;flex-direction:column;gap:12px}.prop-crop-stage-wrap{position:relative;width:100%;aspect-ratio:16/5;background:linear-gradient(130deg,var(--goldbg),var(--panel));border:1px dashed var(--gold);border-radius:8px;overflow:hidden;cursor:grab;user-select:none;touch-action:none;display:flex;align-items:center;justify-content:center;color:var(--gold)}.prop-crop-stage-wrap:active{cursor:grabbing}.prop-crop-stage-wrap canvas{width:100%;height:100%;display:block}.prop-crop-placeholder{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:12px;text-align:center;pointer-events:none}.prop-crop-placeholder svg{width:46px;height:46px;opacity:.65}.prop-crop-grid{position:absolute;inset:0;pointer-events:none;background-image:linear-gradient(to right,rgba(199,173,119,.28) 1px,transparent 1px),linear-gradient(to bottom,rgba(199,173,119,.28) 1px,transparent 1px);background-size:33.333% 33.333%;border:1px solid rgba(199,173,119,.5);border-radius:8px}.prop-crop-badge{position:absolute;bottom:8px;left:10px;pointer-events:none;background:var(--panel);color:var(--text);opacity:.94;font-size:10px;padding:3px 8px;border-radius:5px;border:1px solid #c7ad7759}.prop-crop-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.prop-crop-controls input[type=range]{flex:1;min-width:130px;padding:0;accent-color:var(--gold)}.doc-folders-bar{display:flex;gap:10px;overflow-x:auto;padding-bottom:6px;margin-bottom:18px;align-items:stretch}.doc-folder-card{border:1px solid var(--line);background:var(--panel);border-radius:10px;padding:11px 14px;min-width:175px;display:flex;flex-direction:column;gap:7px;cursor:pointer;transition:border-color .18s,background .18s,transform .18s;flex:none;text-align:left}.doc-folder-card:hover{border-color:var(--gold);transform:translateY(-1px)}.doc-folder-card.active{border-color:var(--gold);background:var(--goldbg)}.doc-folder-top{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%}.doc-folder-name{font-weight:600;font-size:12px;color:var(--text);display:flex;align-items:center;gap:7px;overflow:hidden;text-overflow:ellipsis}.doc-folder-meta{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:10px;color:var(--muted);width:100%}.doc-folder-actions{display:flex;gap:2px;margin-left:auto}.doc-folder-actions button[disabled]{opacity:.3;cursor:default}.doc-folder-card.doc-folder-all{margin-left:auto;border-style:solid}.folder-order-box{grid-column:1/-1;border:1px solid var(--line);background:var(--panel2);border-radius:10px;padding:14px 15px;margin-top:4px}.folder-order-box h4{margin:0 0 10px;font-size:12px;color:var(--muted);font-weight:600}.folder-order-list{display:flex;flex-wrap:wrap;gap:6px}.doc-folder-actions button{padding:2px 4px;min-width:21px;height:21px;background:transparent;border:0;color:var(--muted);border-radius:4px}.doc-folder-actions button:hover{color:var(--gold);background:var(--panel2)}.doc-folder-actions button svg{width:12px;height:12px}.doc-folder-card{-webkit-touch-callout:none;user-select:none;-webkit-user-drag:none}.doc-folder-card *{-webkit-user-drag:none}.doc-folder-card::selection,.doc-folder-card *::selection{background:transparent}.doc-breadcrumb{display:flex;align-items:center;gap:4px;font-size:11px;color:var(--muted);margin-bottom:10px;flex-wrap:wrap}
@@ -9825,13 +9825,12 @@ tfoot td{border-top:1px solid var(--line);border-bottom:0;background:var(--panel
 .rail-bar-value{grid-area:value;font-variant-numeric:tabular-nums}
 .rail-bar-track{grid-area:track;height:5px;border-radius:3px;background:var(--line);overflow:hidden}
 .rail-bar-track i{display:block;height:100%;background:var(--red);border-radius:3px}.sci-cell{display:inline-flex;align-items:center;gap:7px;white-space:nowrap}.col-society{width:40px;text-align:center;padding-left:8px;padding-right:4px}.sci-dot{display:inline-block;width:11px;height:11px;border-radius:50%;background:var(--gold);border:2px solid var(--panel);box-shadow:0 0 0 1px var(--line);vertical-align:middle}tr.doc-row{cursor:pointer}.doc-preview-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:10px 14px;background:var(--panel2);border:1px solid var(--line);border-radius:9px;margin-bottom:14px}.doc-preview-zoom-bar{display:flex;align-items:center;gap:7px;flex-wrap:wrap}.doc-preview-zoom-bar input[type=range]{width:130px;padding:0;accent-color:var(--gold)}.doc-preview-viewport{height:64vh;min-height:390px;background:var(--bg);border:1px solid var(--line);border-radius:10px;overflow:auto;position:relative;padding:0;overscroll-behavior:contain}
-/* Aperçu : la zone de visualisation garde sa taille, seul le document zoome.
-   La scène occupe toujours toute la zone ; le document est un enfant
-   dimensionné par le facteur de zoom et centré par margin:auto — quand il
-   dépasse, la marge auto tombe à zéro et le défilement reste possible. */
-.doc-preview-stage{width:100%;height:100%;min-width:100%;min-height:100%;display:flex;padding:16px;box-sizing:border-box}
-.doc-preview-stage>*{margin:auto}
-.doc-preview-doc{flex:none;width:calc(100% * var(--doc-zoom,1));height:calc(100% * var(--doc-zoom,1));display:flex;align-items:center;justify-content:center;will-change:width,height}
+/* Aperçu : le document conserve sa mise en page et reçoit une transformation.
+   La scène réserve sa taille agrandie pour rendre toutes les zones accessibles
+   au défilement, y compris les bords supérieur et gauche. */
+.doc-preview-stage{width:100%;height:100%;min-width:100%;min-height:100%;position:relative;box-sizing:border-box;overflow:hidden;overflow-anchor:none}
+.doc-preview-stage>*{position:absolute;margin:0;transform-origin:top left;box-sizing:border-box}
+.doc-preview-doc{width:100%;height:100%;display:flex;align-items:center;justify-content:center}
 .doc-preview-sheet-stage{align-items:flex-start}
 .doc-preview-img{max-width:100%;max-height:100%;width:100%;height:100%;object-fit:contain;display:block;border-radius:6px;box-shadow:0 8px 28px rgba(0,0,0,.28)}
 .doc-preview-frame{display:block;width:100%;height:100%;border:0;border-radius:6px;background:#fff;box-shadow:0 8px 28px rgba(0,0,0,.28)}
@@ -10491,7 +10490,7 @@ function photoCropShow(src){
     img.onerror=()=>{photoCrop.error=true;notify('Image illisible : utilisez un fichier PNG, JPEG, WebP ou GIF.',true);photoCropShow('');};
     img.src=src;
 }
-let docPreviewId='',docPreviewZoom=1,docPreviewSheets=[],docPreviewFrame=0,docPreviewStartPage=1,docPreviewMeta=null;
+let docPreviewId='',docPreviewZoom=1,docPreviewTargetZoom=1,docPreviewSheets=[],docPreviewFrame=0,docPreviewStartPage=1,docPreviewMeta=null,docPreviewRequest=0;
 // Ordre en cours d'édition dans la modale de disposition : déclaré ici, sinon
 // l'affectation créait une variable globale implicite.
 let docPageOrder=[];
@@ -10499,23 +10498,38 @@ function docPreviewClampZoom(z){let n=Number(z);if(!Number.isFinite(n)||n<=0)n=1
 // Point du document (0..1) placé au centre de la zone d'aperçu : il reste sous
 // le curseur pendant tout le zoom, d'où un agrandissement centré.
 function docPreviewAnchor(x,y){
-    let vp=$('#doc-preview-viewport'),doc=$('#doc-preview-doc');
+    let vp=$('#doc-preview-viewport'),doc=$('#doc-preview-stage')?.firstElementChild;
     if(!vp||!doc)return null;
     if(!doc.getBoundingClientRect)return null;
     let dr=doc.getBoundingClientRect(),vr=vp.getBoundingClientRect();
     if(!dr.width||!dr.height)return null;
     let cx=(x===undefined||x===null)?vr.left+vr.width/2:x;
     let cy=(y===undefined||y===null)?vr.top+vr.height/2:y;
-    return {x:(cx-dr.left)/dr.width,y:(cy-dr.top)/dr.height};
+    return {x:(cx-dr.left)/dr.width,y:(cy-dr.top)/dr.height,px:cx-vr.left,py:cy-vr.top};
 }
 function docPreviewApply(zoom,anchor){
-    let vp=$('#doc-preview-viewport'),stage=$('#doc-preview-stage'),doc=$('#doc-preview-doc');
+    let vp=$('#doc-preview-viewport'),stage=$('#doc-preview-stage'),doc=stage?.firstElementChild;
     docPreviewZoom=zoom;
-    if(stage)stage.style.setProperty('--doc-zoom',String(zoom));
+    if(vp&&stage&&doc){
+        // Dimensions de référence stables : agrandir un iframe PDF ne doit pas
+        // déclencher un nouveau « ajuster à la page » dans son lecteur natif.
+        let width=Math.max(1,vp.clientWidth-32),height=Math.max(1,vp.clientHeight-32);
+        if(!stage.dataset.baseWidth){stage.dataset.baseWidth=String(width);stage.dataset.baseHeight=String(height);}
+        width=Number(stage.dataset.baseWidth);height=Number(stage.dataset.baseHeight);
+        doc.style.width=width+'px';
+        doc.style.minHeight=height+'px';
+        doc.style.height=doc.classList.contains('doc-preview-doc')?height+'px':'auto';
+        height=doc.offsetHeight;
+        stage.style.width=Math.max(vp.clientWidth,width*zoom+32)+'px';
+        stage.style.height=Math.max(vp.clientHeight,height*zoom+32)+'px';
+        doc.style.left=Math.max(16,(vp.clientWidth-width*zoom)/2)+'px';
+        doc.style.top=Math.max(16,(vp.clientHeight-height*zoom)/2)+'px';
+        doc.style.transform='scale('+zoom+')';
+    }
     if(vp&&doc&&anchor){
         let dr=doc.getBoundingClientRect(),vr=vp.getBoundingClientRect();
-        vp.scrollLeft=Math.max(0,vp.scrollLeft+(dr.left+anchor.x*dr.width)-(vr.left+vr.width/2));
-        vp.scrollTop=Math.max(0,vp.scrollTop+(dr.top+anchor.y*dr.height)-(vr.top+vr.height/2));
+        vp.scrollLeft=Math.max(0,vp.scrollLeft+(dr.left+anchor.x*dr.width)-(vr.left+anchor.px));
+        vp.scrollTop=Math.max(0,vp.scrollTop+(dr.top+anchor.y*dr.height)-(vr.top+anchor.py));
     }
     let range=$('#doc-zoom-range');if(range)range.value=String(Math.round(zoom*100));
     let label=$('#doc-zoom-label');if(label)label.textContent='×'+zoom.toFixed(2).replace('.',',');
@@ -10524,6 +10538,7 @@ function docPreviewApply(zoom,anchor){
 // valeur est atteinte en une interpolation courte et régulière.
 function docPreviewStageZoom(z,opts={}){
     let next=docPreviewClampZoom(z);
+    docPreviewTargetZoom=next;
     let anchor=docPreviewAnchor(opts.x,opts.y);
     if(docPreviewFrame){cancelAnimationFrame(docPreviewFrame);docPreviewFrame=0;}
     let reduced=window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -10555,6 +10570,7 @@ function docPreviewSheetSelect(index){
     $$('#doc-preview-body [data-doc-sheet]').forEach(b=>b.classList.toggle('active',Number(b.dataset.docSheet)===index));
     let body=$('#doc-sheet-body');
     if(body)body.innerHTML=docPreviewSheetHtml(index);
+    docPreviewStageZoom(docPreviewTargetZoom,{instant:true});
 }
 function fmtBytes(n){n=Number(n)||0;if(n<1024)return n+' o';if(n<1024*1024)return num(n/1024)+' Ko';return num(n/1024/1024)+' Mo';}
 function docPreviewToolbar(p){
@@ -10583,6 +10599,7 @@ function docPreviewBody(p){
 async function documentPreview(id,opts={}){
     let r=rec(id);
     if(!r||r.kind!=='documents')return;
+    let request=++docPreviewRequest;
     docPreviewId=id;
     docPreviewStartPage=Math.max(1,Number(opts.page)||1);
     let folderOptions=`<option value="">Sans dossier</option>${sciDocFolders(r.sci).map(f=>`<option value="${esc(f.id)}" ${resolveDocFolder(r)===f.id?'selected':''}>${esc(f.name)}</option>`).join('')}`;
@@ -10596,11 +10613,13 @@ async function documentPreview(id,opts={}){
     $('#modal .modal')?.classList.add('doc-preview-modal');
     try{
         let p=await (await api('document-preview?id='+encodeURIComponent(id))).json();
+        if(request!==docPreviewRequest)return;
         docPreviewMeta=p;
         let body=$('#doc-preview-body');
         if(body)body.innerHTML=docPreviewBody(p);
         docPreviewStageZoom(1,{instant:true});
     }catch(e){
+        if(request!==docPreviewRequest)return;
         let body=$('#doc-preview-body');
         if(body)body.innerHTML=`<div class="error">${esc(e.message)}</div>`;
     }
@@ -11473,7 +11492,7 @@ function entriesMonthRows(list,id,cols,colTd){
             amount:'<strong class="'+(net<0?'red':'green')+'">'+money(net,2)+'</strong>',
             sci:''
         };
-        out[ym]='<tr class="month-total-row">'+cols.map(c=>colTd(c,cells[c.id]||'')).join('')+'<td class="align-right"><span class="pill gold">Cumul</span></td></tr>';
+        out[ym]='<tr class="month-total-row" data-month="'+esc(ym)+'">'+cols.map(c=>colTd(c,cells[c.id]||'')).join('')+'<td class="align-right"><span class="pill gold">Cumul</span></td></tr>';
     });
     return out;
 }
@@ -11486,7 +11505,7 @@ let v=tableView(tkey);
 let gearTh=`<th class="align-right col-settings-th"><button type="button" class="ghost icon-only table-gear-btn" data-table-config="${tkey}" title="Réglages du tableau" aria-label="Réglages du tableau">${icon('settings')}</button></th>`;
 let numberCol=c=>['amount','credit','debit','solde'].includes(c.id);
 let thClass=c=>[c.id==='society'?'col-society':'',numberCol(c)?'align-right':''].filter(Boolean).join(' ');
-let colTh=c=>`<th${thClass(c)?` class="${thClass(c)}"`:''}>${esc(c.label)}</th>`;
+let colTh=c=>`<th data-sort-column="${esc(c.id)}"${thClass(c)?` class="${thClass(c)}"`:''}>${esc(c.label)}</th>`;
 let colTd=(c,val)=>`<td${thClass(c)?` class="${thClass(c)}"`:''}>${val}</td>`;
 let wrapCls=`panel table-wrap ${tableWrapClass(v)}`;
 if(!list.length)return `${kind==='documents'?docFolderBar():''}<div class="${wrapCls}"><table data-sort-key="${esc(tkey)}"><thead><tr>${cols.map(colTh).join('')}${gearTh}</tr></thead></table>${empty('Aucun élément à afficher',query||filter||scope||(kind==='documents'&&docYear)?'Essayez un autre filtre.':'Ajoutez vos premières données pour compléter cet espace.',!query&&!filter?addBtn(kind,'Ajouter un élément'):'')}</div>`;
@@ -11520,7 +11539,7 @@ let rowParts=list.map(r=>{
     else if(kind==='loans'){cellMap={name:esc(r.name)+`<span class="cell-sub">${esc(r.bank)}</span>`,principal:money(r.principal),balance:`${money(r.balance)}<span class="cell-sub">Situation au ${date(r.balance_date)}</span>`,rate:`${num(r.rate)} %<span class="cell-sub">${money(r.monthly,2)} / mois</span>`,end:date(r.end)};act=actions(r);}
     else if(kind==='tasks'){let remDates=r.reminders_enabled&&Array.isArray(r.reminders)?r.reminders:[];cellMap={name:`<strong>${esc(r.name)}</strong>${r.important?' <span class="pill red" style="margin-left:6px">Important</span>':''}${remDates.length?`<span class="cell-sub">${remDates.length} rappel${remDates.length>1?'s':''} · ${remDates.map(date).join(', ')}</span>`:''}`,sci:esc(sciname(r.sci)),due:`<span class="${r.due<today()&&r.status!=='Terminé'?'red':''}">${date(r.due)}</span>`,category:esc(r.category),status:badge(r.status)};act=actions(r,r.status!=='Terminé'?`<button data-complete="${r.id}" title="Marquer comme terminé">${icon('check')}</button>`:'');}
     else if(kind==='documents'){let folder=resolveDocFolder(r);cellMap={name:`${icon('file')} <span style="vertical-align:super;margin-left:6px">${esc(r.name)}</span>`,sci:esc(sciname(r.sci)),category:esc(r.category),folder:folder?`<span class="pill" title="${esc(docFolderPath(folder,r.sci))}">${icon('folder')} ${esc(docFolderPath(folder,r.sci))}</span>`:'<span class="muted">Sans dossier</span>',date:date(r.date),file:r.size?num(r.size/1024)+' Ko':'Note seule'};act=`<div class="actions"><button data-document-preview="${r.id}" title="Ouvrir l’aperçu" aria-label="Ouvrir l’aperçu de ${esc(r.name)}">${icon('search')}</button>${r.size?`<button data-document="${r.id}" title="Télécharger le document" aria-label="Télécharger ${esc(r.name)}">${icon('download')}</button>`:''}<button data-edit="${r.id}" title="Modifier" aria-label="Modifier ${esc(r.name)}">${icon('edit')}</button><button data-delete="${r.id}" title="Supprimer" aria-label="Supprimer ${esc(r.name)}">${icon('trash')}</button></div>`;}
-    return `<tr${kind==='documents'?` class="doc-row" data-doc-open="${r.id}" title="Ouvrir l’aperçu de ${esc(r.name)}"`:''}>${cols.map(c=>colTd(c,cellMap[c.id]??'')).join('')}<td>${act}</td></tr>`;
+    return `<tr${kind==='entries'?` data-month="${esc((entryDate(r)||'').slice(0,7))}"`:''}${kind==='documents'?` class="doc-row" data-doc-open="${r.id}" title="Ouvrir l’aperçu de ${esc(r.name)}"`:''}>${cols.map(c=>colTd(c,cellMap[c.id]??'')).join('')}<td>${act}</td></tr>`;
 });
 let rowsHtml=rowParts.join('');
 // Ligne de totaux en fin de mois : uniquement dans la trésorerie, uniquement
@@ -12773,9 +12792,10 @@ function prepareSortTable(table){
     let ths=Array.prototype.slice.call(headRow.cells);
     if(!ths.length||ths.some(th=>th.colSpan>1||th.rowSpan>1))return false;
     let rows=sortBodyRows(table);
-    let movable=rows.filter(r=>!r.classList.contains('sort-fixed')&&!r.querySelector('td[colspan]'));
+    let movable=rows.filter(r=>!r.classList.contains('month-total-row')&&!r.classList.contains('sort-fixed')&&!r.querySelector('td[colspan]'));
     if(movable.length<2)return false;
-    if(rows.some(r=>r.cells.length<ths.length))return false;
+    if(movable.some(r=>r.cells.length<ths.length))return false;
+    rows.forEach((r,i)=>{r.dataset.sortPos=String(i);});
     // Une colonne dont toutes les cellules sont vides n'a rien à trier :
     // afficher une flèche sans effet serait trompeur.
     let emptyCols=ths.map((th,index)=>movable.every(r=>!r.cells[index]||sortCellValue(r.cells[index]).empty));
@@ -12835,7 +12855,7 @@ function sortRestoreOrder(table){
     let rows=Array.prototype.slice.call(body.rows);
     let ordered=rows.slice().sort((a,b)=>(Number(a.dataset.sortPos||0))-(Number(b.dataset.sortPos||0)));
     sortPlace(body,ordered);
-    table.classList.remove('table-sorted');
+    table.classList.remove('table-sorted','table-date-sorted');
 }
 function sortApply(table,index,dir){
     let body=table.tBodies[0];
@@ -12858,9 +12878,24 @@ function sortApply(table,index,dir){
         if(c)return dir==='desc'?-c:c;
         return Number(a.dataset.sortPos||0)-Number(b.dataset.sortPos||0);   // tri stable
     });
-    // Cumuls mensuels : masqués pendant le tri (voir la feuille de style), jamais perdus.
-    sortPlace(body,movable.concat(fixed,sticky));
+    let chronological=table.tHead.rows[table.tHead.rows.length-1].cells[index].dataset.sortColumn==='date';
+    let ordered=[];
+    if(chronological){
+        let totals=new Map(sticky.map(r=>[r.dataset.month,r])),used=new Set();
+        movable.forEach((r,i)=>{
+            let month=r.dataset.month,total=totals.get(month);
+            // En décroissant, le cumul précède le mois ; en croissant, il le clôt.
+            if(dir==='desc'&&total&&!used.has(month)){ordered.push(total);used.add(month);}
+            ordered.push(r);
+            if(dir==='asc'&&total&&(!movable[i+1]||movable[i+1].dataset.month!==month)){
+                ordered.push(total);used.add(month);
+            }
+        });
+        ordered.push(...fixed,...sticky.filter(r=>!used.has(r.dataset.month)));
+    }else ordered=movable.concat(fixed,sticky);
+    sortPlace(body,ordered);
     table.classList.add('table-sorted');
+    table.classList.toggle('table-date-sorted',chronological);
 }
 function sortResolveIndex(table,state){
     let head=table.tHead;
@@ -12905,14 +12940,14 @@ function tableSortCycle(th){
     let label=sortCellText(th)||'';
     // Le titre suit l'état : si une colonne est masquée par les réglages du
     // tableau, le tri ne se décale pas sur sa voisine.
-    if(!current||current.index!==index||current.dir==='none')next={index:index,dir:'asc',label:label};
+    if(sortResolveIndex(table,current)!==index||current.dir==='none')next={index:index,dir:'asc',label:label};
     else if(current.dir==='asc')next={index:index,dir:'desc',label:label};
     else next={index:null,dir:'none'};
     if(next.dir==='none')TABLE_SORTS.delete(key);else TABLE_SORTS.set(key,next);
     sortBusy=true;
     try{sortApplyState(table,next);}finally{sortBusy=false;}
     let name=(sortCellText(th)||'colonne').toLowerCase();
-    let hidden=table.querySelectorAll('tr.month-total-row').length;
+    let hidden=!table.classList.contains('table-date-sorted')&&table.querySelectorAll('tr.month-total-row').length;
     notify(next.dir==='none'?'Tri désactivé : ordre d’origine rétabli.'
         :'Tri '+(next.dir==='asc'?'croissant':'décroissant')+' sur « '+name+' ».'
          +(hidden?' Les cumuls mensuels sont masqués pendant le tri.':''));
@@ -12955,7 +12990,7 @@ function visibleCount(kind,id){let list=filtered(kind,id);if(kind==='documents')
 function updateCount(){let el=$('#list-count');if(el){let k=currentListKind();el.textContent=visibleCount(k,currentSCI()?.id)+' éléments';}}
 function renderListing(){let k=navs[page]?{treasury:'entries',agenda:'tasks',documents:'documents'}[page]:tab;if($('#listing')){$('#listing').innerHTML=listing(k,currentSCI()?.id);updateCount();tableSortInit();}}
 function openModal(title,body,footer='',wide=false){previousFocus=document.activeElement;modalDirty=false;$('#modal').innerHTML=`<div class="modal-backdrop"><div class="modal ${wide?'wide':''}" role="dialog" aria-modal="true" aria-label="${esc(title)}"><div class="modal-head"><h2>${esc(title)}</h2><button class="ghost icon-only" data-action="close-modal" aria-label="Fermer">${icon('close')}</button></div><div class="modal-content">${body}<div id="modal-error"></div></div>${footer?`<div class="modal-footer">${footer}</div>`:''}</div></div>`;setTimeout(()=>$('#modal input:not([type=hidden]),#modal select,#modal button')?.focus(),30);tableSortInit();}
-function closeModal(force=false){if(updateInstalling&&!force)return;if(!force&&$('#update-offer')){updateInfo.dismissed=true;api('update/later',{}).catch(()=>{});}if(!force&&modalDirty&&!confirm('Abandonner les modifications non enregistrées ?'))return;$('#modal').innerHTML='';modalDirty=false;previousFocus?.focus?.();}
+function closeModal(force=false){if(updateInstalling&&!force)return;if(!force&&$('#update-offer')){updateInfo.dismissed=true;api('update/later',{}).catch(()=>{});}if(!force&&modalDirty&&!confirm('Abandonner les modifications non enregistrées ?'))return;++docPreviewRequest;if(docPreviewFrame){cancelAnimationFrame(docPreviewFrame);docPreviewFrame=0;}$('#modal').innerHTML='';modalDirty=false;previousFocus?.focus?.();}
 function modalError(e){let el=$('#modal-error');if(el){el.className='error';el.textContent=e.message||e;}else notify(e.message||e,true);}
 function field(name,label,type='text',value='',opts=null,required=false,full=false){return `<div class="field ${full?'full':''}"><label for="f-${name}">${esc(label)}${required?' <span class="gold">*</span>':''}</label>${type==='select'?`<select id="f-${name}" name="${name}" ${required?'required':''}>${(opts||[]).map(o=>{let v=Array.isArray(o)?o[0]:o,t=Array.isArray(o)?o[1]:o;return `<option value="${esc(v)}" ${String(v)===String(value)?'selected':''}>${esc(t)}</option>`}).join('')}</select>`:type==='textarea'?`<textarea id="f-${name}" name="${name}">${esc(value)}</textarea>`:`<input id="f-${name}" name="${name}" type="${type}" value="${type==='file'?'':esc(value)}" ${required?'required':''} ${type==='number'?'step="0.01" '+(['opening','cca'].includes(name)?'':'min="0"'):''} ${type==='file'?'accept=".pdf,.jpg,.jpeg,.png,.webp,.docx,.xlsx,.txt,.csv"':''} ${name==='siren'?'pattern="[0-9]{9}" maxlength="9"':''} ${name==='name'?'maxlength="160"':''}>`}</div>`;}
 function renderReminderDateInputs(count,dates,defaultDate){
@@ -13099,7 +13134,7 @@ function searchModal(){openModal('Retrouver l’essentiel',`<input id="global-se
 async function quit(){if(closing||updateInstalling)return;if($('#modal').innerHTML&&modalDirty&&!confirm('Des modifications de formulaire ne sont pas enregistrées. Les abandonner et quitter ?'))return;openModal('Quitter en toute sérénité',`<p>Les écritures enregistrées et les réglages seront synchronisés, puis l’intégrité de la base sera vérifiée.</p><p class="sub" style="margin-top:12px">${S.settings.auto_backup?'Une sauvegarde complète sera créée dans sauvegardes/. ':''}${S.preview?'Mode aperçu : le service de démonstration restera disponible.':S.native?'La fenêtre et le processus local seront fermés.':'En mode navigateur, la fermeture automatique de l’onglet peut être bloquée ; le serveur sera bien arrêté.'}</p>`,`<button data-action="close-modal">Rester dans Dominis</button><button class="primary" id="confirm-quit">${icon('exit')} Enregistrer et quitter</button>`);$('#confirm-quit').onclick=async()=>{closing=true;$('#confirm-quit').disabled=true;try{await settingsQueue;await api('quit',{});closeModal(true);if(S.preview){notify('Intégrité vérifiée, données sauvegardées. Le service reste actif dans cet aperçu.');await refresh();}else{$('#main').innerHTML=empty('Votre espace est fermé.','Toutes les données enregistrées ont été sauvegardées. Vous pouvez fermer cet onglet.');setTimeout(()=>window.close(),400);}}catch(e){modalError(e);$('#confirm-quit')&&($('#confirm-quit').disabled=false);}finally{closing=false;}};}
 function quickModal(){openModal('Une action, sans détour',`<div class="checks">${Object.entries(kindNames).map(([k,n])=>`<button data-add="${k}" style="justify-content:flex-start">${icon('plus')}${n}</button>`).join('')}</div>`);}
 async function handleAction(a){switch(a){case'collapse':await setPref({collapsed:!S.settings.collapsed});document.body.classList.toggle('collapsed',!!S.settings.collapsed);if(page==='settings')render();break;case'bell':openBellModal();break;case'new-sci':editForm('sci');break;case'edit-sci':editForm('sci',currentSCI());break;case'delete-sci':deletion('sci',page);break;case'manage-deletions':manageDeletions();break;case'close-modal':closeModal();break;case'export':exportModal();break;case'import':importModal();break;case'backup':await settingsQueue;await download(await api('backup',{}),'dominis-sauvegarde-'+today()+'.db');await refresh();notify('Sauvegarde complète téléchargée. Conservez-la sur un support sûr.');break;case'restore':restoreModal();break;case'generate-calls':callsModal();break;case'search':searchModal();break;case'quick':quickModal();break;case'annual-report':annualReport();break;case'decl-pdf':await declPdfDownload();break;case'decl-csv':declExportModal();break;case'balance-mapping':declMappingModal();break;case'balance-assign':declAssignModal();break;case'decl-map-save':{let s=currentSCI();if(!s)break;let map={...balanceLineMap(s)};$$('[data-decl-map]').forEach(sel=>{let c=sel.dataset.declMap,v=sel.value;if(v)map[c]=v;else delete map[c];});let all={...(S.settings.decl_line_map||{})};all[s.id]=map;setPref({decl_line_map:all}).then(()=>{closeModal(true);render();notify('Classement enregistré pour '+s.name+'.');});break;}case'decl-assign-save':{let s=currentSCI();if(!s)break;let changes=[...$$('[data-decl-assign]')].map(sel=>[sel.dataset.declAssign,sel.value]);let todo=changes.filter(([id,pid])=>pid);for(const [id,pid] of todo){let r=rec(id);if(!r)continue;await api('save',{kind:'entries',id,sci:r.sci,data:{...r,property_id:pid}});}await load();closeModal(true);render();notify(todo.length+' mouvement'+(todo.length>1?'s':'')+' rattaché'+(todo.length>1?'s':'')+' à un immeuble.');break;}case'doc-folder-reset':await restoreDefaultDocFolders();break;case'doc-folder-new':newDocFolderModal();break;case'quit':await quit();break;case'auto-backup':await setPref({auto_backup:!S.settings.auto_backup});render();break;case'weekly-auto-save':await setPref({weekly_auto_save:!S.settings.weekly_auto_save});render();break;case'rename-space':openModal('Nom de votre espace',field('owner','Nom affiché','text',S.settings.owner),`<button data-action="close-modal">Annuler</button><button class="primary" id="save-owner">Enregistrer</button>`);$('#save-owner').onclick=async()=>{try{let v=$('#f-owner').value.trim();if(!v||v.length>45)throw new Error('Choisissez un nom de 1 à 45 caractères.');await setPref({owner:v});closeModal(true);render();}catch(e){modalError(e)}};break;case'reset-demo':openModal('Repartir d’un espace vierge',`<p class="sub">Toutes les SCI et données de cette démonstration seront supprimées, y compris vos ajouts. Vos préférences d’apparence sont conservées. Créez une sauvegarde avant de continuer.</p><div style="margin-top:15px">${field('confirm-demo','Saisissez EFFACER pour confirmer')}</div>`,`<button data-action="close-modal">Annuler</button><button class="danger" id="reset-confirm">Vider la démonstration</button>`);$('#reset-confirm').onclick=async()=>{try{await api('reset-demo',{confirmation:$('#f-confirm-demo').value});closeModal(true);page='dashboard';await refresh();notify('Votre espace est maintenant vierge.');}catch(e){modalError(e)}};break;}}
-document.addEventListener('click',async ev=>{let el=ev.target.closest('button,[data-nav],[data-doc-open],[data-doc-folder],[data-decl-detail],[data-decl-copy]');if(!el)return;if(Date.now()<folderDragSuppressUntil)return;try{if(updateInstalling)return;if(el.dataset.folderNew){newDocFolderModal(el.dataset.folderParent||'');return;}if(el.dataset.folderRename){renameDocFolderModal(el.dataset.folderRename);return;}if(el.dataset.folderMove){await moveDocFolder(docScope(),el.dataset.folderMove,Number(el.dataset.dir));return;}if(el.dataset.docFolder!==undefined&&el.dataset.docFolder!==null&&el.dataset.docOpen===undefined){docFolder=el.dataset.docFolder;docYear='';renderListing();return;}if(el.dataset.docOpen){await documentPreview(el.dataset.docOpen);return;}if(el.dataset.documentPreview){await documentPreview(el.dataset.documentPreview);return;}if(el.dataset.docZoom){let v=el.dataset.docZoom;if(v==='in')docPreviewStageZoom(docPreviewZoom+0.25);else if(v==='out')docPreviewStageZoom(docPreviewZoom-0.25);else docPreviewStageZoom(Number(v)/100);return;}if(el.dataset.docSheet!==undefined&&el.dataset.docSheet!==null){docPreviewSheetSelect(Number(el.dataset.docSheet));return;}if(el.dataset.docAppendBtn!==undefined){docAppendPick();return;}if(el.dataset.docArrange!==undefined){await docArrangeModal(el.dataset.docArrange||docPreviewId);return;}if(el.dataset.macClose){dismissMacNotification(el.dataset.macClose);return;}if(el.dataset.macView){let id=el.dataset.macView,r=rec(id);await markTaskRemindersRead(id);if(r){closeModal(true);navigate(r.sci,'tasks');editForm('tasks',r);}return;}if(el.dataset.bellView){let id=el.dataset.bellView,r=rec(id);await markTaskRemindersRead(id);closeModal(true);if(r){navigate(r.sci,'tasks');editForm('tasks',r);}return;}if(el.dataset.bellRead){await markTaskRemindersRead(el.dataset.bellRead);if($('#bell-modal-body'))openBellModal();return;}if(el.dataset.bellReadAll){for(let r of unreadReminderTasks())await markTaskRemindersRead(r.id);if($('#bell-modal-body'))openBellModal();return;}if(el.dataset.bellAgenda){closeModal(true);navigate('agenda');return;}if(el.dataset.declTab){declTab=el.dataset.declTab;render();return;}if(el.dataset.declCopy!==undefined){await declCopyAmount(el.dataset.declCopy,el.dataset.declLabel||'');return;}if(el.dataset.declDetail){declDetailModal(el.dataset.declDetail);return;}if(el.dataset.declCsv){await declCsvDownload(el.dataset.declCsv);return;}if(el.dataset.tableConfig){openTableColumnsModal(el.dataset.tableConfig);return;}
+document.addEventListener('click',async ev=>{let el=ev.target.closest('button,[data-nav],[data-doc-open],[data-doc-folder],[data-decl-detail],[data-decl-copy]');if(!el)return;if(Date.now()<folderDragSuppressUntil)return;try{if(updateInstalling)return;if(el.dataset.folderNew){newDocFolderModal(el.dataset.folderParent||'');return;}if(el.dataset.folderRename){renameDocFolderModal(el.dataset.folderRename);return;}if(el.dataset.folderMove){await moveDocFolder(docScope(),el.dataset.folderMove,Number(el.dataset.dir));return;}if(el.dataset.docFolder!==undefined&&el.dataset.docFolder!==null&&el.dataset.docOpen===undefined){docFolder=el.dataset.docFolder;docYear='';renderListing();return;}if(el.dataset.docOpen){await documentPreview(el.dataset.docOpen);return;}if(el.dataset.documentPreview){await documentPreview(el.dataset.documentPreview);return;}if(el.dataset.docZoom){let v=el.dataset.docZoom;if(v==='in')docPreviewStageZoom(docPreviewTargetZoom+0.25);else if(v==='out')docPreviewStageZoom(docPreviewTargetZoom-0.25);else docPreviewStageZoom(Number(v)/100);return;}if(el.dataset.docSheet!==undefined&&el.dataset.docSheet!==null){docPreviewSheetSelect(Number(el.dataset.docSheet));return;}if(el.dataset.docAppendBtn!==undefined){docAppendPick();return;}if(el.dataset.docArrange!==undefined){await docArrangeModal(el.dataset.docArrange||docPreviewId);return;}if(el.dataset.macClose){dismissMacNotification(el.dataset.macClose);return;}if(el.dataset.macView){let id=el.dataset.macView,r=rec(id);await markTaskRemindersRead(id);if(r){closeModal(true);navigate(r.sci,'tasks');editForm('tasks',r);}return;}if(el.dataset.bellView){let id=el.dataset.bellView,r=rec(id);await markTaskRemindersRead(id);closeModal(true);if(r){navigate(r.sci,'tasks');editForm('tasks',r);}return;}if(el.dataset.bellRead){await markTaskRemindersRead(el.dataset.bellRead);if($('#bell-modal-body'))openBellModal();return;}if(el.dataset.bellReadAll){for(let r of unreadReminderTasks())await markTaskRemindersRead(r.id);if($('#bell-modal-body'))openBellModal();return;}if(el.dataset.bellAgenda){closeModal(true);navigate('agenda');return;}if(el.dataset.declTab){declTab=el.dataset.declTab;render();return;}if(el.dataset.declCopy!==undefined){await declCopyAmount(el.dataset.declCopy,el.dataset.declLabel||'');return;}if(el.dataset.declDetail){declDetailModal(el.dataset.declDetail);return;}if(el.dataset.declCsv){await declCsvDownload(el.dataset.declCsv);return;}if(el.dataset.tableConfig){openTableColumnsModal(el.dataset.tableConfig);return;}
 if(el.dataset.tableDensity){await saveTableView(el.dataset.tableKind,{density:el.dataset.tableDensity});refreshTableViewUi(el.dataset.tableKind);return;}
 if(el.dataset.tableOpt){let tk=el.dataset.tableKind,cur=tableView(tk);await saveTableView(tk,{[el.dataset.tableOpt]:!cur[el.dataset.tableOpt]});refreshTableViewUi(tk);return;}if(el.dataset.colToggle){let k=el.dataset.colKind,cid=el.dataset.colToggle,cols=getTableColumns(k),c=cols.find(x=>x.id===cid);if(c){if(c.visible&&cols.filter(x=>x.visible).length<=1)return;c.visible=!c.visible;await saveTableColumns(k,cols);if(tableKindOf(k)==='entries_preview')render();else renderListing();if($('#col-config-wrap'))$('#col-config-wrap').innerHTML=renderTableColumnsList(k);}return;}if(el.dataset.colMove){let k=el.dataset.colKind,cid=el.dataset.colMove,dir=Number(el.dataset.dir),cols=getTableColumns(k),i=cols.findIndex(x=>x.id===cid),j=i+dir;if(i>=0&&j>=0&&j<cols.length){[cols[i],cols[j]]=[cols[j],cols[i]];await saveTableColumns(k,cols);if(tableKindOf(k)==='entries_preview')render();else renderListing();if($('#col-config-wrap'))$('#col-config-wrap').innerHTML=renderTableColumnsList(k);}return;}if(el.dataset.colReset){// Réinitialisation explicite : ce tableau retrouve l'ordre et la visibilité par défaut, sans toucher aux autres tableaux (même ceux du même type).
 let k=el.dataset.colReset,all={...(S.settings.table_columns||{})};all[k]={order:[],hidden:[]};await setPref({table_columns:all});if(tableKindOf(k)==='entries_preview')render();else renderListing();if($('#col-config-wrap'))$('#col-config-wrap').innerHTML=renderTableColumnsList(k);return;}if(el.dataset.settingsSection){settingsSection=el.dataset.settingsSection;render();return;}if(el.dataset.updateAction){let a=el.dataset.updateAction;if(a==='check'){updateInfo=await (await api('update/check',{})).json();render();}else if(a==='offer')showUpdateOffer();else if(a==='install')await beginUpdate();else if(a==='force')await forceUpdate();else if(a==='force-install')await beginUpdate(true);return;}if(el.dataset.nav){navigate(el.dataset.nav,el.dataset.tab||'overview');return;}if(el.dataset.tab){tab=el.dataset.tab;query='';filter='';setPref({last_tab:tab});render();return;}if(el.dataset.action){await handleAction(el.dataset.action);return;}if(el.dataset.add){editForm(el.dataset.add);return;}if(el.dataset.edit){let r=rec(el.dataset.edit);editForm(r.kind,r);return;}if(el.dataset.delete){let r=rec(el.dataset.delete);deletion(r.kind,r.id);return;}if(el.dataset.pay){let c=rec(el.dataset.pay);editForm('entries',null,{sci:c.sci,label:'Loyer '+label(rec(c.lease_id))+' · '+c.period,call_id:c.id,amount:due(c),direction:'Recette',category:'Loyers'});$('#f-sci').value=c.sci;$('#f-sci').disabled=true;return;}if(el.dataset.receipt){receipt(el.dataset.receipt);return;}if(el.dataset.document){let r=rec(el.dataset.document);await download(await api('document?id='+r.id),r.filename||'document');return;}if(el.dataset.complete){let r=rec(el.dataset.complete);dismissMacNotification(r.id);let reached=taskReminderDates(r).filter(d=>d&&d<=today());let read=[...new Set([...(Array.isArray(r.read_reminders)?r.read_reminders:[]),...reached])];await api('save',{kind:r.kind,id:r.id,sci:r.sci,data:{...r,status:'Terminé',read_reminders:read}});await refresh();notify('Échéance terminée.');return;}if(el.dataset.theme){await setPref({theme:el.dataset.theme});render();return;}if(el.dataset.move){let o=navOrder(),i=o.indexOf(el.dataset.move),j=i+Number(el.dataset.dir);if(j>=0&&j<o.length){[o[i],o[j]]=[o[j],o[i]];await setPref({order:o});render();}return;}if(el.dataset.searchGo){let id=el.dataset.searchGo,kind=el.dataset.searchKind;closeModal(true);if(kind==='sci')navigate(id);else{let r=rec(id);navigate(r.sci,kind);editForm(kind,r);}return;}}catch(e){notify(e.message,true);}});
@@ -13107,6 +13142,12 @@ document.addEventListener('change',async ev=>{let el=ev.target;try{if(el.classLi
 if(el.id==='balance-start'||el.id==='balance-end'){let s=currentSCI();if(s){let p=balancePeriod(s);balanceView={mode:'custom',year:p.year,start:el.id==='balance-start'?el.value:p.start,end:el.id==='balance-end'?el.value:p.end};render();}}
 if(el.id==='doc-preview-folder'){moveDocToFolder(docPreviewId,el.value);}}catch(e){notify(e.message,true)}});
 document.addEventListener('wheel',docPreviewWheel,{passive:false});
+window.addEventListener('resize',()=>{
+    let stage=$('#doc-preview-stage');
+    if(!stage)return;
+    delete stage.dataset.baseWidth;delete stage.dataset.baseHeight;
+    docPreviewStageZoom(docPreviewTargetZoom,{instant:true});
+});
 document.addEventListener('input',ev=>{if(ev.target.dataset&&ev.target.dataset.importOpening){let id=ev.target.dataset.importOpening,rec=importReconcile[id],box=$$('[data-reconcile-lines]').find(n=>n.dataset.reconcileLines===id);if(rec&&box){let v=Number(ev.target.value);if(!isFinite(v))v=0;box.innerHTML=reconcileLine(rec,v);return;}}if(ev.target.id==='filter-search'){query=ev.target.value;renderListing();}if(ev.target.id==='doc-zoom-range'){docPreviewStageZoom((Number(ev.target.value)||100)/100,{instant:true});}if(ev.target.closest('#modal')&&!['global-search'].includes(ev.target.id)&&!ev.target.closest('#col-config-wrap')&&!ev.target.closest('#bell-modal-body')&&!ev.target.closest('#doc-preview-body'))modalDirty=true;});
 document.addEventListener('submit',ev=>{if(ev.target.id==='edit-form'){ev.preventDefault();submitForm(ev.target);}});
 document.addEventListener('keydown',ev=>{if((ev.ctrlKey||ev.metaKey)&&ev.key.toLowerCase()==='k'){ev.preventDefault();if(!modalDirty)searchModal();}if(ev.key==='Escape'&&$('#modal').innerHTML)closeModal();if(ev.key==='Enter'&&ev.target.matches('article[data-nav]'))navigate(ev.target.dataset.nav);
