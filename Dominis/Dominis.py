@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Dominis — gestion locale multi-SCI. Python 3.10+. Interface et serveur autonomes.
 Usage: python Dominis.py [--desktop] [--demo] [--preview] [--port 8765] [--db data.db]
-Seule dépendance facultative : pywebview (fenêtre native).
+Dépendances facultatives : pywebview (fenêtre native), pypdf (lecture des relevés PDF).
 """
 import ast, math, re, shutil, subprocess, gzip, ssl, zipfile, zlib
 import xml.etree.ElementTree as ET
@@ -4777,7 +4777,7 @@ PREVIEW = False
 AUTO_SAVE_NOTICE = None
 PRIMARY_DB_MISSING = False
 KINDS = ['properties','leases','partners','loans','calls','entries','tasks','documents']
-DEFAULTS = {'theme':'dark','collapsed':False,'order':[], 'year':dt.date.today().year, 'last_page':'dashboard','last_tab':'overview','last_backup':'','owner':'Mon espace patrimonial','auto_backup':True,'weekly_auto_save':True,'last_auto_save_week':'','table_columns':{},'table_view':{},'doc_folders':[],'doc_folders_by_sci':{}}
+DEFAULTS = {'theme':'dark','collapsed':False,'order':[], 'year':dt.date.today().year, 'last_page':'dashboard','last_tab':'overview','last_backup':'','owner':'Mon espace patrimonial','auto_backup':True,'weekly_auto_save':True,'last_auto_save_week':'','table_columns':{},'table_view':{},'table_widths':{},'multitask':{'blur':True,'drag':False,'outside':False},'doc_folders':[],'doc_folders_by_sci':{}}
 YEAR_ALL = 'all'  # Valeur du filtre d'année « Toutes les années ».
 
 # Dossiers de classement proposés à la création d'une SCI. Chaque société possède
@@ -4813,6 +4813,7 @@ def normalize_doc_folders(value):
         if any(x['id']==fid for x in out): continue
         item={'id':fid,'name':name}
         if f.get('builtin'): item['builtin']=True
+        if f.get('statement') is True: item['statement']=True
         parent=str(f.get('parent_id') or '').strip()[:60]
         if parent and parent!=fid: item['parent_id']=parent
         out.append(item)
@@ -4907,7 +4908,7 @@ def normalize_year_setting(value):
 
 
 # Les mises à jour ne remplacent que le script. Aucun téléchargement de data.db.
-APP_VERSION = 'v0.1.1'
+APP_VERSION = 'v0.1.0'
 UPDATE_PROTOCOL = 1
 DB_SCHEMA_VERSION = 1
 MIN_PYTHON = (3, 10)
@@ -9323,6 +9324,152 @@ def build_declaration_csv(model, fmt='form'):
     return ('\ufeff' + _csv_text(rows)).encode('utf-8')
 
 
+def recurrence_preview(c, p):
+    import calendar
+    source=c.execute("SELECT * FROM records WHERE id=? AND kind='entries'", (p.get('id'),)).fetchone()
+    if not source: raise ValueError('Mouvement introuvable.')
+    start=dt.date.fromisoformat(str(p.get('start','')))
+    count=p.get('count',0); interval=p.get('interval',1); unit=p.get('unit')
+    if type(count) is not int or type(interval) is not int: raise ValueError('Le nombre et l’intervalle doivent être des entiers.')
+    if not 1<=count<=120 or not 1<=interval<=24 or unit not in ('week','month','year'):
+        raise ValueError('Récurrence : 1 à 120 occurrences, intervalle de 1 à 24.')
+    data=json.loads(source['data']); result=[]
+    for i in range(count):
+        if unit=='week': day=start+dt.timedelta(weeks=i*interval)
+        else:
+            month=start.year*12+start.month-1+i*interval*(12 if unit=='year' else 1)
+            year,month=divmod(month,12); month+=1
+            day=dt.date(year,month,min(start.day,calendar.monthrange(year,month)[1]))
+        # Un appel de loyer représente une seule échéance, pas toute la série.
+        d={k:v for k,v in data.items() if k not in ('call_id','recurrence_group','import_batch','source_document')}
+        d['date']=day.isoformat();result.append(d)
+    return source['sci'],result
+
+
+def save_entry_batch(c, sci_id, records, key):
+    if not isinstance(records,list) or not 1<=len(records)<=1000: raise ValueError('Choisissez de 1 à 1 000 mouvements.')
+    if not c.execute('SELECT 1 FROM scis WHERE id=?',(sci_id,)).fetchone(): raise ValueError('SCI introuvable.')
+    if not isinstance(key,str) or not 8<=len(key)<=200: raise ValueError('Identifiant de confirmation invalide.')
+    marker='entry-batch:'+hashlib.sha256((sci_id+':'+key).encode()).hexdigest()
+    previous=c.execute('SELECT value FROM meta WHERE key=?',(marker,)).fetchone()
+    if previous: return {**json.loads(previous[0]),'already_saved':True}
+    c.execute('SAVEPOINT entry_batch')
+    try:
+        ids=[]
+        for item in records:
+            if not isinstance(item,dict): raise ValueError('Mouvement invalide.')
+            if item.get('direction') not in ('Recette','Dépense'): raise ValueError('Précisez le sens de chaque mouvement.')
+            if not str(item.get('category') or '').strip(): raise ValueError('Précisez la catégorie de chaque mouvement.')
+            try: amount=float(item.get('amount'))
+            except (TypeError,ValueError): raise ValueError('Précisez le montant de chaque mouvement.')
+            if not math.isfinite(amount) or amount<=0: raise ValueError('Le montant doit être strictement positif.')
+            ids.append(save_record(c,{'kind':'entries','sci':sci_id,'data':{**item,'import_batch':key}}))
+        result={'ok':True,'count':len(ids),'ids':ids}
+        c.execute('INSERT INTO meta(key,value) VALUES(?,?)',(marker,json.dumps(result)))
+        c.execute('RELEASE entry_batch')
+        return result
+    except Exception:
+        c.execute('ROLLBACK TO entry_batch');c.execute('RELEASE entry_batch');raise
+
+
+def statement_document(c, ident):
+    r=c.execute("SELECT * FROM records WHERE id=? AND kind='documents'",(ident,)).fetchone()
+    if not r: raise ValueError('Document introuvable.')
+    d=json.loads(r['data'])
+    folders=doc_folders_by_sci(c).get(r['sci'],[])
+    fid=d.get('folder_id')
+    if not any(f['id']==fid for f in folders):
+        fid={'Statuts':'f-statuts','Assemblée / rapport':'f-statuts','Bail':'f-immobilier','Fiscalité':'f-comptable','Facture':'f-comptable','Assurance':'f-assurance','Diagnostic':'f-technique'}.get(d.get('category'),'')
+    if not any(f['id']==fid and f.get('statement') for f in folders):
+        raise ValueError('Activez « Relevé de compte » dans le dossier de ce document.')
+    return r,d
+
+
+def statement_lines(text, page=1):
+    """Propositions prudentes : jamais de catégorie devinée ni de ligne ignorée en silence."""
+    output=[]; debit_col=credit_col=None
+    date_re=re.compile(r'(?<!\d)(\d{2})[/.-](\d{2})[/.-](\d{4}|\d{2})(?!\d)')
+    amount_re=re.compile(r'(?<![\w/])[-+−]?(?:\d{1,3}(?:[ \u00a0\u202f]\d{3})+|\d+)[,.]\d{2}(?!\d)')
+    for raw in text.splitlines():
+        line=raw.strip()
+        if not line: continue
+        normalized=_x_norm(line)
+        if 'debit' in normalized and 'credit' in normalized:
+            import unicodedata
+            aligned=''.join(ch for ch in unicodedata.normalize('NFKD',raw.lower()) if not unicodedata.combining(ch))
+            debit_col=aligned.find('debit');credit_col=aligned.find('credit')
+        dates=list(date_re.finditer(raw))
+        amounts=[m for m in amount_re.finditer(raw) if not any(m.start()<d.end() and m.end()>d.start() for d in dates)]
+        if not dates and not amounts:
+            output.append({'source':line,'page':page,'context':True});continue
+        warnings=[]; day=''; amount=''; direction=''
+        if dates:
+            if len(dates)>1: warnings.append('Plusieurs dates : vérifier la date d’opération, distincte de la date de valeur.')
+            dd,mm,yyyy=dates[0].groups()
+            if len(yyyy)==2: warnings.append('Année à deux chiffres : compléter la date.')
+            else:
+                try: day=dt.date(int(yyyy),int(mm),int(dd)).isoformat()
+                except ValueError: warnings.append('Date invalide.')
+        if len(amounts)==1:
+            token=amounts[0].group().replace('−','-').replace(',','.')
+            amount=abs(float(re.sub(r'\s','',token)))
+            if token.startswith('-'): direction='Dépense'
+            elif token.startswith('+'): direction='Recette'
+            # Les colonnes ne sont utilisées que si leur position est nette.
+            elif debit_col is not None and credit_col is not None:
+                pos=amounts[0].start(); distances=[abs(pos-debit_col),abs(pos-credit_col)]
+                if abs(distances[0]-distances[1])>=5:
+                    direction='Dépense' if distances[0]<distances[1] else 'Recette'
+                    warnings.append('Sens proposé selon la position dans les colonnes débit/crédit : à vérifier.')
+        elif amounts: warnings.append('Plusieurs montants : identifier le montant du mouvement.')
+        label=line
+        for match in reversed(list(date_re.finditer(label))): label=label[:match.start()]+label[match.end():]
+        label=amount_re.sub('',label).strip(' ;|\t')
+        if re.search(r'\b(solde|total|totaux|report|cumul)\b',normalized):
+            warnings.append('Solde ou total possible : ne pas importer comme mouvement sans vérification.')
+        if not day: warnings.append('Date à renseigner.')
+        if not amount: warnings.append('Montant à renseigner.')
+        if not direction: warnings.append('Débit ou crédit à préciser.')
+        warnings.append('Catégorie à choisir ; libellé à vérifier avec le relevé.')
+        output.append({'date':day,'label':label,'amount':amount,'direction':direction,'category':'',
+                       'source':line,'page':page,'warnings':warnings,'context':False})
+    return output
+
+
+def statement_preview(c,p):
+    r,d=statement_document(c,p.get('id'));raw=base64.b64decode(d.get('blob') or '')
+    pages=p.get('pages'); warnings=[]; texts=[]
+    if not isinstance(pages,list) or not pages or len(pages)>100 or any(type(i) is not int or i<1 for i in pages):
+        raise ValueError('Sélectionnez entre 1 et 100 pages.')
+    if raw.startswith(b'%PDF'):
+        try: from pypdf import PdfReader
+        except ImportError: raise ValueError('Lecture PDF indisponible. Relancez le lanceur Dominis pour installer pypdf, ou utilisez un export texte/CSV du relevé.')
+        if len(raw)>30*1024*1024: raise ValueError('Pour l’analyse, utilisez un PDF de moins de 30 Mo.')
+        reader=PdfReader(io.BytesIO(raw))
+        if reader.is_encrypted: raise ValueError('PDF protégé : utilisez une copie déverrouillée.')
+        for number in sorted(set(pages)):
+            if number>len(reader.pages): raise ValueError('Page inexistante.')
+            pdf_page=reader.pages[number-1]
+            content=pdf_page.get_contents()
+            if content and len(content.get_data())>15*1024*1024: raise ValueError('Page PDF trop complexe : utilisez un export texte du relevé.')
+            text=pdf_page.extract_text(extraction_mode='layout') or ''
+            if len(text)>500000: raise ValueError('Page trop volumineuse pour l’analyse.')
+            texts.append((number,text))
+            if not text.strip(): warnings.append('Page %d : aucun texte lisible (scan/image). Aucun OCR automatique : saisissez ou copiez les informations manuellement.'%number)
+    elif Path(d.get('filename','')).suffix.lower() in ('.txt','.csv'):
+        if pages!=[1]: raise ValueError('Ce document contient une seule page de texte.')
+        try: text=raw.decode('utf-8-sig')
+        except UnicodeDecodeError: text=raw.decode('cp1252',errors='replace')
+        texts=[(1,text)]
+    else:
+        warnings.append('Ce format ne permet pas une lecture textuelle fiable. Consultez le document et saisissez les mouvements manuellement.')
+    lines=[]
+    for number,text in texts: lines.extend(statement_lines(text,number))
+    if len(lines)>2000: raise ValueError('Trop de lignes : sélectionnez moins de pages.')
+    return {'lines':lines,'warnings':warnings,'pages':pages,'source_document':r['id'],
+            'fingerprint':hashlib.sha256(raw+json.dumps(sorted(set(pages))).encode()).hexdigest()}
+
+
 def build_document_preview(r):
     d=json.loads(r['data'])
     meta={'id':r['id'],'sci':r['sci'],'name':d.get('name',''),'category':d.get('category','Autre'),'date':d.get('date',''),'notes':d.get('notes',''),'filename':d.get('filename',''),'mime':d.get('mime',''),'size':d.get('size',0),'folder_id':d.get('folder_id','')}
@@ -9641,6 +9788,23 @@ class Handler(BaseHTTPRequestHandler):
                         ident=save_record(c,{'kind':'documents','sci':sci_id,'data':data})
                         c.commit()
                         return self.reply({'ok':True,'id':ident,'filename':filename,'size':len(raw),'pages':pages})
+                    if path=='/api/recurrence':
+                        sid,items=recurrence_preview(c,p)
+                        if not p.get('confirm'): return self.reply({'records':items,'sci':sid})
+                        group=str(p.get('key') or '')
+                        result=save_entry_batch(c,sid,[{**d,'recurrence_group':group} for d in items],group)
+                        c.commit();return self.reply(result)
+                    if path=='/api/statement-preview': return self.reply(statement_preview(c,p))
+                    if path=='/api/statement-import':
+                        statement_document(c,p.get('id'))
+                        if p.get('destination')!='entries': raise ValueError('Destination non prise en charge : choisissez Trésorerie.')
+                        if p.get('confirmed') is not True: raise ValueError('Vérifiez puis confirmez les mouvements.')
+                        items=p.get('records',[])
+                        if not isinstance(items,list) or any(not isinstance(d,dict) for d in items): raise ValueError('Liste de mouvements invalide.')
+                        allowed=('date','label','amount','direction','category','notes','property_id')
+                        items=[{**{k:d[k] for k in allowed if k in d},'source_document':p.get('id')} for d in items if isinstance(d,dict)]
+                        result=save_entry_batch(c,str(p.get('sci') or ''),items,p.get('key'))
+                        c.commit();return self.reply(result)
                     if path=='/api/save':
                         ident=save_record(c,p); c.commit(); return self.reply({'ok':True,'id':ident})
                     if path=='/api/settings':
@@ -9649,6 +9813,9 @@ class Handler(BaseHTTPRequestHandler):
                             if k in DEFAULTS or k=='demo': st[k]=v
                         if st['theme'] not in ['dark','light']: raise ValueError('Thème invalide.')
                         if not isinstance(st.get('table_columns',{}),dict): raise ValueError('Configuration des colonnes invalide.')
+                        if not isinstance(st.get('table_widths',{}),dict): raise ValueError('Largeurs invalides.')
+                        mt=st.get('multitask',{})
+                        if not isinstance(mt,dict) or any(type(v) is not bool for v in mt.values()): raise ValueError('Préférences multitâche invalides.')
                         if not isinstance(st.get('table_view',{}),dict): raise ValueError('Réglages de tableau invalides.')
                         if not isinstance(st.get('doc_folders',[]),list): raise ValueError('Configuration des dossiers invalide.')
                         if 'year' in p: st['year']=normalize_year_setting(p['year'])
@@ -9861,6 +10028,13 @@ th.col-settings-th{padding:6px 14px;width:44px;text-align:right;vertical-align:m
 .task-param-row>div{flex:1 1 auto;min-width:0}.task-param-row+.task-param-row{border-top:1px solid var(--line);padding-top:12px}.task-param-row h4{margin:0;font-size:12px;font-weight:600;color:var(--text)}.task-param-row p{margin:3px 0 0;font-size:11px;color:var(--muted)}.task-reminders-area{border-top:1px solid var(--line);padding-top:12px;display:flex;flex-direction:column;gap:12px}.task-reminders-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(175px,1fr));gap:12px}.mac-notif-container{position:fixed;top:16px;right:18px;z-index:200;display:flex;flex-direction:column;gap:10px;pointer-events:none;max-width:calc(100vw - 32px)}.mac-notif{pointer-events:auto;width:376px;max-width:100%;background:rgba(30,34,30,.9);backdrop-filter:blur(24px) saturate(180%);-webkit-backdrop-filter:blur(24px) saturate(180%);border:1px solid rgba(255,255,255,.15);border-radius:16px;padding:13px 15px;box-shadow:0 20px 48px rgba(0,0,0,.52),0 3px 10px rgba(0,0,0,.25);color:var(--text);position:relative;animation:macNotifIn .45s cubic-bezier(.22,1,.36,1);transform-origin:top right}:root[data-theme=light] .mac-notif{background:rgba(252,251,247,.92);border-color:rgba(37,44,37,.13);box-shadow:0 18px 42px rgba(37,44,37,.18),0 3px 10px rgba(37,44,37,.08)}.mac-notif.closing{animation:macNotifOut .32s cubic-bezier(.4,0,1,1) forwards;pointer-events:none}@keyframes macNotifIn{0%{opacity:0;transform:translateX(calc(100% + 28px)) scale(.95)}70%{opacity:1;transform:translateX(-4px) scale(1.005)}100%{opacity:1;transform:translateX(0) scale(1)}}@keyframes macNotifOut{0%{opacity:1;transform:translateX(0) scale(1)}100%{opacity:0;transform:translateX(calc(100% + 28px)) scale(.95)}}.mac-notif-main{display:flex;align-items:flex-start;gap:12px}.mac-notif-icon{width:38px;height:38px;border-radius:9px;object-fit:contain;background:#000;flex:none;box-shadow:0 2px 6px rgba(0,0,0,.3)}.mac-notif-body{flex:1;min-width:0}.mac-notif-top{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:10px;color:var(--muted);letter-spacing:.5px;text-transform:uppercase;font-weight:600}.mac-notif-title{font-size:13px;font-weight:600;color:var(--text);margin-top:2px;line-height:1.3;overflow:hidden;text-overflow:ellipsis}.mac-notif-sub{font-size:11px;color:var(--muted);margin-top:2px;line-height:1.35}.mac-notif-actions{display:flex;justify-content:flex-end;gap:7px;margin-top:10px;padding-top:9px;border-top:1px solid rgba(146,152,141,.18)}.mac-notif-btn{padding:5px 11px;font-size:11px;border-radius:6px}.mac-notif-x{position:absolute;top:-6px;left:-6px;width:21px;height:21px;padding:3px;border-radius:50%;background:var(--panel2);border:1px solid var(--line);color:var(--muted);box-shadow:0 2px 6px rgba(0,0,0,.25);opacity:0;transition:opacity .15s}.mac-notif:hover .mac-notif-x,.mac-notif:focus-within .mac-notif-x{opacity:1}.mac-notif-x svg{width:11px;height:11px}
 @media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 @media print{#sidebar,header,.toolbar,.tabs,.footer,button,.demo-notice,.mac-notif-container{display:none!important}#shell{margin:0!important}body{background:white;color:black}main{padding:10px}.panel,.kpi,.sci-card{break-inside:avoid;background:white;border-color:#ccc}.chart svg text{fill:#555}}
+
+/* Les dates restent lisibles ; les tableaux défilent horizontalement au besoin. */
+.date-cell,td[data-column="date"],td[data-column="due"],td[data-column="end"]{white-space:nowrap!important;word-break:normal!important;overflow-wrap:normal!important}
+tr[data-movement-open]{cursor:pointer}tr[data-movement-open]:focus{outline:2px solid var(--gold);outline-offset:-2px}
+th{position:relative}.column-resize{position:absolute;right:0;top:0;bottom:0;width:9px;cursor:col-resize;touch-action:none;z-index:4;opacity:0;border-right:2px solid var(--gold)}th:hover>.column-resize,.column-resize:focus{opacity:1}
+.modal-head.movable{cursor:move;touch-action:none}.modal-footer{flex-wrap:wrap}.modal-head.movable h2{user-select:none}
+#statement-review{min-width:1050px}#statement-review input[data-field="label"]{min-width:180px}#statement-review input[data-field="date"]{min-width:130px}#statement-review input[data-field="amount"]{min-width:100px}
 </style></head><body><aside id="sidebar"></aside><div id="shell"><header id="header"></header><main id="main"><div class="loading">Ouverture de votre espace patrimonial…</div></main></div><div id="modal"></div><div class="mac-notif-container" id="mac-notifications" aria-live="assertive"></div><div class="toast-container" id="toasts" role="status" aria-live="polite"></div>
 <script>
 'use strict';
@@ -10074,7 +10248,7 @@ function tableScopeKey(){
     if(S.scis.some(s=>s.id===page))return 'sci:'+page;
     return 'page:'+page;
 }
-function tableKey(kind){return kind==='entries_preview'?'dashboard:entries_preview':tableScopeKey()+':'+kind;}
+function tableKey(kind){return tableScopeKey()+':'+kind;}
 function tableScopeLabel(key){
     let k=String(key||'');
     if(k==='dashboard:entries_preview')return 'Tableau de bord';
@@ -10143,6 +10317,7 @@ function renderTableViewOptions(key){
         <div class="tv-density"><div><h3>Densité</h3><p>Le mode compact réduit les marges et la taille du texte sans masquer d’information.</p></div><div class="tv-seg" role="group" aria-label="Densité du tableau">${densities.map(([id,label,title])=>`<button type="button" class="${v.density===id?'active':''}" data-table-density="${id}" data-table-kind="${key}" title="${esc(title)}" aria-pressed="${v.density===id}">${label}</button>`).join('')}</div></div>
         ${toggle('fit','Ajuster à la largeur','Le tableau occupe toute la largeur disponible et les libellés passent à la ligne au lieu de créer un défilement horizontal.')}
         ${toggle('sticky','En-tête fixe','Les titres de colonnes restent visibles pendant le défilement.')}
+        <div class="setting-row"><div><h3>Largeurs des colonnes</h3><p>Les largeurs réglées à la souris sont prioritaires sur l’ajustement automatique, uniquement pour ce tableau.</p></div><button data-width-reset="${esc(key)}">Réinitialiser les largeurs</button></div>
         ${hasTotals?toggle('totals','Ligne de totaux',totalsHelp):''}
         ${isEntries?toggle('charts','Panneau graphique','Ajoute deux graphiques à droite du tableau. Sur un écran étroit, ils passent sous le tableau pour ne jamais réduire la largeur utile. Sinon, la vue d’ensemble contient déjà les graphiques. '):''}
     </div>`;
@@ -10608,7 +10783,7 @@ async function documentPreview(id,opts={}){
     // l'assemblage complet, pages ajoutées comprises.
     let isPdf=(r.mime==='application/pdf')||/\.pdf$/i.test(r.filename||'');
     let pdfActions=isPdf?`<button type="button" data-doc-append-btn title="Importer un PDF ou une image à la suite de ce document">${icon('plus')} Ajouter au document</button><button type="button" data-doc-arrange title="Réordonner ou supprimer des pages">${icon('grid')} Modifier la disposition</button>`:'';
-    let footer=`<select id="doc-preview-folder" style="width:auto;min-width:190px;margin-right:auto" aria-label="Dossier de classement du document">${folderOptions}</select>${pdfActions}<button type="button" data-action="close-modal">Fermer</button>${r.size?`<button type="button" class="primary" data-document="${esc(r.id)}">${icon('download')} Télécharger</button>`:''}`;
+    let footer=`${statementButton(r)}<select id="doc-preview-folder" style="width:auto;min-width:190px;margin-right:auto" aria-label="Dossier de classement du document">${folderOptions}</select>${pdfActions}<button type="button" data-action="close-modal">Fermer</button>${r.size?`<button type="button" class="primary" data-document="${esc(r.id)}">${icon('download')} Télécharger</button>`:''}`;
     openModal('Aperçu · '+r.name,`<div id="doc-preview-body"><div class="loading" style="padding:70px 20px">Chargement de l’aperçu…</div></div>`,footer,true);
     $('#modal .modal')?.classList.add('doc-preview-modal');
     try{
@@ -10828,7 +11003,7 @@ function renameDocFolderModal(id){
         let depth=folderDepth(list,f.id);
         return [f.id,'— '.repeat(Math.max(0,depth-1))+(depth>1?'↳ ':'')+f.name];
     }));
-    openModal('Modifier le dossier',`<p class="sub" style="margin-bottom:15px">Renommez ce dossier, changez sa place ou supprimez-le. La modification ne concerne que la société indiquée ; les documents classés sont toujours conservés.</p>${docFolderSciField()}${field('folder-name','Nom du dossier','text',folder.name,null,true,true)}${field('folder-parent','Dossier parent','select',folderParentId(folder),parentOptions)}<div class="row gap8" style="margin-top:14px"><button type="button" id="folder-add-child">${icon('plus')} Créer un sous-dossier</button></div><div id="folder-order-box" class="folder-order-box"></div>`,`<button data-action="close-modal">Annuler</button><button class="danger" id="manage-folder-delete">${icon('trash')} Supprimer le dossier</button><button class="primary" id="rename-folder">${icon('check')} Enregistrer</button>`);
+    openModal('Modifier le dossier',`<p class="sub" style="margin-bottom:15px">Renommez ce dossier, changez sa place ou supprimez-le. La modification ne concerne que la société indiquée ; les documents classés sont toujours conservés.</p>${docFolderSciField()}${field('folder-name','Nom du dossier','text',folder.name,null,true,true)}${field('folder-parent','Dossier parent','select',folderParentId(folder),parentOptions)}<label class="check"><input type="checkbox" id="folder-statement" ${folder.statement?'checked':''}>Relevé de compte</label><div class="row gap8" style="margin-top:14px"><button type="button" id="folder-add-child">${icon('plus')} Créer un sous-dossier</button></div><div id="folder-order-box" class="folder-order-box"></div>`,`<button data-action="close-modal">Annuler</button><button class="danger" id="manage-folder-delete">${icon('trash')} Supprimer le dossier</button><button class="primary" id="rename-folder">${icon('check')} Enregistrer</button>`);
     const drawOrder=()=>{
         let box=$('#folder-order-box');
         if(!box)return;
@@ -10853,7 +11028,7 @@ function renameDocFolderModal(id){
         })).map(([v,t])=>`<option value="${esc(v)}" ${v===value?'selected':''}>${esc(t)}</option>`).join('');
     };
     drawOrder();
-    $('#f-folder-sci')?.addEventListener('change',()=>{drawOrder();drawParents();});
+    $('#f-folder-sci')?.addEventListener('change',()=>{drawOrder();drawParents();$('#folder-statement').checked=!!sciDocFolders(docFolderSciTarget()).find(f=>f.id===id)?.statement;});
     $('#folder-add-child')?.addEventListener('click',()=>newDocFolderModal(id));
     $('#rename-folder').onclick=async()=>{
         try{
@@ -10870,7 +11045,7 @@ function renameDocFolderModal(id){
             if(wanted!==oldParent){
                 await setDocFolderParent(target,id,wanted);
             }
-            let updated=sciDocFolders(target).map(f=>f.id===id?{...f,name}:f);
+            let updated=sciDocFolders(target).map(f=>f.id===id?{...f,name,statement:$('#folder-statement').checked}:f);
             await saveDocFolders(target,updated);
             closeModal(true);
             notify('Dossier enregistré dans '+sciname(target)+'.');
@@ -10935,7 +11110,7 @@ return `<div class="panel"><div class="panel-head"><div><h2>Les flux de votre pa
 function donut(id){let list=id?rows('properties',id).map((r,i)=>({name:r.name,value:Number(r.value||0),color:palette[i%6]})):S.scis.map((s,i)=>({name:s.name,value:metrics(s.id).value,color:color(s.color||palette[i%6])}));let total=list.reduce((a,r)=>a+r.value,0),offset=0;let bg=total?list.map(r=>{let start=offset;offset+=r.value/total*100;return `${r.color} ${start}% ${offset}%`}).join(','):'var(--line) 0% 100%';return `<div class="panel"><div class="panel-head"><div><h2>Répartition du patrimoine</h2><p>${id?'Par bien immobilier':'Par société civile immobilière'}</p></div>${icon('building')}</div><div class="donut-wrap"><div class="donut" style="background:conic-gradient(${bg})"><div class="donut-label"><b>${total>=1000000?num(total/1000000)+' M€':total>=1000?num(total/1000)+' k€':money(total)}</b><small>Valeur totale estimée</small></div></div><div class="donut-legend">${list.slice(0,4).map(r=>`<div><span class="color-dot" style="background:${r.color}"></span>${esc(r.name)}<div class="amount">${total?num(r.value/total*100):0} %</div></div>`).join('')||'<span>Aucun bien renseigné</span>'}${list.length>4?`<div class="muted">+ ${list.length-4} autres biens / SCI</div>`:''}</div></div></div>`;}
 function sciCards(){return `<div class="section-title"><h2>Vos sociétés <small>${S.scis.length} SCI dans votre portefeuille</small></h2><button class="text-link row" data-action="new-sci">${icon('plus')} Ajouter une SCI</button></div><div class="sci-grid">${S.scis.map((s,i)=>{let m=metrics(s.id);return `<article class="sci-card" data-nav="${s.id}" tabindex="0" role="button" aria-label="Ouvrir ${esc(s.name)}"><div class="row between"><div class="row"><div class="building-icon" style="color:${sciColor(s.id)}">${icon('building')}</div><div><h3>${esc(s.name)}</h3><div class="location">${esc(s.city||s.address||'Adresse à renseigner')}</div></div></div><span class="pill">${esc(s.regime||'IR')}</span></div><div class="sci-stats"><div><label>Patrimoine estimé</label><strong>${money(m.value)}</strong></div><div><label>Trésorerie actuelle</label><strong class="${m.cash<0?'red':''}">${money(m.cash)}</strong></div></div><div class="mini-bar">${Array.from({length:m.properties||1},(_,j)=>`<i style="background:${j<m.occupied?sciColor(s.id):'var(--line)'}"></i>`).join('')}</div><div class="sci-card-bottom"><span>${m.properties} biens <span style="margin:0 5px">·</span> ${rows('leases',s.id).filter(r=>r.status==='Actif').length} baux actifs</span><span class="row gap8 ${m.overdue?'gold':'green'}">${m.overdue?'Loyers à suivre':'Voir la société'} ${icon('arrow')}</span></div></article>`}).join('')}</div>`;}
 function tasksPreview(id){let list=rows('tasks',id).filter(r=>r.status!=='Terminé').sort((a,b)=>a.due.localeCompare(b.due)).slice(0,4);return `<div class="panel"><div class="panel-head" style="padding-bottom:15px"><h2>Prochaines échéances</h2><button class="text-link" data-nav="${id||'agenda'}" ${id?'data-tab="tasks"':''}>Tout voir ↗</button></div>${list.map(r=>{let d=new Date(r.due+'T12:00:00');return `<div class="task-line"><div class="task-date">${d.getDate()}<small>${d.toLocaleDateString('fr-FR',{month:'short'})}</small></div><div><h3>${esc(r.name)}${r.important?' <span class="pill red" style="margin-left:5px">Important</span>':''}</h3><p>${esc(sciname(r.sci))} · ${esc(r.category||'Général')}</p></div><button class="ghost icon-only task-right" data-edit="${r.id}" title="Consulter l’échéance">${icon('chevron')}</button></div>`}).join('')||empty('Tout est à jour','Aucune échéance à venir.')}</div>`;}
-function entriesPreview(id){let list=rows('entries',id).filter(yr).sort((a,b)=>b.date.localeCompare(a.date)).slice(0,4);let tkey=tableKey('entries_preview'),v=tableView(tkey);let cols=getTableColumns(tkey).filter(c=>c.visible);let gear=`<th class="align-right col-settings-th"><button type="button" class="ghost icon-only table-gear-btn" data-table-config="${tkey}" title="Réglages du tableau" aria-label="Réglages du tableau">${icon('settings')}</button></th>`;return `<div class="panel"><div class="panel-head" style="padding-bottom:17px"><h2>Dernières opérations</h2><button class="text-link" data-nav="${id||'treasury'}" ${id?'data-tab="entries"':''}>Tout voir ↗</button></div><div class="table-wrap ${tableWrapClass(v)}"><table data-sort-key="dashboard:entries_preview"><thead><tr>${cols.map(c=>`<th ${c.id==='amount'?'class="align-right"':''}>${esc(c.label)}</th>`).join('')}${gear}</tr></thead><tbody>${list.map(r=>{let cells={label:`<strong>${esc(r.label)}</strong><span class="cell-sub">${esc(sciname(r.sci))}</span>`,date:`<span class="muted">${date(r.date)}</span>`,amount:`<span class="${r.direction==='Recette'?'green':'red'}">${r.direction==='Recette'?'+':'−'} ${money(r.amount,2)}</span>`};return `<tr>${cols.map(c=>`<td ${c.id==='amount'?'class="align-right"':''}>${cells[c.id]}</td>`).join('')}<td class="align-right"><div class="actions"><button data-edit="${r.id}" title="Modifier" aria-label="Modifier ${esc(label(r))}">${icon('edit')}</button></div></td></tr>`;}).join('')}</tbody></table>${!list.length?empty('Aucune opération','Enregistrez votre premier mouvement.') :''}</div></div>`;}
+function entriesPreview(id){let list=rows('entries',id).filter(yr).sort((a,b)=>b.date.localeCompare(a.date)).slice(0,4);let tkey=tableKey('entries_preview'),v=tableView(tkey);let cols=getTableColumns(tkey).filter(c=>c.visible);let gear=`<th class="align-right col-settings-th"><button type="button" class="ghost icon-only table-gear-btn" data-table-config="${tkey}" title="Réglages du tableau" aria-label="Réglages du tableau">${icon('settings')}</button></th>`;return `<div class="panel"><div class="panel-head" style="padding-bottom:17px"><h2>Dernières opérations</h2><button class="text-link" data-nav="${id||'treasury'}" ${id?'data-tab="entries"':''}>Tout voir ↗</button></div><div class="table-wrap ${tableWrapClass(v)}"><table data-sort-key="${esc(tkey)}"><thead><tr>${cols.map(c=>`<th ${c.id==='amount'?'class="align-right"':''}>${esc(c.label)}</th>`).join('')}${gear}</tr></thead><tbody>${list.map(r=>{let cells={label:`<strong>${esc(r.label)}</strong><span class="cell-sub">${esc(sciname(r.sci))}</span>`,date:`<span class="muted">${date(r.date)}</span>`,amount:`<span class="${r.direction==='Recette'?'green':'red'}">${r.direction==='Recette'?'+':'−'} ${money(r.amount,2)}</span>`};return `<tr data-movement-open="${esc(r.id)}" tabindex="0" title="Voir le mouvement">${cols.map(c=>`<td ${c.id==='amount'?'class="align-right"':''}>${cells[c.id]}</td>`).join('')}<td class="align-right"><div class="actions"><button data-edit="${r.id}" title="Modifier" aria-label="Modifier ${esc(label(r))}">${icon('edit')}</button></div></td></tr>`;}).join('')}</tbody></table>${!list.length?empty('Aucune opération','Enregistrez votre premier mouvement.') :''}</div></div>`;}
 function dashboard(id){let m=metrics(id);return `${S.settings.demo&&!id?`<div class="demo-notice"><span>ESPACE DE DÉMONSTRATION <span style="opacity:.6;margin:0 9px">/</span> Données fictives pour explorer Dominis en toute liberté.</span><button data-nav="settings">Gérer les données</button></div>`:''}${kpis(id)}<div class="charts-grid">${chart(id)}${donut(id)}</div>${!id?sciCards():`<div class="notice row between"><div>${m.overdue?`<span class="gold">${money(m.overdue,2)} de loyers échus restent à encaisser.</span>`:'Aucun solde de loyer échu à ce jour.'} <span style="margin-left:10px">Dette renseignée : ${money(m.debt)}.</span></div><button class="text-link" data-tab="calls">Consulter les loyers →</button></div>`}<div class="lower-grid">${entriesPreview(id)}${tasksPreview(id)}</div>${attention(id)}`;}
 
 function attention(id){let alerts=[],limit=new Date();limit.setDate(limit.getDate()+60);let until=limit.toISOString().slice(0,10);S.scis.filter(s=>!id||s.id===id).forEach(s=>{let m=metrics(s.id);if(m.overdue)alerts.push({sci:s.id,tab:'calls',title:money(m.overdue,2)+' de loyers échus à encaisser',detail:s.name+' · Consulter les appels et les paiements',icon:'wallet'});if(s.regime==='IR'&&rows('leases',s.id).some(l=>l.type==='Habitation meublée'&&l.status==='Actif'))alerts.push({sci:s.id,tab:'identity',title:'Location meublée : régime fiscal à examiner',detail:s.name+' · Vérifier les conséquences avec votre conseil fiscal',icon:'info'});});rows('properties',id).forEach(r=>{if(['F','G'].includes(r.dpe)||r.dpe_date&&r.dpe_date<today())alerts.push({sci:r.sci,tab:'properties',title:'Diagnostic à vérifier · '+r.name,detail:'DPE '+(r.dpe||'non renseigné')+' · Vérifier validité, décence et éventuels travaux',icon:'home'});});rows('leases',id).filter(r=>r.status==='Actif'&&r.end&&r.end<=until).forEach(r=>alerts.push({sci:r.sci,tab:'leases',title:'Fin de bail à examiner · '+r.tenant,detail:date(r.end)+' · Anticiper la suite selon les règles du bail',icon:'calendar'}));rows('tasks',id).filter(r=>r.status!=='Terminé'&&r.due<today()).forEach(r=>alerts.push({sci:r.sci,tab:'tasks',title:'Échéance dépassée · '+r.name,detail:sciname(r.sci)+' · Prévue le '+date(r.due),icon:'clock'}));if(!alerts.length)return '';return `<div class="panel" style="margin-top:23px"><div class="panel-head" style="padding-bottom:14px"><h2>Points d’attention <small class="gold" style="margin-left:8px">${alerts.length}</small></h2><span class="sub">À partir des données renseignées</span></div>${alerts.slice(0,6).map(a=>`<div class="task-line"><span class="gold">${icon(a.icon)}</span><div><h3>${esc(a.title)}</h3><p>${esc(a.detail)}</p></div><button class="ghost icon-only task-right" data-nav="${a.sci}" data-tab="${a.tab}" title="Examiner">${icon('arrow')}</button></div>`).join('')}${alerts.length>6?'<div class="panel-body sub">Les six premiers points sont affichés. Consultez aussi les échéances de chaque SCI.</div>':''}</div>`;}
@@ -11137,7 +11312,7 @@ function normalizeDocFolders(list){
         let id=String(f.id||'').trim().slice(0,60), name=String(f.name||'').trim().slice(0,80);
         if(!id||!name||out.some(x=>x.id===id))return;
         let item={id,name};
-        if(f.builtin)item.builtin=true;
+        if(f.builtin)item.builtin=true;if(f.statement===true)item.statement=true;
         let parent=String(f.parent_id||'').trim().slice(0,60);
         if(parent&&parent!==id)item.parent_id=parent;
         out.push(item);
@@ -11506,7 +11681,7 @@ let gearTh=`<th class="align-right col-settings-th"><button type="button" class=
 let numberCol=c=>['amount','credit','debit','solde'].includes(c.id);
 let thClass=c=>[c.id==='society'?'col-society':'',numberCol(c)?'align-right':''].filter(Boolean).join(' ');
 let colTh=c=>`<th data-sort-column="${esc(c.id)}"${thClass(c)?` class="${thClass(c)}"`:''}>${esc(c.label)}</th>`;
-let colTd=(c,val)=>`<td${thClass(c)?` class="${thClass(c)}"`:''}>${val}</td>`;
+let colTd=(c,val)=>`<td data-column="${esc(c.id)}"${thClass(c)?` class="${thClass(c)}"`:''}>${val}</td>`;
 let wrapCls=`panel table-wrap ${tableWrapClass(v)}`;
 if(!list.length)return `${kind==='documents'?docFolderBar():''}<div class="${wrapCls}"><table data-sort-key="${esc(tkey)}"><thead><tr>${cols.map(colTh).join('')}${gearTh}</tr></thead></table>${empty('Aucun élément à afficher',query||filter||scope||(kind==='documents'&&docYear)?'Essayez un autre filtre.':'Ajoutez vos premières données pour compléter cet espace.',!query&&!filter?addBtn(kind,'Ajouter un élément'):'')}</div>`;
 let totalShares=kind==='partners'?rows('partners',id).reduce((s,r)=>s+Number(r.shares||0),0):0;
@@ -11538,8 +11713,8 @@ let rowParts=list.map(r=>{
     else if(kind==='partners'){cellMap={name:esc(r.name)+`<span class="cell-sub">${esc(r.email)}</span>`,role:esc(r.role),shares:num(r.shares),participation:totalShares?num(r.shares/totalShares*100)+' %':'—',cca:`<span class="${Number(r.cca)<0?'red':''}">${money(r.cca,2)}</span>`};act=actions(r);}
     else if(kind==='loans'){cellMap={name:esc(r.name)+`<span class="cell-sub">${esc(r.bank)}</span>`,principal:money(r.principal),balance:`${money(r.balance)}<span class="cell-sub">Situation au ${date(r.balance_date)}</span>`,rate:`${num(r.rate)} %<span class="cell-sub">${money(r.monthly,2)} / mois</span>`,end:date(r.end)};act=actions(r);}
     else if(kind==='tasks'){let remDates=r.reminders_enabled&&Array.isArray(r.reminders)?r.reminders:[];cellMap={name:`<strong>${esc(r.name)}</strong>${r.important?' <span class="pill red" style="margin-left:6px">Important</span>':''}${remDates.length?`<span class="cell-sub">${remDates.length} rappel${remDates.length>1?'s':''} · ${remDates.map(date).join(', ')}</span>`:''}`,sci:esc(sciname(r.sci)),due:`<span class="${r.due<today()&&r.status!=='Terminé'?'red':''}">${date(r.due)}</span>`,category:esc(r.category),status:badge(r.status)};act=actions(r,r.status!=='Terminé'?`<button data-complete="${r.id}" title="Marquer comme terminé">${icon('check')}</button>`:'');}
-    else if(kind==='documents'){let folder=resolveDocFolder(r);cellMap={name:`${icon('file')} <span style="vertical-align:super;margin-left:6px">${esc(r.name)}</span>`,sci:esc(sciname(r.sci)),category:esc(r.category),folder:folder?`<span class="pill" title="${esc(docFolderPath(folder,r.sci))}">${icon('folder')} ${esc(docFolderPath(folder,r.sci))}</span>`:'<span class="muted">Sans dossier</span>',date:date(r.date),file:r.size?num(r.size/1024)+' Ko':'Note seule'};act=`<div class="actions"><button data-document-preview="${r.id}" title="Ouvrir l’aperçu" aria-label="Ouvrir l’aperçu de ${esc(r.name)}">${icon('search')}</button>${r.size?`<button data-document="${r.id}" title="Télécharger le document" aria-label="Télécharger ${esc(r.name)}">${icon('download')}</button>`:''}<button data-edit="${r.id}" title="Modifier" aria-label="Modifier ${esc(r.name)}">${icon('edit')}</button><button data-delete="${r.id}" title="Supprimer" aria-label="Supprimer ${esc(r.name)}">${icon('trash')}</button></div>`;}
-    return `<tr${kind==='entries'?` data-month="${esc((entryDate(r)||'').slice(0,7))}"`:''}${kind==='documents'?` class="doc-row" data-doc-open="${r.id}" title="Ouvrir l’aperçu de ${esc(r.name)}"`:''}>${cols.map(c=>colTd(c,cellMap[c.id]??'')).join('')}<td>${act}</td></tr>`;
+    else if(kind==='documents'){let folder=resolveDocFolder(r);cellMap={name:`${icon('file')} <span style="vertical-align:super;margin-left:6px">${esc(r.name)}</span>`,sci:esc(sciname(r.sci)),category:esc(r.category),folder:folder?`<span class="pill" title="${esc(docFolderPath(folder,r.sci))}">${icon('folder')} ${esc(docFolderPath(folder,r.sci))}</span>`:'<span class="muted">Sans dossier</span>',date:date(r.date),file:r.size?num(r.size/1024)+' Ko':'Note seule'};act=`<div class="actions">${statementButton(r)}<button data-document-preview="${r.id}" title="Ouvrir l’aperçu" aria-label="Ouvrir l’aperçu de ${esc(r.name)}">${icon('search')}</button>${r.size?`<button data-document="${r.id}" title="Télécharger le document" aria-label="Télécharger ${esc(r.name)}">${icon('download')}</button>`:''}<button data-edit="${r.id}" title="Modifier" aria-label="Modifier ${esc(r.name)}">${icon('edit')}</button><button data-delete="${r.id}" title="Supprimer" aria-label="Supprimer ${esc(r.name)}">${icon('trash')}</button></div>`;}
+    return `<tr${kind==='entries'?` data-movement-open="${esc(r.id)}" tabindex="0" title="Voir le mouvement" data-month="${esc((entryDate(r)||'').slice(0,7))}"`:''}${kind==='documents'?` class="doc-row" data-doc-open="${r.id}" title="Ouvrir l’aperçu de ${esc(r.name)}"`:''}>${cols.map(c=>colTd(c,cellMap[c.id]??'')).join('')}<td>${act}</td></tr>`;
 });
 let rowsHtml=rowParts.join('');
 // Ligne de totaux en fin de mois : uniquement dans la trésorerie, uniquement
@@ -12719,7 +12894,7 @@ function declExportModal(){
 }
 
 function identity(s){let openTxt=s.opening&&Number(s.opening)!==0?money(s.opening,2)+(s.opening_date?' au '+date(s.opening_date):''):'—';return `<div class="settings-grid"><div class="panel"><div class="panel-head"><h2>Identité de la société</h2><button data-action="edit-sci">${icon('edit')} Modifier</button></div><div class="panel-body info-grid">${[['Dénomination',s.name],['SIREN',s.siren||'Non renseigné'],['Gérant',s.manager||'Non renseigné'],['Siège social',s.address||'Non renseigné'],['Capital social',money(s.capital,2)],['Régime fiscal',s.regime||'IR'],['Clôture de l’exercice',s.closing||'31/12'],['Solde d’ouverture',openTxt]].map(([k,v])=>`<div class="info-item"><label>${k}</label><span>${esc(v)}</span></div>`).join('')}<div class="info-item" style="grid-column:1/-1"><label>Notes de gestion</label><span style="white-space:pre-wrap">${esc(s.notes||'Aucune note.')}</span></div></div></div><div class="stack"><div class="panel"><div class="panel-head"><h2>Repères de gestion · ${esc(s.regime||'IR')}</h2></div><div class="panel-body stack"><p class="sub">${s.regime==='IS'?'Préparer la déclaration 2065 et ses annexes avec une comptabilité d’engagement, les immobilisations et les amortissements. Dominis ne produit pas de liasse fiscale ni de FEC.':'Préparer les informations de la déclaration 2072 selon votre situation. Les recettes et dépenses enregistrées ne déterminent pas automatiquement le résultat foncier imposable.'}</p><p class="sub">Le gérant doit rendre compte annuellement de sa gestion aux associés (article 1856 du Code civil). Les modalités de décision dépendent notamment des statuts.</p><button data-add="tasks">${icon('calendar')} Ajouter une échéance de suivi</button><button data-action="annual-report">${icon('file')} Préparer une synthèse annuelle</button><p class="sub">Les dates fiscales sont à vérifier chaque année. Aucun calendrier légal automatique n’est imposé par l’application.</p></div></div><div class="panel"><div class="panel-body"><h3 class="red">Suppression de la SCI</h3><p class="sub" style="margin:8px 0 15px">Cette action supprime la société et toutes ses données liées. Exportez une sauvegarde complète auparavant.</p><button class="danger" data-action="delete-sci">${icon('trash')} Supprimer cette SCI</button><button class="danger" data-action="manage-deletions" style="margin-top:8px">${icon('trash')} Gérer la suppression</button><p class="compact-note" style="margin-top:10px">Vider une seule page de cette SCI, sans toucher aux autres sociétés.</p></div></div></div></div>`;}
-function settingsGeneral(){return `<div class="settings-grid"><div class="stack"><section class="panel"><div class="panel-head"><h2>Apparence & préférences</h2>${icon('sun')}</div><div class="panel-body"><div class="setting-row"><div><h3>Thème de l’interface</h3><p>Le même soin, de jour comme de nuit.</p></div><div class="theme-choice"><button data-theme="dark" class="${S.settings.theme==='dark'?'active':''}">${icon('moon')} Sombre</button><button data-theme="light" class="${S.settings.theme==='light'?'active':''}">${icon('sun')} Clair</button></div></div><div class="setting-row"><div><h3>Navigation compacte</h3><p>Une barre latérale discrète, plus d’espace.</p></div><button class="toggle ${S.settings.collapsed?'on':''}" data-action="collapse" aria-label="Navigation compacte" aria-pressed="${!!S.settings.collapsed}"></button></div><div class="setting-row"><div><h3>Nom de votre espace</h3><p>Affiché dans la barre latérale.</p></div><button data-action="rename-space">${icon('edit')} Modifier</button></div><div class="setting-row"><div><h3>Sauvegarde à la fermeture</h3><p>Copie complète dans le dossier sauvegardes/.</p></div><button class="toggle ${S.settings.auto_backup?'on':''}" data-action="auto-backup" aria-label="Sauvegarde à la fermeture" aria-pressed="${!!S.settings.auto_backup}"></button></div><div class="setting-row"><div><h3>Sauvegarde hebdomadaire</h3><p>Copie de data.db au premier lancement de la semaine ; deux fichiers maximum dans auto-save/.</p></div><button class="toggle ${S.settings.weekly_auto_save?'on':''}" data-action="weekly-auto-save" aria-label="Sauvegarde hebdomadaire" aria-pressed="${!!S.settings.weekly_auto_save}"></button></div></div></section><section class="panel"><div class="panel-head"><h2>Ordre de navigation</h2>${icon('panel')}</div><div class="panel-body"><p class="sub">Déplacez les pages avec les flèches. Vos nouvelles SCI apparaissent automatiquement.</p><div class="order-item locked">${icon('grid')} Tableau de bord <span style="margin-left:auto">${icon('lock')}</span></div>${navOrder().map((id,i,a)=>`<div class="order-item">${navIcon(id)}${esc(navName(id))}<div class="actions"><button data-move="${id}" data-dir="-1" ${!i?'disabled':''} title="Monter">${icon('up')}</button><button data-move="${id}" data-dir="1" ${i===a.length-1?'disabled':''} title="Descendre">${icon('down')}</button></div></div>`).join('')}<div class="order-item locked">${icon('settings')} Paramètres <span style="margin-left:auto">${icon('lock')}</span></div><p class="compact-note">Tableau de bord reste en premier, Paramètres en dernier. Quitter est une action distincte.</p></div></section></div><div class="stack"><section class="panel"><div class="panel-head"><h2>Vos données vous appartiennent</h2>${icon('database')}</div><div class="panel-body"><div class="setting-row"><div><h3>Importer des données</h3><p>JSON Dominis, CSV ou Excel (.xlsx) de mouvements multi-SCI.<br>Aperçu et destinations avant validation.</p></div><button data-action="import">${icon('upload')} Importer</button></div><div class="setting-row"><div><h3>Exporter une sélection</h3><p>Choisissez les SCI, les données et le format.</p></div><button data-action="export">${icon('download')} Exporter</button></div><div class="setting-row"><div><h3>Sauvegarde complète</h3><p>Toutes les SCI, pièces jointes et préférences.<br>${S.settings.last_backup?'Dernière : '+new Date(S.settings.last_backup).toLocaleString('fr-FR'):'Aucune sauvegarde manuelle enregistrée.'}</p></div><button class="primary" data-action="backup">${icon('database')} Sauvegarder</button></div><div class="setting-row"><div><h3>Restaurer une sauvegarde</h3><p>Remplace l’ensemble de l’espace. Une copie<br>de sécurité est créée avant restauration.</p></div><button data-action="restore">${icon('clock')} Restaurer</button></div></div></section><section class="panel"><div class="panel-head"><h2>Stockage & confidentialité</h2>${icon('lock')}</div><div class="panel-body stack"><div class="row between"><span class="sub">Base locale</span><span class="pill green"><span class="status-dot"></span>data.db · ${num(S.db_size/1024/1024)} Mo</span></div><p class="sub">Aucune télémétrie. La gestion de vos données fonctionne hors ligne. Seule la vérification des versions contacte GitHub, sans transmettre vos données patrimoniales. Documents, réglages et historique sont stockés dans SQLite. La base n’est pas chiffrée : protégez votre session et vos sauvegardes.</p><p class="sub">Usage local, mono-utilisateur. Ne placez pas une base ouverte sur un partage réseau ou dans une synchronisation cloud.</p>${S.preview?'<div class="notice" style="margin:0">Aperçu hébergé : utilisez des données fictives uniquement. Le téléchargement et les lanceurs sont destinés à l’usage local.</div>':''}</div></section>${S.settings.demo?`<section class="panel"><div class="panel-body"><h3>Données de démonstration</h3><p class="sub" style="margin:8px 0 14px">Efface toutes les données de cet espace démo, y compris vos ajouts. Sauvegardez-les avant de repartir d’un espace vierge.</p><button class="danger" data-action="reset-demo">${icon('trash')} Vider l’espace de démonstration</button></div></section>`:''}</div><section class="panel" style="grid-column:1/-1"><div class="panel-head"><h2>Journal d’activité</h2><span class="sub">80 dernières actions</span></div><div class="panel-body audit-list">${S.audit.map(r=>`<div class="audit-line"><time>${esc(new Date(r.at).toLocaleString('fr-FR'))}</time><strong style="min-width:90px">${esc(r.action)}</strong><span class="muted">${esc(r.detail)}</span></div>`).join('')||'<p class="sub">Aucune action enregistrée.</p>'}</div></section></div>`;}
+function settingsGeneral(){return `<div class="settings-grid"><div class="stack"><section class="panel"><div class="panel-head"><h2>Apparence & préférences</h2>${icon('sun')}</div><div class="panel-body"><div class="setting-row"><div><h3>Thème de l’interface</h3><p>Le même soin, de jour comme de nuit.</p></div><div class="theme-choice"><button data-theme="dark" class="${S.settings.theme==='dark'?'active':''}">${icon('moon')} Sombre</button><button data-theme="light" class="${S.settings.theme==='light'?'active':''}">${icon('sun')} Clair</button></div></div><div class="setting-row"><div><h3>Navigation compacte</h3><p>Une barre latérale discrète, plus d’espace.</p></div><button class="toggle ${S.settings.collapsed?'on':''}" data-action="collapse" aria-label="Navigation compacte" aria-pressed="${!!S.settings.collapsed}"></button></div><div class="setting-row"><div><h3>Nom de votre espace</h3><p>Affiché dans la barre latérale.</p></div><button data-action="rename-space">${icon('edit')} Modifier</button></div><div class="setting-row"><div><h3>Sauvegarde à la fermeture</h3><p>Copie complète dans le dossier sauvegardes/.</p></div><button class="toggle ${S.settings.auto_backup?'on':''}" data-action="auto-backup" aria-label="Sauvegarde à la fermeture" aria-pressed="${!!S.settings.auto_backup}"></button></div><div class="setting-row"><div><h3>Sauvegarde hebdomadaire</h3><p>Copie de data.db au premier lancement de la semaine ; deux fichiers maximum dans auto-save/.</p></div><button class="toggle ${S.settings.weekly_auto_save?'on':''}" data-action="weekly-auto-save" aria-label="Sauvegarde hebdomadaire" aria-pressed="${!!S.settings.weekly_auto_save}"></button></div><div class="setting-row"><div><h3>Multitâche</h3><p>Personnalisez le flou d’arrière-plan, le déplacement et la fermeture des menus.</p></div><button data-multitask-open>Régler le multitâche</button></div></div></section><section class="panel"><div class="panel-head"><h2>Ordre de navigation</h2>${icon('panel')}</div><div class="panel-body"><p class="sub">Déplacez les pages avec les flèches. Vos nouvelles SCI apparaissent automatiquement.</p><div class="order-item locked">${icon('grid')} Tableau de bord <span style="margin-left:auto">${icon('lock')}</span></div>${navOrder().map((id,i,a)=>`<div class="order-item">${navIcon(id)}${esc(navName(id))}<div class="actions"><button data-move="${id}" data-dir="-1" ${!i?'disabled':''} title="Monter">${icon('up')}</button><button data-move="${id}" data-dir="1" ${i===a.length-1?'disabled':''} title="Descendre">${icon('down')}</button></div></div>`).join('')}<div class="order-item locked">${icon('settings')} Paramètres <span style="margin-left:auto">${icon('lock')}</span></div><p class="compact-note">Tableau de bord reste en premier, Paramètres en dernier. Quitter est une action distincte.</p></div></section></div><div class="stack"><section class="panel"><div class="panel-head"><h2>Vos données vous appartiennent</h2>${icon('database')}</div><div class="panel-body"><div class="setting-row"><div><h3>Importer des données</h3><p>JSON Dominis, CSV ou Excel (.xlsx) de mouvements multi-SCI.<br>Aperçu et destinations avant validation.</p></div><button data-action="import">${icon('upload')} Importer</button></div><div class="setting-row"><div><h3>Exporter une sélection</h3><p>Choisissez les SCI, les données et le format.</p></div><button data-action="export">${icon('download')} Exporter</button></div><div class="setting-row"><div><h3>Sauvegarde complète</h3><p>Toutes les SCI, pièces jointes et préférences.<br>${S.settings.last_backup?'Dernière : '+new Date(S.settings.last_backup).toLocaleString('fr-FR'):'Aucune sauvegarde manuelle enregistrée.'}</p></div><button class="primary" data-action="backup">${icon('database')} Sauvegarder</button></div><div class="setting-row"><div><h3>Restaurer une sauvegarde</h3><p>Remplace l’ensemble de l’espace. Une copie<br>de sécurité est créée avant restauration.</p></div><button data-action="restore">${icon('clock')} Restaurer</button></div></div></section><section class="panel"><div class="panel-head"><h2>Stockage & confidentialité</h2>${icon('lock')}</div><div class="panel-body stack"><div class="row between"><span class="sub">Base locale</span><span class="pill green"><span class="status-dot"></span>data.db · ${num(S.db_size/1024/1024)} Mo</span></div><p class="sub">Aucune télémétrie. La gestion de vos données fonctionne hors ligne. Seule la vérification des versions contacte GitHub, sans transmettre vos données patrimoniales. Documents, réglages et historique sont stockés dans SQLite. La base n’est pas chiffrée : protégez votre session et vos sauvegardes.</p><p class="sub">Usage local, mono-utilisateur. Ne placez pas une base ouverte sur un partage réseau ou dans une synchronisation cloud.</p>${S.preview?'<div class="notice" style="margin:0">Aperçu hébergé : utilisez des données fictives uniquement. Le téléchargement et les lanceurs sont destinés à l’usage local.</div>':''}</div></section>${S.settings.demo?`<section class="panel"><div class="panel-body"><h3>Données de démonstration</h3><p class="sub" style="margin:8px 0 14px">Efface toutes les données de cet espace démo, y compris vos ajouts. Sauvegardez-les avant de repartir d’un espace vierge.</p><button class="danger" data-action="reset-demo">${icon('trash')} Vider l’espace de démonstration</button></div></section>`:''}</div><section class="panel" style="grid-column:1/-1"><div class="panel-head"><h2>Journal d’activité</h2><span class="sub">80 dernières actions</span></div><div class="panel-body audit-list">${S.audit.map(r=>`<div class="audit-line"><time>${esc(new Date(r.at).toLocaleString('fr-FR'))}</time><strong style="min-width:90px">${esc(r.action)}</strong><span class="muted">${esc(r.detail)}</span></div>`).join('')||'<p class="sub">Aucune action enregistrée.</p>'}</div></section></div>`;}
 /* ---------------------------------------------------------------------------
    Tri des tableaux : un clic sur l'en-tête d'une colonne trie dans cet ordre
    croissant → décroissant → ordre d'origine. Le tri ne déplace que les lignes
@@ -12783,7 +12958,7 @@ function sortBodyRows(table){
     return body?Array.prototype.slice.call(body.rows):[];
 }
 function prepareSortTable(table){
-    if(!table||table.dataset.sortReady==='1')return false;
+    if(!table||table.dataset.noSort==='1'||table.dataset.sortReady==='1')return false;
     if(table.closest('.doc-preview-sheet,.doc-preview-stage,.doc-preview-viewport'))return false;
 
     let head=table.tHead,body=table.tBodies[0];
@@ -12924,6 +13099,7 @@ function tableSortInit(root){
     try{
         let tables=Array.prototype.slice.call((root||document).querySelectorAll('#main table, #modal table, #listing table'));
         tables.forEach(prepareSortTable);
+        tables.filter(t=>t.dataset.noSort!=='1').forEach(tableWidthsInit);
         tables.forEach(table=>{
             if(table.dataset.sortReady!=='1')return;
             let state=TABLE_SORTS.get(sortKeyOfTable(table));
@@ -12963,7 +13139,7 @@ function tableSortWatch(){
 }
 document.addEventListener('click',ev=>{
     let th=ev.target&&ev.target.closest?ev.target.closest('th.sortable'):null;
-    if(!th)return;
+    if(!th||ev.target.closest('.column-resize')||Date.now()<columnResizeSuppressUntil)return;
     if(Date.now()<folderDragSuppressUntil)return;
     ev.preventDefault();
     tableSortCycle(th);
@@ -12971,13 +13147,13 @@ document.addEventListener('click',ev=>{
 document.addEventListener('keydown',ev=>{
     if(ev.key!=='Enter'&&ev.key!==' '&&ev.key!=='Spacebar')return;
     let th=ev.target&&ev.target.closest?ev.target.closest('th.sortable'):null;
-    if(!th)return;
+    if(!th||ev.target.closest('.column-resize'))return;
     ev.preventDefault();
     tableSortCycle(th);
 },true);
 document.addEventListener('pointerdown',ev=>{
     let th=ev.target&&ev.target.closest?ev.target.closest('th.sortable'):null;
-    if(!th||ev.button>0)return;
+    if(!th||ev.button>0||ev.target.closest('.column-resize'))return;
     ev.preventDefault();                                  // pas de sélection de texte au double-clic (macOS)
 },true);
 function render(){if(!['dashboard','settings',...Object.keys(navs),...S.scis.map(s=>s.id)].includes(page))page='dashboard';yearSelectSeq=0;renderShell();let content='';if(page==='dashboard'){content=head('Votre patrimoine, en perspective.','L’essentiel de vos sociétés, réuni au même endroit.',yearSelect()+exportBtn()+`<button class="primary" data-action="new-sci">${icon('plus')} Nouvelle SCI</button>`,'Tableau de bord général')+(S.scis.length?dashboard():empty('Bienvenue dans votre espace patrimonial','Créez votre première SCI. Son espace de gestion apparaîtra automatiquement dans la navigation.',`<button class="primary" data-action="new-sci">${icon('plus')} Créer ma première SCI</button>`));}
@@ -12989,13 +13165,158 @@ function afterRenderTables(){tableSortWatch();tableSortInit();}
 function visibleCount(kind,id){let list=filtered(kind,id);if(kind==='documents')list=list.filter(inDocFolder);return list.length}
 function updateCount(){let el=$('#list-count');if(el){let k=currentListKind();el.textContent=visibleCount(k,currentSCI()?.id)+' éléments';}}
 function renderListing(){let k=navs[page]?{treasury:'entries',agenda:'tasks',documents:'documents'}[page]:tab;if($('#listing')){$('#listing').innerHTML=listing(k,currentSCI()?.id);updateCount();tableSortInit();}}
-function openModal(title,body,footer='',wide=false){previousFocus=document.activeElement;modalDirty=false;$('#modal').innerHTML=`<div class="modal-backdrop"><div class="modal ${wide?'wide':''}" role="dialog" aria-modal="true" aria-label="${esc(title)}"><div class="modal-head"><h2>${esc(title)}</h2><button class="ghost icon-only" data-action="close-modal" aria-label="Fermer">${icon('close')}</button></div><div class="modal-content">${body}<div id="modal-error"></div></div>${footer?`<div class="modal-footer">${footer}</div>`:''}</div></div>`;setTimeout(()=>$('#modal input:not([type=hidden]),#modal select,#modal button')?.focus(),30);tableSortInit();}
+function openModal(title,body,footer='',wide=false){previousFocus=document.activeElement;modalDirty=false;$('#modal').innerHTML=`<div class="modal-backdrop"><div class="modal ${wide?'wide':''}" role="dialog" aria-modal="true" aria-label="${esc(title)}"><div class="modal-head"><h2>${esc(title)}</h2><button class="ghost icon-only" data-action="close-modal" aria-label="Fermer">${icon('close')}</button></div><div class="modal-content">${body}<div id="modal-error"></div></div>${footer?`<div class="modal-footer">${footer}</div>`:''}</div></div>`;setTimeout(()=>$('#modal input:not([type=hidden]),#modal select,#modal button')?.focus(),30);tableSortInit();applyMultitask();}
 function closeModal(force=false){if(updateInstalling&&!force)return;if(!force&&$('#update-offer')){updateInfo.dismissed=true;api('update/later',{}).catch(()=>{});}if(!force&&modalDirty&&!confirm('Abandonner les modifications non enregistrées ?'))return;++docPreviewRequest;if(docPreviewFrame){cancelAnimationFrame(docPreviewFrame);docPreviewFrame=0;}$('#modal').innerHTML='';modalDirty=false;previousFocus?.focus?.();}
 function modalError(e){let el=$('#modal-error');if(el){el.className='error';el.textContent=e.message||e;}else notify(e.message||e,true);}
 function field(name,label,type='text',value='',opts=null,required=false,full=false){return `<div class="field ${full?'full':''}"><label for="f-${name}">${esc(label)}${required?' <span class="gold">*</span>':''}</label>${type==='select'?`<select id="f-${name}" name="${name}" ${required?'required':''}>${(opts||[]).map(o=>{let v=Array.isArray(o)?o[0]:o,t=Array.isArray(o)?o[1]:o;return `<option value="${esc(v)}" ${String(v)===String(value)?'selected':''}>${esc(t)}</option>`}).join('')}</select>`:type==='textarea'?`<textarea id="f-${name}" name="${name}">${esc(value)}</textarea>`:`<input id="f-${name}" name="${name}" type="${type}" value="${type==='file'?'':esc(value)}" ${required?'required':''} ${type==='number'?'step="0.01" '+(['opening','cca'].includes(name)?'':'min="0"'):''} ${type==='file'?'accept=".pdf,.jpg,.jpeg,.png,.webp,.docx,.xlsx,.txt,.csv"':''} ${name==='siren'?'pattern="[0-9]{9}" maxlength="9"':''} ${name==='name'?'maxlength="160"':''}>`}</div>`;}
 function renderReminderDateInputs(count,dates,defaultDate){
     return Array.from({length:count},(_,i)=>`<div class="field"><label for="f-reminder-date-${i}">${count===1?'Date du rappel':'Date du rappel n°'+(i+1)} <span class="gold">*</span></label><input id="f-reminder-date-${i}" name="reminder_date_${i}" type="date" value="${esc(dates[i]||defaultDate||today())}" required></div>`).join('');
 }
+// Présentation et préparation des mouvements : aucune écriture avant validation.
+function movementPreview(id){
+    let r=rec(id);if(!r||r.kind!=='entries')return;
+    let info=[['Société',sciname(r.sci)],['Date',date(r.date)],['Sens',r.direction],['Montant',money(r.amount,2)],
+        ['Catégorie',r.category||'Non renseignée'],['Bien',label(rec(r.property_id))],
+        ['Appel de loyer',label(rec(r.call_id))],['Notes',r.notes||'Aucune note']];
+    if(r.recurrence_group)info.push(['Récurrence','Ce mouvement appartient à une série.']);
+    if(r.source_document)info.push(['Document source',label(rec(r.source_document))]);
+    openModal('Détail du mouvement',`<h3 style="margin-bottom:22px">${esc(r.label)}</h3><div class="info-grid">${info.map(([k,v])=>`<div class="info-item"><label>${esc(k)}</label><span style="white-space:pre-wrap">${esc(v)}</span></div>`).join('')}</div>`,
+        `<button id="movement-edit">Modifier</button><button id="movement-copy">Dupliquer</button><button id="movement-repeat">Récurrence</button><button class="primary" data-action="close-modal">Fermer</button>`);
+    $('#movement-edit').onclick=()=>editForm('entries',r);
+    $('#movement-copy').onclick=()=>{
+        let copy={...r,date:''};delete copy.id;delete copy.kind;delete copy.import_batch;delete copy.recurrence_group;
+        editForm('entries',null,copy);$('#edit-form').copyDefaults=copy;
+    };
+    $('#movement-repeat').onclick=()=>recurrenceModal(r);
+}
+function recurrenceModal(r){
+    const key='recurrence-'+crypto.randomUUID();
+    openModal('Récurrence du mouvement',`<p class="notice">Préparez une série d’opérations datées. Les dates futures seront projetées dans la trésorerie. Le rattachement à un appel de loyer n’est pas recopié. En fin de mois, le dernier jour disponible est utilisé.</p><div class="form-grid">${field('repeat-start','Première date','date','',null,true)}${field('repeat-count','Nombre d’occurrences (1 à 120)','number',12,null,true)}${field('repeat-unit','Fréquence','select','month',[['week','Semaines'],['month','Mois'],['year','Années']])}${field('repeat-interval','Tous les… (1 à 24)','number',1,null,true)}</div><div id="repeat-preview"></div>`,
+        `<button data-action="close-modal">Annuler</button><button id="repeat-check">Prévisualiser</button><button class="primary" id="repeat-save" disabled>Confirmer la série</button>`,true);
+    let prepared=null;
+    $('#modal .modal-content').addEventListener('input',()=>{prepared=null;$('#repeat-save').disabled=true;$('#repeat-preview').innerHTML='';});
+    $('#modal .modal-content').addEventListener('change',()=>{prepared=null;$('#repeat-save').disabled=true;});
+    $('#repeat-check').onclick=async()=>{try{
+        const params={id:r.id,start:$('#f-repeat-start').value,count:Number($('#f-repeat-count').value),unit:$('#f-repeat-unit').value,interval:Number($('#f-repeat-interval').value)};
+        let result=await (await api('recurrence',params)).json();prepared=params;
+        $('#repeat-preview').innerHTML='<h3 style="margin:18px 0">'+result.records.length+' opérations à créer</h3><div class="table-wrap"><table><thead><tr><th>Date</th><th>Opération</th><th>Montant</th></tr></thead><tbody>'+result.records.map(d=>`<tr><td class="date-cell">${date(d.date)}</td><td>${esc(d.label)}</td><td>${money(d.amount,2)}</td></tr>`).join('')+'</tbody></table></div>';
+        $('#repeat-save').disabled=false;
+    }catch(e){modalError(e);}};
+    $('#repeat-save').onclick=async()=>{if(!prepared)return;let btn=$('#repeat-save');btn.disabled=true;try{
+        let result=await (await api('recurrence',{...prepared,key,confirm:true})).json();closeModal(true);await refresh();notify(result.count+' opérations créées.');
+    }catch(e){modalError(e);btn.disabled=false;}};
+}
+function multitaskPrefs(){return {blur:true,drag:false,outside:false,...S.settings.multitask};}
+function applyMultitask(){
+    let prefs=multitaskPrefs(),back=$('#modal .modal-backdrop'),head=$('#modal .modal-head');
+    if(back)back.style.backdropFilter=prefs.blur?'blur(6px)':'none';
+    if(head)head.classList.toggle('movable',prefs.drag);
+}
+function multitaskModal(){
+    let p=multitaskPrefs();
+    openModal('Régler le multitâche',[
+        ['blur','Flou d’arrière-plan','Atténuer visuellement le contenu derrière les menus.'],
+        ['drag','Déplacer les menus','Déplacer un menu en faisant glisser sa barre de titre.'],
+        ['outside','Fermer en cliquant à l’extérieur','Les modifications non enregistrées demandent toujours confirmation.']
+    ].map(([key,title,desc])=>`<div class="setting-row"><div><h3>${title}</h3><p>${desc}</p></div><button type="button" class="toggle ${p[key]?'on':''}" role="switch" aria-checked="${p[key]}" aria-label="${title}" data-multitask="${key}"></button></div>`).join(''),
+    '<button data-action="close-modal">Annuler</button><button class="primary" id="multitask-save">Enregistrer</button>');
+    $$('[data-multitask]').forEach(btn=>btn.onclick=()=>{let key=btn.dataset.multitask;p[key]=!p[key];btn.classList.toggle('on',p[key]);btn.setAttribute('aria-checked',String(p[key]));modalDirty=true;});
+    $('#multitask-save').onclick=async()=>{try{await setPref({multitask:p});closeModal(true);notify('Préférences multitâche enregistrées.');}catch(e){modalError(e);}};
+}
+document.addEventListener('click',ev=>{
+    if(ev.target.classList?.contains('modal-backdrop')&&multitaskPrefs().outside)closeModal();
+    if(ev.target.closest?.('[data-multitask-open]'))multitaskModal();
+    const row=ev.target.closest?.('[data-movement-open]');
+    if(row&&!ev.target.closest('button,a,input,select,textarea')&&Date.now()>columnResizeSuppressUntil)movementPreview(row.dataset.movementOpen);
+});
+document.addEventListener('keydown',ev=>{
+    if((ev.key==='Enter'||ev.key===' ')&&ev.target.matches('[data-movement-open]')){ev.preventDefault();movementPreview(ev.target.dataset.movementOpen);}
+});
+document.addEventListener('pointerdown',ev=>{
+    let head=ev.target.closest?.('.modal-head');
+    if(!head||!multitaskPrefs().drag||ev.button!==0||ev.target.closest('button,input,a'))return;
+    let modal=head.closest('.modal'),rect=modal.getBoundingClientRect(),dx=ev.clientX-rect.left,dy=ev.clientY-rect.top;
+    ev.preventDefault();head.setPointerCapture(ev.pointerId);
+    modal.style.animation='none';modal.style.position='fixed';modal.style.margin='0';modal.style.width=rect.width+'px';
+    const move=e=>{modal.style.left=Math.max(0,Math.min(innerWidth-rect.width,e.clientX-dx))+'px';modal.style.top=Math.max(0,Math.min(innerHeight-rect.height,e.clientY-dy))+'px';};
+    move(ev);head.addEventListener('pointermove',move);
+    const end=()=>{head.removeEventListener('pointermove',move);head.removeEventListener('pointerup',end);head.removeEventListener('pointercancel',end);};
+    head.addEventListener('pointerup',end);head.addEventListener('pointercancel',end);
+});
+let columnResizeSuppressUntil=0;
+document.addEventListener('click',async ev=>{
+    let btn=ev.target.closest?.('[data-width-reset]');if(!btn)return;
+    try{let all={...(S.settings.table_widths||{})};delete all[btn.dataset.widthReset];await setPref({table_widths:all});refreshTableViewUi(btn.dataset.widthReset);notify('Largeurs automatiques rétablies.');}catch(e){modalError(e);}
+});
+function columnIdentity(th,i){return th.dataset.sortColumn||sortCellText(th)||'column-'+i;}
+function tableWidthsInit(table){
+    if(table.closest('.doc-preview-viewport')||!table.tHead)return;
+    const heads=Array.from(table.tHead.rows[0]?.cells||[]);
+    if(!heads.length||heads.some(h=>h.colSpan>1))return;
+    let key=sortKeyOfTable(table),saved=S.settings.table_widths?.[key]||{};
+    heads.forEach((th,i)=>{
+        const cid=columnIdentity(th,i),isDate=['date','due','start','end','bail'].includes(cid)||/date|échéance|exigibilité/i.test(sortCellText(th));
+        if(isDate)Array.from(table.rows).forEach(r=>r.cells[i]?.classList.add('date-cell'));
+        if(th.querySelector('button')||th.querySelector('.column-resize'))return;
+        let handle=document.createElement('span');handle.className='column-resize';handle.dataset.sortIgnore='1';handle.title='Glisser pour régler la largeur';handle.setAttribute('role','separator');handle.setAttribute('aria-orientation','vertical');handle.setAttribute('aria-label','Largeur de '+sortCellText(th));handle.tabIndex=0;
+        th.appendChild(handle);
+        const persist=async widths=>{try{let all={...(S.settings.table_widths||{})};all[key]=widths;await setPref({table_widths:all});}catch(e){notify(e.message,true);}};
+        handle.addEventListener('click',e=>{e.preventDefault();e.stopPropagation();});
+        handle.addEventListener('pointerdown',e=>{
+            if(e.button!==0)return;e.preventDefault();e.stopPropagation();
+            const widths={};heads.forEach((h,j)=>widths[columnIdentity(h,j)]=Math.round(h.getBoundingClientRect().width));
+            let start=e.clientX,base=widths[cid];handle.setPointerCapture(e.pointerId);
+            const move=e=>{widths[cid]=Math.max(isDate?112:64,Math.min(1600,Math.round(base+e.clientX-start)));applyTableWidths(table,widths);};
+            const end=()=>{handle.removeEventListener('pointermove',move);handle.removeEventListener('pointerup',end);handle.removeEventListener('pointercancel',end);columnResizeSuppressUntil=Date.now()+300;persist(widths);};
+            handle.addEventListener('pointermove',move);handle.addEventListener('pointerup',end);handle.addEventListener('pointercancel',end);
+        });
+        handle.addEventListener('keydown',e=>{if(!['ArrowLeft','ArrowRight'].includes(e.key))return;e.preventDefault();e.stopPropagation();let widths={...(S.settings.table_widths?.[key]||{})};widths[cid]=Math.max(isDate?112:64,Math.min(1600,Math.round(th.getBoundingClientRect().width)+(e.key==='ArrowRight'?16:-16)));applyTableWidths(table,widths);persist(widths);});
+    });
+    if(Object.keys(saved).length)applyTableWidths(table,saved);
+}
+function applyTableWidths(table,widths){
+    let heads=Array.from(table.tHead.rows[0].cells),group=table.querySelector('colgroup[data-widths]');
+    if(!group){group=document.createElement('colgroup');group.dataset.widths='1';heads.forEach(()=>group.appendChild(document.createElement('col')));table.prepend(group);}
+    if(group.children.length!==heads.length){group.replaceChildren(...heads.map(()=>document.createElement('col')));}
+    let total=0;heads.forEach((th,i)=>{let width=Number(widths[columnIdentity(th,i)])||th.getBoundingClientRect().width||140;width=Math.max(th.classList.contains('date-cell')?112:64,Math.min(1600,width));group.children[i].style.width=width+'px';total+=width;});
+    table.style.tableLayout='fixed';table.style.width=total+'px';table.style.minWidth='0';
+}
+function isStatementDoc(r){return !!r&&sciDocFolders(r.sci).some(f=>f.id===resolveDocFolder(r)&&f.statement);}
+function statementButton(r){return isStatementDoc(r)?`<button type="button" data-statement="${esc(r.id)}">Ajouter le relevé</button>`:'';}
+document.addEventListener('click',ev=>{let btn=ev.target.closest?.('[data-statement]');if(btn){ev.preventDefault();ev.stopPropagation();statementSelect(btn.dataset.statement).catch(modalError);}});
+async function statementSelect(id){
+    let r=rec(id),p=await (await api('document-preview?id='+encodeURIComponent(id))).json();
+    let count=p.preview_type==='pdf'?p.pages:1;if(!count)throw Error('Nombre de pages illisible.');
+    openModal('Sélectionner les pages à ajouter',`<p class="notice">Le document original est conservé. Sélectionnez les pages du relevé à analyser (100 maximum). Les scans sans texte nécessitent une saisie manuelle.</p><div class="checks">${Array.from({length:Math.min(count,1000)},(_,i)=>`<label class="check"><input type="checkbox" name="statement-page" value="${i+1}">Page ${i+1}</label>`).join('')}</div><div id="statement-page-preview"></div>`,
+        '<button data-action="close-modal">Annuler</button><button id="statement-next" class="primary">Choisir la destination</button>',true);
+    $$('[name="statement-page"]').forEach(input=>input.onchange=()=>{if(p.preview_type==='pdf'&&input.checked)$('#statement-page-preview').innerHTML=`<iframe title="Page ${input.value} du relevé" style="width:100%;height:280px;border:0" src="${esc(docPreviewPdfUrl(p,Number(input.value)))}"></iframe>`;});
+    $('#statement-next').onclick=()=>{let pages=$$('[name="statement-page"]:checked').map(e=>Number(e.value));if(!pages.length||pages.length>100)return modalError(Error('Sélectionnez entre 1 et 100 pages.'));statementDestination(r,pages);};
+}
+function statementDestination(r,pages){
+    openModal('Destination du relevé',`<p class="sub">${pages.length} page(s) sélectionnée(s). Les mouvements bancaires vont dans la trésorerie ; les appels de loyers et les échéances demandent d’autres informations.</p><div class="form-grid">${field('statement-sci','Société','select',r.sci,S.scis.map(s=>[s.id,s.name]),true)}${field('statement-target','Ajouter dans','select','entries',[['entries','Trésorerie — mouvements bancaires']],true)}</div>`,
+        '<button data-action="close-modal">Annuler</button><button class="primary" id="statement-analyse">Analyser et vérifier</button>');
+    $('#statement-analyse').onclick=async()=>{let btn=$('#statement-analyse'),sid=$('#f-statement-sci').value;btn.disabled=true;try{let data=await (await api('statement-preview',{id:r.id,pages})).json();statementReview(r,sid,data);}catch(e){modalError(e);btn.disabled=false;}};
+}
+function statementReview(r,sid,data){
+    const categories=defaultEntryCategories();
+    let candidates=data.lines.filter(l=>!l.context),context=data.lines.filter(l=>l.context),key='statement-'+crypto.randomUUID();
+    const row=(d={})=>`<tr class="statement-review-row"><td><input type="checkbox" aria-label="Importer cette ligne" data-include></td><td><input type="date" aria-label="Date" data-field="date" value="${esc(d.date||'')}"></td><td><input aria-label="Libellé" data-field="label" value="${esc(d.label||'')}"></td><td><input type="number" min="0.01" step="0.01" aria-label="Montant" data-field="amount" value="${esc(d.amount??'')}"></td><td><select aria-label="Sens" data-field="direction"><option value="">À préciser</option>${['Recette','Dépense'].map(v=>`<option ${d.direction===v?'selected':''}>${v}</option>`).join('')}</select></td><td><select aria-label="Catégorie" data-field="category"><option value="">À choisir</option>${categories.map(v=>`<option>${esc(v)}</option>`).join('')}</select></td><td style="min-width:230px;white-space:normal"><strong>Page ${d.page||'—'}</strong><p>${esc(d.source||'Saisie manuelle')}</p><small class="gold">${esc((d.warnings||[]).join(' '))}</small></td></tr>`;
+    openModal('Vérifier les mouvements du relevé',`<p class="notice">Destination : <strong>${esc(sciname(sid))} · Trésorerie</strong>. Aucune ligne n’est cochée automatiquement. Vérifiez les dates, montants et le sens, choisissez les catégories, puis cochez uniquement les mouvements à importer. Les soldes et totaux ne sont pas des mouvements.</p>${data.warnings.map(w=>`<div class="error">${esc(w)}</div>`).join('')}<div class="table-wrap"><table id="statement-review" data-no-sort="1"><thead><tr><th>Importer</th><th>Date</th><th>Libellé</th><th>Montant</th><th>Sens</th><th>Catégorie</th><th>Source / points à vérifier</th></tr></thead><tbody>${candidates.map(row).join('')}</tbody></table></div><button type="button" id="statement-add" style="margin-top:12px">Ajouter une ligne manuellement</button><details style="margin-top:15px"><summary>Texte complémentaire non converti (${context.length} lignes)</summary><pre style="white-space:pre-wrap">${esc(context.map(l=>'Page '+l.page+' · '+l.source).join('\n'))}</pre></details><div id="statement-summary" class="notice"></div><label class="check"><input id="statement-confirmed" type="checkbox">J’ai comparé les lignes sélectionnées au relevé et vérifié les éventuels doublons.</label>`,
+        '<button data-action="close-modal">Annuler</button><button class="primary" id="statement-save">Confirmer et ajouter</button>',true);
+    $('#modal .modal').style.width='min(1400px,96vw)';
+    const collect=()=>$$('#statement-review tbody tr').filter(tr=>tr.querySelector('[data-include]').checked).map(tr=>Object.fromEntries(Array.from(tr.querySelectorAll('[data-field]')).map(el=>[el.dataset.field,el.value])));
+    const summary=()=>{let items=collect(),duplicates=items.filter(d=>rows('entries',sid).some(e=>e.date===d.date&&e.label===d.label&&Number(e.amount)===Number(d.amount)&&e.direction===d.direction));$('#statement-summary').textContent=items.length+' mouvement(s) sélectionné(s) · '+duplicates.length+' doublon(s) possible(s) avec la trésorerie existante.';$('#statement-confirmed').checked=false;};
+    $('#statement-review').addEventListener('input',summary);$('#statement-review').addEventListener('change',summary);summary();
+    $('#statement-add').onclick=()=>{$('#statement-review tbody').insertAdjacentHTML('beforeend',row());summary();modalDirty=true;};
+    $('#statement-save').onclick=async()=>{let btn=$('#statement-save');try{
+        if(!$('#statement-confirmed').checked)throw Error('Confirmez votre vérification avant l’ajout.');
+        let items=collect();if(!items.length)throw Error('Cochez au moins un mouvement.');
+        for(let d of items)if(!d.date||!d.label.trim()||!d.direction||!d.category||!Number.isFinite(Number(d.amount))||Number(d.amount)<=0)throw Error('Complétez la date, le libellé, le montant, le sens et la catégorie de chaque ligne sélectionnée.');
+        btn.disabled=true;let result=await (await api('statement-import',{id:r.id,sci:sid,destination:'entries',records:items,key,confirmed:true})).json();closeModal(true);await refresh();notify(result.already_saved?'Cette sélection de pages a déjà été importée.':result.count+' mouvements ajoutés dans '+sciname(sid)+'.');
+    }catch(e){modalError(e);btn.disabled=false;}};
+}
+function defaultEntryCategories(){return ['Loyers','Provisions de charges','Entretien','Travaux','Assurance','Taxe foncière','Frais de gestion','Intérêts','Emprunt (capital + intérêts)','Apport associé','Remboursement associé','Dépôt de garantie','Autre'];}
+
 function editForm(kind,r=null,defaults={}){let d={...(r||{}),...defaults}, id=r?.id||'',sid=d.sci||currentSCI()?.id||scope||S.scis[0]?.id;
 if(kind!=='sci'&&!S.scis.length){notify('Créez d’abord une SCI.');return editForm('sci');}
 if(kind==='tasks'){
@@ -13071,6 +13392,7 @@ if(kind==='tasks'){
         }
     }
 }
+if(form.copyDefaults)d={...form.copyDefaults,...d};
 let result=await (await api('save',{kind,id,sci:sid,data:d})).json();closeModal(true);await load();if(kind==='sci'&&!id)navigate(result.id);else render();notify('Enregistré dans data.db.');}catch(e){modalError(e);btn.disabled=false;}}
 function deletion(kind,id){let r=kind==='sci'?sci(id):rec(id);if(!r)return;let isSci=kind==='sci';openModal(isSci?'Supprimer cette société ?':'Supprimer cet élément ?',`<p>Vous allez supprimer <strong>${esc(label(r))}</strong>.</p><p class="sub" style="margin:12px 0">${isSci?'Tous les biens, baux, paiements, documents et autres données de cette SCI seront supprimés. Cette action est irréversible sans sauvegarde.':'Les éléments utilisés par un bail, un appel ou un paiement sont protégés contre la suppression.'}</p>${isSci?field('confirmation','Pour confirmer, saisissez le nom exact de la SCI','text','',null,true,true):''}`,`<button data-action="close-modal">Annuler</button><button class="danger" id="confirm-delete">${icon('trash')} Supprimer définitivement</button>`);$('#confirm-delete').onclick=async()=>{let btn=$('#confirm-delete');btn.disabled=true;try{await api('delete',{kind,id,confirmation:$('#f-confirmation')?.value});if(kind==='tasks')dismissMacNotification(id);closeModal(true);if(isSci)page='dashboard';await refresh();notify('Élément supprimé.');}catch(e){modalError(e);btn.disabled=false;}};}
 function exportModal(){openModal('Exporter vos données',`<div class="notice">JSON : export réimportable, pièces jointes incluses. CSV : mouvements uniquement, destiné aux tableurs. Les réglages sont inclus uniquement dans la sauvegarde complète.</div><h3>1. Sociétés à inclure</h3><div class="checks">${S.scis.map(s=>`<label class="check"><input type="checkbox" name="export-sci" value="${s.id}" ${!currentSCI()||s.id===page?'checked':''}>${esc(s.name)}</label>`).join('')}</div><h3>2. Données à exporter</h3><div class="checks" id="export-kinds">${Object.entries(kindNames).map(([k,n])=>`<label class="check"><input type="checkbox" name="export-kind" value="${k}" checked>${n}</label>`).join('')}</div>${field('format','3. Format','select','json',[['json','JSON Dominis — réimportable'],['csv','CSV — mouvements de trésorerie']])}<p class="compact-note">Les fiches SCI sont toujours incluses en JSON. Les dépendances sont ajoutées automatiquement (ex. paiements → appels → baux → biens). Toutes les dates sont exportées, sans filtre d’exercice.</p><div id="export-summary" class="notice" style="margin:15px 0 0"></div>`,`<button data-action="close-modal">Annuler</button><button class="primary" id="do-export">${icon('download')} Télécharger l’export</button>`,true);
